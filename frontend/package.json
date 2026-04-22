@@ -1,0 +1,45 @@
+{
+  "name": "building-change-frontend",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:local": "VITE_FRONTEND_MODE=local vite",
+    "dev:remote": "VITE_FRONTEND_MODE=remote vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "pages:deploy": "wrangler pages deploy dist"
+  },
+  "dependencies": {
+    "@gradio/client": "^1.9.0",
+    "@radix-ui/react-dialog": "^1.1.15",
+    "@tanstack/react-query": "^5.62.0",
+    "@turf/bbox": "^7.3.4",
+    "clsx": "^2.1.1",
+    "jszip": "^3.10.1",
+    "lucide-react": "^0.453.0",
+    "maplibre-gl": "^5.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "shpjs": "^6.2.0",
+    "tailwind-merge": "^2.5.5",
+    "togeojson": "^0.16.0",
+    "wkt": "^0.1.1",
+    "zod": "^3.23.8",
+    "zustand": "^5.0.1"
+  },
+  "devDependencies": {
+    "@types/geojson": "^7946.0.16",
+    "@types/node": "^22.10.1",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react-swc": "^3.7.1",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.14",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10",
+    "wrangler": "^4.80.0"
+  }
+}
