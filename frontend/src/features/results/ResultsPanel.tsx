@@ -56,10 +56,10 @@ function KeyValueRow({ label, value }: { label: string; value: string }) {
 
 function MetricTile({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-md border border-border bg-card px-3 py-3">
-      <p className="text-caption text-muted-foreground">{label}</p>
-      <p className="mt-1 text-heading-sm font-semibold text-foreground">{value}</p>
-    </div>
+    <article className="rounded-md border border-border bg-card px-3 py-3">
+      <dt className="text-caption text-muted-foreground">{label}</dt>
+      <dd className="mt-1 text-heading-sm font-semibold text-foreground">{value}</dd>
+    </article>
   );
 }
 
@@ -159,8 +159,11 @@ export function ResultsPanel({ backendUrl }: { backendUrl: string }) {
   const validationTone = validation?.valid ? "emerald" : validation?.blocking_errors.length ? "red" : "amber";
 
   return (
-    <aside className="overflow-hidden rounded-lg border border-border bg-card shadow-panel xl:h-[calc(100vh-146px)] xl:overflow-y-auto">
-      <div className="border-b border-border bg-surface px-4 py-4">
+    <aside 
+      className="overflow-hidden rounded-lg border border-border bg-card shadow-panel xl:h-[calc(100vh-146px)] xl:overflow-y-auto"
+      aria-label={t("results.inspector")}
+    >
+      <header className="border-b border-border bg-surface px-4 py-4">
         <div className="flex items-start justify-between gap-3">
           <div>
             <h2 className="text-sm font-semibold tracking-tight text-foreground">{t("results.inspector")}</h2>
@@ -168,11 +171,15 @@ export function ResultsPanel({ backendUrl }: { backendUrl: string }) {
               {t("results.inspector_description")}
             </p>
           </div>
-          <Badge className="border border-border bg-card text-foreground">
+          <Badge 
+            className="border border-border bg-card text-foreground"
+            role="status"
+            aria-label={`Status: ${result?.success ? t("badge.results") : isRunning ? t("badge.running") : t("badge.setup")}`}
+          >
             {result?.success ? t("badge.results") : isRunning ? t("badge.running") : t("badge.setup")}
           </Badge>
         </div>
-      </div>
+      </header>
 
       <div className="space-y-5 p-4">
           {(isRunning || runProgress.phase !== "idle") && <RunProgressPanel progress={runProgress} />}
@@ -191,6 +198,8 @@ export function ResultsPanel({ backendUrl }: { backendUrl: string }) {
               <InspectorSection title={t("results.validation")}>
                 {validation ? (
                   <div
+                    role="status"
+                    aria-live="polite"
                     className={cn(
                       "space-y-3 rounded-md border p-3",
                       validationTone === "emerald" && "border-emerald-300/60 bg-emerald-100/70 dark:border-emerald-500/40 dark:bg-emerald-500/10",
@@ -200,13 +209,19 @@ export function ResultsPanel({ backendUrl }: { backendUrl: string }) {
                   >
                     <div className="flex items-start gap-2">
                       {validation.valid ? (
-                        <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-700" />
+                        <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-700" aria-hidden="true" />
                       ) : (
-                        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
+                        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" aria-hidden="true" />
                       )}
                       <div className="text-sm">
                         <p className="font-medium text-foreground">
-                          {validation.valid ? t("status.ready_to_run") : validation.blocking_errors.length ? t("status.validation_blocked") : t("status.needs_review")}
+                          {validation.valid ? (
+                            <span>✓ {t("status.ready_to_run")}</span>
+                          ) : validation.blocking_errors.length ? (
+                            <span>✕ {t("status.validation_blocked")}</span>
+                          ) : (
+                            <span>⚠ {t("status.needs_review")}</span>
+                          )}
                         </p>
                         <p className="mt-1 text-muted-foreground">
                           {formatNumber(validation.estimated_total_tiles)} tiles across both releases ·{" "}
@@ -240,8 +255,13 @@ export function ResultsPanel({ backendUrl }: { backendUrl: string }) {
             </>
           ) : !result.success || !result.summary ? (
             <InspectorSection title={t("section.run_error")}>
-              <div className="rounded-md border border-red-300/60 bg-red-100/70 p-3 text-sm text-red-800 dark:border-red-500/40 dark:bg-red-500/10 dark:text-red-200">
-                {result.error_message ?? t("error.incomplete_response")}
+              <div 
+                role="alert" 
+                aria-live="assertive"
+                className="rounded-md border border-red-300/60 bg-red-100/70 p-3 text-sm text-red-800 dark:border-red-500/40 dark:bg-red-500/10 dark:text-red-200"
+              >
+                <p className="font-medium">✕ {t("error.run_failed")}</p>
+                <p className="mt-1">{result.error_message ?? t("error.incomplete_response")}</p>
               </div>
             </InspectorSection>
           ) : (
@@ -280,6 +300,8 @@ export function ResultsPanel({ backendUrl }: { backendUrl: string }) {
                             key={item.key}
                             type="button"
                             onClick={() => setSelectedPreviewKey(item.key)}
+                            aria-label={`${t("results.preview_images")}: ${item.label}`}
+                            aria-current={selectedPreview?.key === item.key ? "page" : undefined}
                             className={cn(
                               "rounded-md border px-2.5 py-1.5 text-xs font-medium transition-colors",
                               selectedPreview?.key === item.key
@@ -349,18 +371,20 @@ export function ResultsPanel({ backendUrl }: { backendUrl: string }) {
                     <button
                       type="button"
                       onClick={() => setShowDiagnostics((current) => !current)}
-                      className="flex w-full items-center justify-between rounded-md border border-border bg-card px-3 py-2 text-sm"
+                      aria-expanded={showDiagnostics}
+                      aria-controls="diagnostics-panel"
+                      className="flex w-full items-center justify-between rounded-md border border-border bg-card px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     >
                       <span className="text-muted-foreground">{t("section.diagnostics_description")}</span>
-                      <ChevronDown className={cn("h-4 w-4 text-muted-foreground transition-transform", showDiagnostics ? "rotate-180" : "")} />
+                      <ChevronDown className={cn("h-4 w-4 text-muted-foreground transition-transform", showDiagnostics ? "rotate-180" : "")} aria-hidden="true" />
                     </button>
                     {showDiagnostics ? (
-                      <div className="space-y-2 rounded-md border border-border bg-surface p-3">
+                      <div id="diagnostics-panel" className="space-y-2 rounded-md border border-border bg-surface p-3">
                         {Object.entries(result.diagnostics.stage_seconds).map(([stage, seconds]) => (
                           <KeyValueRow key={stage} label={stage} value={`${seconds.toFixed(2)}s`} />
                         ))}
                         {result.diagnostics.warnings?.map((warning) => (
-                          <p key={warning} className="text-sm text-amber-900 dark:text-amber-100">
+                          <p key={warning} className="text-sm text-amber-900 dark:text-amber-100" role="alert">
                             {warning}
                           </p>
                         ))}

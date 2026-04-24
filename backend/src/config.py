@@ -120,6 +120,8 @@ class Settings(BaseModel):
         outputs_dir.mkdir(parents=True, exist_ok=True)
         temporal_dir = self.runtime_cache_dir / "temporal_projects"
         temporal_dir.mkdir(parents=True, exist_ok=True)
+        wayback_mosaics_dir = self.runtime_cache_dir / "wayback_mosaics"
+        wayback_mosaics_dir.mkdir(parents=True, exist_ok=True)
         if not self.gradio_allowed_paths:
             self.gradio_allowed_paths = (outputs_dir, temporal_dir)
         configured_spaces = self.remote_segmentation_spaces or (self.remote_segmentation_space,)
@@ -134,6 +136,10 @@ class Settings(BaseModel):
     @property
     def temporal_projects_dir(self) -> Path:
         return self.runtime_cache_dir / "temporal_projects"
+
+    @property
+    def wayback_mosaic_cache_dir(self) -> Path:
+        return self.runtime_cache_dir / "wayback_mosaics"
 
     def get_mode_limits(self, mode: ModeName) -> ModeLimits:
         return self.preview_limits if mode == "fast_preview" else self.full_limits

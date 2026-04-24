@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+import json
 
 import geopandas as gpd
 from shapely.geometry import LineString, MultiPolygon, Polygon, shape
@@ -8,17 +9,21 @@ from shapely.ops import unary_union
 
 from src.config import Settings
 from src.domain.cache import save_cached_response
-from src.schemas import PreviewImages, RunResponse, SummaryStats, TemporalOverrideRequest, TemporalProject
+from src.execution_profiles import PipelineExecutionConfig
+from src.schemas import PreviewImages, RunRequest, RunResponse, SummaryStats, TemporalMilestone, TemporalOverrideRequest, TemporalProject
 from src.domain.vectorize import build_temporal_growth_blocks, build_temporal_growth_envelope
+from src.services.releases import list_releases
 from src.services.temporal_projects import (
     _reference_imagery_from_pair_response,
     get_temporal_project,
     list_temporal_projects,
     import_temporal_override,
+    resolve_temporal_project_execution_config,
     run_temporal_project,
     save_temporal_project,
     validate_temporal_project,
 )
+from src.services.validation import validate_request
 from src.domain.wayback import WaybackRelease
 
 
@@ -73,6 +78,92 @@ def _sample_project(project_id: str = "temporal-demo") -> TemporalProject:
         created_at="2026-04-17T00:00:00Z",
         updated_at="2026-04-17T00:00:00Z",
     )
+
+
+def _bandon_config() -> PipelineExecutionConfig:
+    return PipelineExecutionConfig(model_backend="bandon_mps")
+
+
+def _bandon_pair_response(
+    settings: Settings,
+    request: RunRequest,
+    *,
+    releases: list[WaybackRelease],
+    geojson: dict,
+) -> RunResponse:
+    validation, prepared = validate_request(
+        request,
+        releases=releases,
+        settings=settings,
+        remote_patch_budget_enabled=False,
+        request_hash_context={
+            "model_backend": "bandon_mps",
+            "backend_mode": "bandon_mps",
+            "bandon_processing_version": 2,
+            "bandon_repo_dir": str(settings.bandon_repo_dir),
+            "bandon_env_prefix": str(settings.bandon_env_prefix),
+            "bandon_config_path": str(settings.bandon_config_path),
+            "bandon_checkpoint_path": str(settings.bandon_checkpoint_path),
+            "bandon_device": settings.bandon_device,
+            "bandon_allow_mps_fallback": settings.bandon_allow_mps_fallback,
+        },
+    )
+    assert prepared is not None
+    assert not validation.blocking_errors
+    return RunResponse(
+        success=True,
+        summary=SummaryStats(
+            request_hash=prepared.request_hash,
+            mode=request.mode,
+            model_backend="bandon_mps",
+            estimated_area_m2=1.0,
+            tile_count_t1=1,
+            tile_count_t2=1,
+            total_new_buildings=1,
+            total_building_blocks=1,
+            total_new_building_area_m2=1.0,
+            total_building_block_area_m2=1.0,
+        ),
+        new_buildings_geojson=geojson,
+        building_blocks_geojson=geojson,
+    )
+
+
+def _sample_releases_with_2027(settings: Settings) -> list[WaybackRelease]:
+    return [
+        WaybackRelease(
+            identifier="WB_2024_R01",
+            release_date=date(2024, 1, 1),
+            label="2024-01-01 | WB_2024_R01",
+            release_num=1,
+            tile_matrix_sets=(settings.tile_matrix_set,),
+            resource_url_template="https://example.com/2024",
+        ),
+        WaybackRelease(
+            identifier="WB_2025_R01",
+            release_date=date(2025, 1, 1),
+            label="2025-01-01 | WB_2025_R01",
+            release_num=2,
+            tile_matrix_sets=(settings.tile_matrix_set,),
+            resource_url_template="https://example.com/2025",
+        ),
+        WaybackRelease(
+            identifier="WB_2026_R01",
+            release_date=date(2026, 1, 1),
+            label="2026-01-01 | WB_2026_R01",
+            release_num=3,
+            tile_matrix_sets=(settings.tile_matrix_set,),
+            resource_url_template="https://example.com/2026",
+        ),
+        WaybackRelease(
+            identifier="WB_2027_R01",
+            release_date=date(2027, 1, 1),
+            label="2027-01-01 | WB_2027_R01",
+            release_num=4,
+            tile_matrix_sets=(settings.tile_matrix_set,),
+            resource_url_template="https://example.com/2027",
+        ),
+    ]
 
 
 def _feature_collection(coords: list[list[tuple[float, float]]]) -> dict:
@@ -168,6 +259,194 @@ def test_run_temporal_project_builds_monotonic_cumulative_union(monkeypatch, tmp
     final_envelope = _geometry(final_envelope_geojson)
     assert not _has_holes(final_envelope)
     assert final_cumulative.difference(final_envelope).area <= 1e-14
+
+
+def test_run_temporal_project_infers_legacy_bandon_execution_config_and_skips_reruns(monkeypatch, tmp_path) -> None:
+    settings = Settings(runtime_cache_dir=tmp_path, model_backend_default="sam3")
+    project = save_temporal_project(_sample_project("legacy-bandon"), settings)
+    releases = _sample_releases(settings)
+    monkeypatch.setattr("src.services.temporal_projects.list_releases", lambda _: releases)
+
+    automated_layers = {
+        "WB_2025_R01": _feature_collection(
+            [[(-6.9998, 33.0002), (-6.9994, 33.0002), (-6.9994, 33.0006), (-6.9998, 33.0006)]]
+        ),
+        "WB_2026_R01": _feature_collection(
+            [[(-6.9992, 33.0008), (-6.9988, 33.0008), (-6.9988, 33.0012), (-6.9992, 33.0012)]]
+        ),
+    }
+    executed_pairs: list[tuple[str, str]] = []
+
+    def _pair_runner(request):
+        executed_pairs.append((request.t1_release, request.t2_release))
+        response = _bandon_pair_response(
+            settings,
+            request,
+            releases=releases,
+            geojson=automated_layers[request.t2_release],
+        )
+        save_cached_response(settings, response.summary.request_hash, response)
+        return response
+
+    initial = run_temporal_project(
+        project.project_id,
+        settings=settings,
+        pair_runner=_pair_runner,
+        execution_config=_bandon_config(),
+    )
+    assert initial.success is True
+    assert executed_pairs == [("WB_2024_R01", "WB_2025_R01"), ("WB_2025_R01", "WB_2026_R01")]
+
+    project_json_path = settings.temporal_projects_dir / project.project_id / "project.json"
+    legacy_payload = json.loads(project_json_path.read_text())
+    legacy_payload.pop("execution_config", None)
+    project_json_path.write_text(json.dumps(legacy_payload, indent=2))
+
+    inferred = resolve_temporal_project_execution_config(get_temporal_project(project.project_id, settings), settings)
+    assert inferred.model_backend == "bandon_mps"
+
+    executed_pairs.clear()
+    rerun = run_temporal_project(project.project_id, settings=settings, pair_runner=_pair_runner)
+    assert rerun.success is True
+    assert rerun.project.execution_config is not None
+    assert rerun.project.execution_config.model_backend == "bandon_mps"
+    assert executed_pairs == []
+
+
+def test_run_temporal_project_only_executes_appended_milestone(monkeypatch, tmp_path) -> None:
+    settings = Settings(runtime_cache_dir=tmp_path, model_backend_default="sam3")
+    project = save_temporal_project(
+        TemporalProject(
+            project_id="append-only",
+            name="Append Only",
+            aoi_geojson=_sample_project().aoi_geojson,
+            milestones=[
+                {"release_identifier": "WB_2024_R01"},
+                {"release_identifier": "WB_2025_R01"},
+            ],
+            created_at="2026-04-20T00:00:00Z",
+            updated_at="2026-04-20T00:00:00Z",
+        ),
+        settings,
+    )
+    releases = _sample_releases(settings)
+    monkeypatch.setattr("src.services.temporal_projects.list_releases", lambda _: releases)
+
+    automated_layers = {
+        "WB_2025_R01": _feature_collection(
+            [[(-6.9998, 33.0002), (-6.9994, 33.0002), (-6.9994, 33.0006), (-6.9998, 33.0006)]]
+        ),
+        "WB_2026_R01": _feature_collection(
+            [[(-6.9992, 33.0008), (-6.9988, 33.0008), (-6.9988, 33.0012), (-6.9992, 33.0012)]]
+        ),
+    }
+    executed_pairs: list[tuple[str, str]] = []
+
+    def _pair_runner(request):
+        executed_pairs.append((request.t1_release, request.t2_release))
+        response = _bandon_pair_response(
+            settings,
+            request,
+            releases=releases,
+            geojson=automated_layers[request.t2_release],
+        )
+        save_cached_response(settings, response.summary.request_hash, response)
+        return response
+
+    first_run = run_temporal_project(
+        project.project_id,
+        settings=settings,
+        pair_runner=_pair_runner,
+        execution_config=_bandon_config(),
+    )
+    assert first_run.success is True
+    assert executed_pairs == [("WB_2024_R01", "WB_2025_R01")]
+
+    saved_project = get_temporal_project(project.project_id, settings)
+    saved_project.milestones.append(TemporalMilestone(release_identifier="WB_2026_R01"))
+    save_temporal_project(saved_project, settings)
+
+    executed_pairs.clear()
+    second_run = run_temporal_project(project.project_id, settings=settings, pair_runner=_pair_runner)
+    assert second_run.success is True
+    assert executed_pairs == [("WB_2025_R01", "WB_2026_R01")]
+    assert second_run.project.milestones[1].pair_request_hash == first_run.project.milestones[1].pair_request_hash
+    assert second_run.project.milestones[2].pair_request_hash is not None
+
+
+def test_run_temporal_project_reruns_only_dirty_prefix_boundary(monkeypatch, tmp_path) -> None:
+    settings = Settings(runtime_cache_dir=tmp_path, model_backend_default="sam3")
+    project = save_temporal_project(
+        TemporalProject(
+            project_id="mid-sequence",
+            name="Mid Sequence",
+            aoi_geojson=_sample_project().aoi_geojson,
+            milestones=[
+                {"release_identifier": "WB_2024_R01"},
+                {"release_identifier": "WB_2026_R01"},
+                {"release_identifier": "WB_2027_R01"},
+            ],
+            created_at="2026-04-20T00:00:00Z",
+            updated_at="2026-04-20T00:00:00Z",
+        ),
+        settings,
+    )
+    releases = _sample_releases_with_2027(settings)
+    monkeypatch.setattr("src.services.temporal_projects.list_releases", lambda _: releases)
+
+    automated_layers = {
+        "WB_2025_R01": _feature_collection(
+            [[(-6.9998, 33.0002), (-6.9994, 33.0002), (-6.9994, 33.0006), (-6.9998, 33.0006)]]
+        ),
+        "WB_2026_R01": _feature_collection(
+            [[(-6.9992, 33.0008), (-6.9988, 33.0008), (-6.9988, 33.0012), (-6.9992, 33.0012)]]
+        ),
+        "WB_2027_R01": _feature_collection(
+            [[(-6.9986, 33.0013), (-6.9982, 33.0013), (-6.9982, 33.0017), (-6.9986, 33.0017)]]
+        ),
+    }
+    executed_pairs: list[tuple[str, str]] = []
+
+    def _pair_runner(request):
+        executed_pairs.append((request.t1_release, request.t2_release))
+        response = _bandon_pair_response(
+            settings,
+            request,
+            releases=releases,
+            geojson=automated_layers[request.t2_release],
+        )
+        save_cached_response(settings, response.summary.request_hash, response)
+        return response
+
+    initial = run_temporal_project(
+        project.project_id,
+        settings=settings,
+        pair_runner=_pair_runner,
+        execution_config=_bandon_config(),
+    )
+    assert initial.success is True
+    assert executed_pairs == [("WB_2024_R01", "WB_2026_R01"), ("WB_2026_R01", "WB_2027_R01")]
+
+    saved_project = get_temporal_project(project.project_id, settings)
+    saved_project.milestones.insert(1, TemporalMilestone(release_identifier="WB_2025_R01"))
+    save_temporal_project(saved_project, settings)
+
+    executed_pairs.clear()
+    rerun = run_temporal_project(project.project_id, settings=settings, pair_runner=_pair_runner)
+    assert rerun.success is True
+    assert executed_pairs == [("WB_2024_R01", "WB_2025_R01"), ("WB_2025_R01", "WB_2026_R01")]
+    assert rerun.project.milestones[3].pair_request_hash == initial.project.milestones[2].pair_request_hash
+
+
+def test_validate_temporal_project_clears_stale_baseline_pair_hash(monkeypatch, tmp_path) -> None:
+    settings = Settings(runtime_cache_dir=tmp_path)
+    project = _sample_project("baseline-normalized")
+    project.milestones[0].pair_request_hash = "stale-hash"
+    monkeypatch.setattr("src.services.temporal_projects.list_releases", lambda _: _sample_releases(settings))
+
+    response = validate_temporal_project(project, settings=settings)
+
+    assert response.project.milestones[0].pair_request_hash is None
 
 
 def test_temporal_growth_blocks_cluster_nearby_polygons_into_one_block() -> None:

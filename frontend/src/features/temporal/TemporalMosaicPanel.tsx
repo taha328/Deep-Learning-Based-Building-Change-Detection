@@ -4,6 +4,7 @@ import type { FeatureCollection, Polygon } from "geojson";
 import {
   AlertTriangle,
   Check,
+  ChevronDown,
   Clock3,
   Download,
   FolderOpen,
@@ -35,7 +36,9 @@ import {
   validateTemporalProject,
 } from "@/api/gradio";
 import { useAppStore } from "@/app/store";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -46,13 +49,16 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
+import { Separator } from "@/components/ui/separator";
 import type { FrontendRuntimeConfig } from "@/lib/env";
 import { buildGradioFileUrl } from "@/lib/gradio-files";
 import { cn, formatNumber } from "@/lib/utils";
 import { downloadFileFromUrl } from "@/lib/download";
 import { useI18n } from "@/lib/i18n";
 import { getProjectDisplayName } from "@/lib/project-summary";
+import { createActiveRunProgress, createCompletedRunProgress, createErrorRunProgress } from "@/lib/run-progress";
 import { AOIImportModal } from "@/features/aoi/AOIImportModal";
+import { RunProgressPanel } from "@/features/results/RunProgressPanel";
 import { GeometryImportModal } from "@/features/temporal/GeometryImportModal";
 import type { TemporalMapPresentation } from "@/features/temporal/types";
 import { SharedAoiSection } from "@/features/workspace/SharedAoiSection";
@@ -100,6 +106,117 @@ function formatArea(areaM2: number | undefined, fallback: string): string {
     return `${formatNumber(areaM2 / 1_000_000, 2)} km²`;
   }
   return `${formatNumber(areaM2, 0)} m²`;
+}
+
+function getArchiveCode(release: ReleaseMetadata): string {
+  const identifierMatch = release.identifier.match(/R\d+$/i);
+  if (identifierMatch) {
+    return identifierMatch[0].toUpperCase();
+  }
+  const labelMatch = release.label.match(/R\d+$/i);
+  return labelMatch?.[0].toUpperCase() ?? "Archive";
+}
+
+function formatReleaseMetadataDate(release: ReleaseMetadata, locale: string): string {
+  const date = new Date(release.release_date);
+  if (Number.isNaN(date.getTime())) {
+    return release.label;
+  }
+
+  return new Intl.DateTimeFormat(locale, {
+    day: "2-digit",
+    month: "numeric",
+    year: "numeric",
+  }).format(date);
+}
+
+function groupReleasesByYear(releases: ReleaseMetadata[]): Map<number, ReleaseMetadata[]> {
+  const grouped = new Map<number, ReleaseMetadata[]>();
+
+  releases.forEach((release) => {
+    const date = new Date(release.release_date);
+    const year = Number.isNaN(date.getTime()) ? new Date().getFullYear() : date.getFullYear();
+    const yearReleases = grouped.get(year) ?? [];
+    yearReleases.push(release);
+    grouped.set(year, yearReleases);
+  });
+
+  return new Map([...grouped.entries()].sort(([leftYear], [rightYear]) => rightYear - leftYear));
+}
+
+function YearGroupRow({
+  year,
+  isExpanded,
+  onToggle,
+  releaseCount,
+  releaseLabel,
+}: {
+  year: number;
+  isExpanded: boolean;
+  onToggle: () => void;
+  releaseCount: number;
+  releaseLabel: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-expanded={isExpanded}
+      className="flex w-full items-center justify-between rounded border border-sidebar-border bg-sidebar px-4 py-3 text-left transition-all hover:border-primary hover:bg-surface focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
+    >
+      <div className="flex items-center gap-2">
+        <ChevronDown
+          className={cn("h-4 w-4 text-muted-foreground transition-transform duration-200", !isExpanded && "-rotate-90")}
+          aria-hidden="true"
+        />
+        <span className="text-label font-semibold text-foreground">{year}</span>
+        <span className="rounded bg-surface px-2 py-1 text-caption text-muted-foreground">
+          {releaseCount} {releaseLabel}
+        </span>
+      </div>
+    </button>
+  );
+}
+
+function ReleaseItem({
+  release,
+  selected,
+  disabled,
+  onSelect,
+  locale,
+}: {
+  release: ReleaseMetadata;
+  selected: boolean;
+  disabled: boolean;
+  onSelect: () => void;
+  locale: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      aria-pressed={selected}
+      disabled={disabled}
+      className={cn(
+        "flex w-full items-center justify-between rounded border px-3 py-2.5 text-left transition-all focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50",
+        selected
+          ? "border-primary bg-primary/10 text-foreground hover:bg-primary/15 active:bg-primary/20"
+          : "border-sidebar-border bg-sidebar text-foreground hover:border-primary hover:bg-surface focus-visible:border-primary",
+      )}
+    >
+      <div className="min-w-0">
+        <div className="flex items-center gap-2">
+          <span className="text-label font-semibold tracking-tight text-foreground">
+            {formatReleaseMetadataDate(release, locale)}
+          </span>
+          <span className="rounded-full border border-sidebar-border bg-sidebar px-2 py-0.5 text-caption uppercase tracking-wider text-muted-foreground">
+            {getArchiveCode(release)}
+          </span>
+        </div>
+      </div>
+      {selected ? <Check className="h-4 w-4 shrink-0 text-primary" aria-hidden="true" /> : null}
+    </button>
+  );
 }
 
 function formatErrorMessage(error: unknown, fallback: string): string {
@@ -267,10 +384,65 @@ function preferredMilestoneId(project: TemporalProject | null | undefined): stri
 }
 
 function milestoneBadgeTone(status: TemporalMilestone["status"]): string {
-  if (status === "complete") return "bg-green-100 text-green-900 border-green-300 dark:bg-green-500/15 dark:text-green-200 dark:border-green-400/30";
-  if (status === "validated") return "bg-blue-100 text-blue-900 border-blue-300 dark:bg-sky-500/15 dark:text-sky-200 dark:border-sky-400/30";
+  if (status === "complete") return "border-primary/30 bg-primary/10 text-foreground";
+  if (status === "validated") return "border-accent/30 bg-accent/10 text-foreground";
   if (status === "error") return "border-destructive/30 bg-destructive/10 text-destructive-foreground";
   return "bg-surface text-foreground border-sidebar-border";
+}
+
+function MilestonePrimaryMetricCard({
+  label,
+  value,
+  toneClassName,
+}: {
+  label: string;
+  value: string;
+  toneClassName?: string;
+}) {
+  return (
+    <div
+      className={cn(
+        "rounded-lg border border-sidebar-border/80 bg-surface/70 px-3.5 py-3",
+        toneClassName,
+      )}
+    >
+      <p className="text-label-muted">{label}</p>
+      <p className="mt-2 text-base font-semibold leading-6 tabular-nums text-foreground">{value}</p>
+    </div>
+  );
+}
+
+function MilestoneMetaRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-start justify-between gap-4">
+      <dt className="text-label-muted">{label}</dt>
+      <dd className="max-w-[13rem] text-right text-label leading-5">{value}</dd>
+    </div>
+  );
+}
+
+function MilestoneSecondaryMetricRow({
+  label,
+  value,
+  emphasized = false,
+}: {
+  label: string;
+  value: string;
+  emphasized?: boolean;
+}) {
+  return (
+    <div className="rounded-lg border border-sidebar-border/80 bg-surface/70 px-3.5 py-3">
+      <dt className="text-label-muted">{label}</dt>
+      <dd
+        className={cn(
+          "mt-2 text-base font-semibold leading-6 tabular-nums text-foreground",
+          emphasized ? "inline-flex items-center rounded-full border border-border/80 bg-background px-2.5 py-1 text-label tracking-normal" : "",
+        )}
+      >
+        {value}
+      </dd>
+    </div>
+  );
 }
 
 interface TemporalMosaicPanelProps {
@@ -309,6 +481,7 @@ export function TemporalMosaicPanel({
   const [validation, setValidation] = useState<TemporalProjectValidationResponse | null>(null);
   const [selectedMilestoneId, setSelectedMilestoneId] = useState<string | null>(null);
   const [releaseFilter, setReleaseFilter] = useState("");
+  const [expandedYears, setExpandedYears] = useState<Set<number>>(new Set());
   const [activePanel, setActivePanel] = useState<WorkflowSectionId>("overview");
   const [aoiImportModalOpen, setAoiImportModalOpen] = useState(false);
   const [overrideModalOpen, setOverrideModalOpen] = useState(false);
@@ -318,6 +491,7 @@ export function TemporalMosaicPanel({
   const [createProjectError, setCreateProjectError] = useState<string | null>(null);
   const [createProjectBusy, setCreateProjectBusy] = useState(false);
   const [selectedProjectId, setSelectedProjectId] = useState("");
+  const [progressMetricsVisible, setProgressMetricsVisible] = useState(false);
 
   const aoi = useAppStore((state) => state.aoi);
   const draftVertices = useAppStore((state) => state.draftVertices);
@@ -335,12 +509,19 @@ export function TemporalMosaicPanel({
   const temporalProjectBootstrap = useAppStore((state) => state.temporalProjectBootstrap);
   const setTemporalProjectBootstrap = useAppStore((state) => state.setTemporalProjectBootstrap);
   const setSelectedReleaseIds = useAppStore((state) => state.setSelectedReleaseIds);
+  const runProgress = useAppStore((state) => state.runProgress);
+  const setRunProgress = useAppStore((state) => state.setRunProgress);
+  const setIsRunning = useAppStore((state) => state.setIsRunning);
   const previousAoiRef = useRef<Polygon | null>(aoi);
   const latestProjectLoadRef = useRef<string | null>(null);
 
   const { t, language } = useI18n();
   const locale = language === "fr" ? "fr-FR" : "en-GB";
 
+  const sortedReleases = useMemo(
+    () => [...releases].sort((left, right) => Date.parse(right.release_date) - Date.parse(left.release_date)),
+    [releases],
+  );
   const projectsQuery = useQuery({
     queryKey: ["temporal-projects", "saved-only"],
     queryFn: () => listTemporalProjects(),
@@ -377,7 +558,8 @@ export function TemporalMosaicPanel({
       setSelectedProjectId(hydratedProject.project_id);
       setSelectedMilestoneId(preferredMilestoneId(hydratedProject));
       setSelectedReleaseIds(hydratedProject.milestones.map((item) => item.release_identifier));
-      onWorkflowModeChange(hydratedProject.milestones.length > 2 ? "temporal" : "pairwise");
+      setProgressMetricsVisible(true);
+      onWorkflowModeChange("temporal");
       if (hydratedProject.aoi_geojson && hydratedProject.aoi_geojson.type === "Polygon") {
         setAoiFromImport(hydratedProject.aoi_geojson as Polygon);
         requestMapFocusToAoi();
@@ -431,11 +613,28 @@ export function TemporalMosaicPanel({
   });
 
   const runProjectMutation = useMutation({
-    mutationFn: runTemporalProject,
+    mutationFn: async (projectId: string) => {
+      setIsRunning(true);
+      setRunProgress({
+        ...createActiveRunProgress(),
+        phase: "running",
+        percent: 5,
+        stageLabel: "Metadata",
+        detail: "Temporal mosaic timeline run started.",
+      });
+      return runTemporalProject(projectId);
+    },
     onSuccess: (response) => {
+      setIsRunning(false);
+      setRunProgress(createCompletedRunProgress());
+      setProgressMetricsVisible(true);
       setProject(response.project);
       setValidation(null);
       void queryClient.invalidateQueries({ queryKey: ["temporal-projects"] });
+    },
+    onError: (error) => {
+      setIsRunning(false);
+      setRunProgress(createErrorRunProgress(error instanceof Error ? error.message : t("status.run_failed")));
     },
   });
 
@@ -463,6 +662,7 @@ export function TemporalMosaicPanel({
     if (project || temporalProjectBootstrap || loadProjectMutation.isPending) {
       return;
     }
+    setProgressMetricsVisible(false);
     setProject(emptyProject(aoi, t("temporal.untitled_project")));
   }, [aoi, project, temporalProjectBootstrap, loadProjectMutation.isPending, workflowMode, t]);
 
@@ -496,6 +696,7 @@ export function TemporalMosaicPanel({
     setSelectedProjectId(temporalProjectBootstrap.project_id);
     setSelectedMilestoneId(preferredMilestoneId(temporalProjectBootstrap));
     setSelectedReleaseIds(temporalProjectBootstrap.milestones.map((item) => item.release_identifier));
+    setProgressMetricsVisible(true);
 
     if (temporalProjectBootstrap.aoi_geojson && temporalProjectBootstrap.aoi_geojson.type === "Polygon") {
       setAoiFromImport(temporalProjectBootstrap.aoi_geojson as Polygon);
@@ -525,7 +726,7 @@ export function TemporalMosaicPanel({
     if (temporalProjectBootstrap || loadProjectMutation.isPending) {
       return;
     }
-    if (project.milestones.length > 2 && workflowMode !== "temporal") {
+    if (project.milestones.length > 0 && workflowMode !== "temporal") {
       onWorkflowModeChange("temporal");
     }
   }, [loadProjectMutation.isPending, onWorkflowModeChange, project?.milestones.length, temporalProjectBootstrap, workflowMode]);
@@ -598,6 +799,7 @@ export function TemporalMosaicPanel({
     onMapPresentationChange({
       selectedReleaseIdentifier: selectedMilestone.release_identifier,
       selectedMilestoneStatus: selectedMilestone.status,
+      milestoneCount: project.milestones.length,
       referenceImageryUrl,
       referenceImageryBounds,
       automatedCandidate: ensureFeatureCollection(selectedMilestone.automated_candidate_footprint_geojson),
@@ -627,21 +829,7 @@ export function TemporalMosaicPanel({
     [project?.milestones],
   );
 
-  const availableReleases = useMemo(() => {
-    const query = releaseFilter.trim().toLowerCase();
-    return [...releases]
-      .sort((left, right) => Date.parse(right.release_date) - Date.parse(left.release_date))
-      .filter((release) => {
-        if (!query) {
-          return true;
-        }
-        return (
-          release.identifier.toLowerCase().includes(query) ||
-          release.label.toLowerCase().includes(query) ||
-          release.release_date.toLowerCase().includes(query)
-        );
-      });
-  }, [releaseFilter, releases]);
+  const groupedAvailableReleases = useMemo(() => groupReleasesByYear(sortedReleases), [sortedReleases]);
 
   const syncProjectWithCurrentAoi = (current: TemporalProject): TemporalProject => ({
     ...current,
@@ -694,6 +882,7 @@ export function TemporalMosaicPanel({
       setValidation(null);
       setSelectedMilestoneId(null);
       setReleaseFilter("");
+      setProgressMetricsVisible(false);
       onMapPresentationChange(null);
       setTemporalProjectBootstrap(null);
       onWorkflowModeChange("temporal");
@@ -745,6 +934,14 @@ export function TemporalMosaicPanel({
       setSelectedMilestoneId(nextMilestones.at(-1)?.release_identifier ?? null);
     }
     setValidation(null);
+  };
+
+  const handleToggleRelease = (release: ReleaseMetadata) => {
+    if (selectedReleaseIds.has(release.identifier)) {
+      handleRemoveMilestone(release.identifier);
+      return;
+    }
+    handleAddMilestone(release);
   };
 
   const handleSave = async () => {
@@ -814,6 +1011,56 @@ export function TemporalMosaicPanel({
   const visibleValidationWarnings = validation ? filterProgressWarnings(validation.warnings) : [];
   const visibleMilestoneWarnings = selectedMilestone ? filterProgressWarnings(selectedMilestone.warnings) : [];
   const aoiVertices = draftVertices.length || (aoi ? aoi.coordinates[0].length - 1 : 0);
+  const showRunProgress = runProjectMutation.isPending || runProgress.phase !== "idle";
+  const showMilestoneRunData = progressMetricsVisible && Boolean(selectedMilestone);
+  const milestonePrimaryMetrics = selectedMilestone
+    ? [
+        {
+          label: t("temporal.metric.added_area"),
+          value: formatArea(selectedMilestone.metrics?.added_area_m2, t("release.not_available")),
+          toneClassName: "border-primary/20 bg-primary/[0.06]",
+        },
+        {
+          label: t("temporal.metric.total_built_up_area"),
+          value: formatArea(selectedMilestone.metrics?.total_area_m2, t("release.not_available")),
+          toneClassName: "border-accent/20 bg-accent/[0.06]",
+        },
+        {
+          label: t("temporal.metric.additions_features"),
+          value: formatNumber(selectedMilestone.metrics?.additions_feature_count ?? 0),
+          toneClassName: "border-secondary bg-secondary/60",
+        },
+      ]
+    : [];
+  const milestoneSecondaryMetrics = selectedMilestone
+    ? [
+        {
+          label: t("temporal.metric.added_blocks"),
+          value: formatNumber(selectedMilestone.metrics?.added_block_count ?? 0),
+        },
+        {
+          label: t("temporal.metric.cumulative_blocks"),
+          value: formatNumber(selectedMilestone.metrics?.cumulative_block_count ?? 0),
+        },
+        {
+          label: t("temporal.metric.added_block_area"),
+          value: formatArea(selectedMilestone.metrics?.added_block_area_m2, t("release.not_available")),
+        },
+        {
+          label: t("temporal.metric.cumulative_block_area"),
+          value: formatArea(selectedMilestone.metrics?.cumulative_block_area_m2, t("release.not_available")),
+        },
+        {
+          label: t("temporal.metric.growth_envelope_area"),
+          value: formatArea(selectedMilestone.metrics?.growth_envelope_area_m2, t("release.not_available")),
+        },
+        {
+          label: t("temporal.metric.building_level_detail"),
+          value: selectedMilestone.metrics?.building_level_available ? t("temporal.metric.available") : t("temporal.metric.footprint_only"),
+          emphasized: true,
+        },
+      ]
+    : [];
 
   return (
     <>
@@ -984,19 +1231,13 @@ export function TemporalMosaicPanel({
         ) : null}
 
         {activePanel === "releases" ? (
-          <div className="space-y-4 p-5">
+          <div className="flex min-h-full flex-col p-5">
             <WorkflowSectionCard
               title={t("temporal.milestones.title")}
               description={t("temporal.milestones.description")}
-              contentClassName="space-y-4"
+              className="flex min-h-0 flex-1 flex-col"
+              contentClassName="flex min-h-0 flex-1 flex-col gap-4"
             >
-                <Input
-                  value={releaseFilter}
-                  onChange={(event) => setReleaseFilter(event.target.value)}
-                  placeholder={t("temporal.filter_releases")}
-                  className="border-sidebar-border bg-sidebar text-foreground"
-                />
-
                 <div className="space-y-2">
                   <p className="label-xs">{t("temporal.selected_timeline")}</p>
                   {project?.milestones.length ? (
@@ -1046,9 +1287,9 @@ export function TemporalMosaicPanel({
                   )}
                 </div>
 
-                <div className="space-y-2">
+                <div className="flex min-h-[18rem] flex-1 flex-col gap-2">
                   <p className="label-xs">{t("temporal.available_releases")}</p>
-                  <div className="max-h-72 space-y-2 overflow-y-auto pr-1">
+                  <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
                     {releasesLoading ? (
                       <div className="flex items-center gap-2 rounded-lg border border-sidebar-border bg-sidebar px-4 py-3 text-sm text-foreground">
                         <Loader2 className="h-4 w-4 animate-spin" />
@@ -1058,30 +1299,44 @@ export function TemporalMosaicPanel({
                       <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive-foreground">
                         {releasesError}
                       </div>
-                    ) : (
-                      availableReleases.map((release) => {
-                        const alreadySelected = selectedReleaseIds.has(release.identifier);
-                        return (
-                          <div
-                            key={release.identifier}
-                            className="flex items-center justify-between rounded-lg border border-sidebar-border bg-sidebar px-3 py-3"
-                          >
-                            <div>
-                                <p className="text-label font-medium text-foreground">{formatReleaseDate(release.release_date, locale, t("temporal.unknown_date"))}</p>
-                              <p className="text-caption text-foreground">{release.identifier}</p>
+                    ) : groupedAvailableReleases.size ? (
+                      Array.from(groupedAvailableReleases).map(([year, yearReleases]) => (
+                        <div key={year} className="space-y-2">
+                          <YearGroupRow
+                            year={year}
+                            isExpanded={expandedYears.has(year)}
+                            onToggle={() => {
+                              const nextExpanded = new Set(expandedYears);
+                              if (nextExpanded.has(year)) {
+                                nextExpanded.delete(year);
+                              } else {
+                                nextExpanded.add(year);
+                              }
+                              setExpandedYears(nextExpanded);
+                            }}
+                            releaseCount={yearReleases.length}
+                            releaseLabel={t(yearReleases.length === 1 ? "release.single" : "release.plural")}
+                          />
+                          {expandedYears.has(year) ? (
+                            <div className="space-y-2 pl-4">
+                              {yearReleases.map((release) => (
+                                <ReleaseItem
+                                  key={release.identifier}
+                                  release={release}
+                                  selected={selectedReleaseIds.has(release.identifier)}
+                                  disabled={!project}
+                                  onSelect={() => handleToggleRelease(release)}
+                                  locale={locale}
+                                />
+                              ))}
                             </div>
-                            <Button
-                              variant={alreadySelected ? "ghost" : "outline"}
-                              className={cn("border-sidebar-border bg-surface", alreadySelected && "text-foreground")}
-                              disabled={alreadySelected || !project}
-                              onClick={() => handleAddMilestone(release)}
-                            >
-                              {alreadySelected ? <Check className="mr-2 h-4 w-4" /> : <Plus className="mr-2 h-4 w-4" />}
-                              {alreadySelected ? t("temporal.added_button") : t("temporal.add_button")}
-                            </Button>
-                          </div>
-                        );
-                      })
+                          ) : null}
+                        </div>
+                      ))
+                    ) : (
+                      <div className="rounded-lg border border-dashed border-sidebar-border px-4 py-6 text-sm text-foreground">
+                        {t("release.not_available")}
+                      </div>
                     )}
                   </div>
                 </div>
@@ -1143,155 +1398,134 @@ export function TemporalMosaicPanel({
               description={t("temporal.progress_description")}
               contentClassName="space-y-3"
             >
-                <div className="space-y-3 rounded-lg border border-sidebar-border bg-sidebar px-4 py-4">
-                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                    <Button variant="outline" className="border-sidebar-border bg-sidebar" onClick={() => void handleValidate()} disabled={!project || runBusy}>
-                      {validateProjectMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Clock3 className="mr-2 h-4 w-4" />}
-                      {t("temporal.validate_timeline")}
-                    </Button>
-                    <Button onClick={() => void handleRun()} disabled={!project || runBusy || project.milestones.length === 0}>
-                      {runProjectMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Sparkles className="mr-2 h-4 w-4" />}
-                      {t("temporal.run_timeline")}
-                    </Button>
-                  </div>
-
-                  {validation ? (
-                    <div className="space-y-3 rounded-lg border border-sidebar-border bg-sidebar px-4 py-4">
-                      <div className="flex items-center justify-between">
-                        <span className="text-sm font-medium text-foreground">
-                          {validation.valid ? t("status.validation_passed") : t("status.validation_needs_attention")}
-                        </span>
-                        <span className="text-xs uppercase tracking-[0.12em] text-foreground">
-                          {formatNumber(validation.estimated_total_tiles)} {t("temporal.total_tiles")}
-                        </span>
-                      </div>
-                      {validation.blocking_errors.length ? (
-                        <div className="space-y-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-3 text-sm text-destructive-foreground">
-                          {validation.blocking_errors.map((message) => (
-                            <p key={message}>{message}</p>
-                          ))}
-                        </div>
-                      ) : null}
-                      {visibleValidationWarnings.length ? (
-                        <div className="space-y-2 rounded-lg border border-warning/30 bg-warning/10 px-3 py-3 text-sm text-warning-foreground">
-                          {visibleValidationWarnings.map((message) => (
-                            <p key={message}>{message}</p>
-                          ))}
-                        </div>
-                      ) : null}
+                {validation ? (
+                  <div className="space-y-3 rounded-lg border border-sidebar-border bg-sidebar px-4 py-4">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-medium text-foreground">
+                        {validation.valid ? t("status.validation_passed") : t("status.validation_needs_attention")}
+                      </span>
+                      <span className="text-xs uppercase tracking-[0.12em] text-foreground">
+                        {formatNumber(validation.estimated_total_tiles)} {t("temporal.total_tiles")}
+                      </span>
                     </div>
-                  ) : null}
-                </div>
+                    {validation.blocking_errors.length ? (
+                      <div className="space-y-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-3 text-sm text-destructive-foreground">
+                        {validation.blocking_errors.map((message) => (
+                          <p key={message}>{message}</p>
+                        ))}
+                      </div>
+                    ) : null}
+                    {visibleValidationWarnings.length ? (
+                      <div className="space-y-2 rounded-lg border border-warning/30 bg-warning/10 px-3 py-3 text-sm text-warning-foreground">
+                        {visibleValidationWarnings.map((message) => (
+                          <p key={message}>{message}</p>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
 
-                {!selectedMilestone ? (
+                {showRunProgress ? <RunProgressPanel progress={runProgress} /> : null}
+
+                {progressMetricsVisible && !selectedMilestone ? (
                   <div className="rounded-lg border border-dashed border-sidebar-border px-4 py-6 text-sm text-foreground">
                     {t("temporal.select_milestone_prompt")}
                   </div>
-                ) : (
+                ) : null}
+
+                {showMilestoneRunData && selectedMilestone ? (
                   <>
-                    <div className="rounded-lg border border-sidebar-border bg-sidebar px-4 py-4">
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <p className="text-heading-sm font-semibold text-foreground">{formatReleaseDate(selectedMilestone.release_date, locale, t("temporal.unknown_date"))}</p>
-                          <p className="text-label text-muted-foreground">{selectedMilestone.release_identifier}</p>
+                    <Card className="border-sidebar-border bg-sidebar shadow-panel">
+                      <CardContent className="space-y-6 p-5 lg:p-6">
+                        <div className="flex justify-end">
+                          <span className={cn("rounded-full border px-3 py-1.5 label-xs font-semibold uppercase", milestoneBadgeTone(selectedMilestone.status))}>
+                            {t(`temporal.milestone_status.${selectedMilestone.status}`)}
+                          </span>
                         </div>
-                        <span className={cn("rounded-full border px-3 py-1.5 label-xs font-semibold uppercase", milestoneBadgeTone(selectedMilestone.status))}>
-                          {t(`temporal.source_mode.${selectedMilestone.source_mode}`)}
-                        </span>
-                      </div>
 
-                      <div className="grid grid-cols-3 gap-2">
-                        {[
-                          {
-                            label: t("temporal.metric.added_area"),
-                            value: formatArea(selectedMilestone.metrics?.added_area_m2, t("release.not_available")),
-                          },
-                          {
-                            label: t("temporal.metric.total_built_up_area"),
-                            value: formatArea(selectedMilestone.metrics?.total_area_m2, t("release.not_available")),
-                          },
-                          {
-                            label: t("temporal.metric.additions_features"),
-                            value: formatNumber(selectedMilestone.metrics?.additions_feature_count ?? 0),
-                          },
-                          {
-                            label: t("temporal.metric.added_blocks"),
-                            value: formatNumber(selectedMilestone.metrics?.added_block_count ?? 0),
-                          },
-                          {
-                            label: t("temporal.metric.cumulative_blocks"),
-                            value: formatNumber(selectedMilestone.metrics?.cumulative_block_count ?? 0),
-                          },
-                          {
-                            label: t("temporal.metric.added_block_area"),
-                            value: formatArea(selectedMilestone.metrics?.added_block_area_m2, t("release.not_available")),
-                          },
-                          {
-                            label: t("temporal.metric.cumulative_block_area"),
-                            value: formatArea(selectedMilestone.metrics?.cumulative_block_area_m2, t("release.not_available")),
-                          },
-                          {
-                            label: t("temporal.metric.growth_envelope_area"),
-                            value: formatArea(selectedMilestone.metrics?.growth_envelope_area_m2, t("release.not_available")),
-                          },
-                          {
-                            label: t("temporal.metric.building_level_detail"),
-                            value: selectedMilestone.metrics?.building_level_available ? t("temporal.metric.available") : t("temporal.metric.footprint_only"),
-                          },
-                        ].map((metric) => (
-                          <div
-                            key={metric.label}
-                            className="flex min-h-[6.25rem] min-w-0 flex-col overflow-hidden rounded-lg border border-sidebar-border bg-surface px-2.5 py-2.5 shadow-sm"
-                          >
-                            <p className="text-[1.125rem] font-semibold leading-none tracking-[-0.02em] tabular-nums text-foreground">
-                              {metric.value}
-                            </p>
-                            <p className="mt-1.5 text-[0.5rem] font-semibold uppercase leading-[0.8rem] tracking-[0.14em] text-muted-foreground">
-                              {metric.label}
-                            </p>
-                          </div>
-                        ))}
-                      </div>
+                        <dl className="space-y-2 rounded-lg border border-sidebar-border/80 bg-surface/60 px-3.5 py-3">
+                          <MilestoneMetaRow
+                            label={t("temporal.metrics_date_label")}
+                            value={formatReleaseDate(selectedMilestone.release_date, locale, t("temporal.unknown_date"))}
+                          />
+                          <MilestoneMetaRow
+                            label={t("temporal.metrics_identifier_label")}
+                            value={selectedMilestone.release_identifier}
+                          />
+                        </dl>
 
-                      {selectedMilestone.error_message ? (
-                        <div className="mt-4 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-3 text-sm text-destructive-foreground">
-                          {selectedMilestone.error_message}
-                        </div>
-                      ) : null}
-
-                      {visibleMilestoneWarnings.length ? (
-                        <div className="mt-4 rounded-lg border border-warning/30 bg-warning/10 px-3 py-3 text-sm text-warning-foreground">
-                          {visibleMilestoneWarnings.map((message) => (
-                            <p key={message}>{message}</p>
+                        <div className="grid auto-rows-fr gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                          {milestonePrimaryMetrics.map((metric) => (
+                            <MilestonePrimaryMetricCard
+                              key={metric.label}
+                              label={metric.label}
+                              value={metric.value}
+                              toneClassName={metric.toneClassName}
+                            />
                           ))}
                         </div>
-                      ) : null}
-                    </div>
 
-                    <div className="flex gap-2">
-                  <Button
-                    variant="outline"
-                    className="flex-1 border-sidebar-border bg-sidebar"
-                    onClick={() => setOverrideModalOpen(true)}
-                    disabled={!project || importOverrideMutation.isPending}
-                  >
-                    {importOverrideMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
-                    {t("temporal.import_override")}
-                  </Button>
-                  <Button
-                    variant="outline"
-                    className="border-sidebar-border bg-sidebar"
-                    disabled={!selectedMilestone.artifacts.length}
-                    onClick={() => setSelectedMilestoneId(selectedMilestone.release_identifier)}
-                  >
-                    <Layers3 className="mr-2 h-4 w-4" />
-                    {t("temporal.map_ready")}
-                  </Button>
-                </div>
-              </>
-            )}
+                        <Separator className="bg-sidebar-border" />
+
+                        <div className="space-y-4">
+                          <div className="flex flex-col gap-1.5 sm:flex-row sm:items-baseline sm:justify-between">
+                            <p className="text-label font-semibold tracking-tight text-foreground">{t("temporal.metrics_spatial_analysis")}</p>
+                            <span className="text-caption">
+                              {t("temporal.metrics_secondary_summary")}
+                            </span>
+                          </div>
+                          <dl className="grid gap-3 lg:grid-cols-2">
+                            {milestoneSecondaryMetrics.map((metric) => (
+                              <MilestoneSecondaryMetricRow
+                                key={metric.label}
+                                label={metric.label}
+                                value={metric.value}
+                                emphasized={metric.emphasized}
+                              />
+                            ))}
+                          </dl>
+                        </div>
+
+                        {selectedMilestone.error_message ? (
+                          <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-3 text-sm text-destructive-foreground">
+                            {selectedMilestone.error_message}
+                          </div>
+                        ) : null}
+
+                        {visibleMilestoneWarnings.length ? (
+                          <div className="rounded-lg border border-warning/30 bg-warning/10 px-3 py-3 text-sm text-warning-foreground">
+                            {visibleMilestoneWarnings.map((message) => (
+                              <p key={message}>{message}</p>
+                            ))}
+                          </div>
+                        ) : null}
+                      </CardContent>
+                    </Card>
+
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <Button
+                        variant="outline"
+                        className="h-11 w-full border-sidebar-border bg-sidebar justify-start px-4 sm:justify-center"
+                        onClick={() => setOverrideModalOpen(true)}
+                        disabled={!project || importOverrideMutation.isPending}
+                      >
+                        {importOverrideMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
+                        {t("temporal.import_override")}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        className="h-11 w-full border-sidebar-border bg-sidebar justify-start px-4 sm:justify-center"
+                        disabled={!selectedMilestone.artifacts.length}
+                        onClick={() => setSelectedMilestoneId(selectedMilestone.release_identifier)}
+                      >
+                        <Layers3 className="mr-2 h-4 w-4" />
+                        {t("temporal.map_ready")}
+                      </Button>
+                    </div>
+                  </>
+                ) : null}
             </WorkflowSectionCard>
-      </div>
+          </div>
         ) : null}
 
         {activePanel === "downloads" ? (

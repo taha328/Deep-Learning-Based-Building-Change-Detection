@@ -32,7 +32,7 @@ def _write_rgb_tif(path, array: np.ndarray) -> None:
             dst.write(array[:, :, band_index], band_index + 1)
 
 
-def _scene_result(path, valid_mask_path, identifier: str, release_date: date) -> MosaicResult:
+def _scene_result(path, valid_mask_path, identifier: str, release_date: date, *, png_path=None) -> MosaicResult:
     return MosaicResult(
         identifier=identifier,
         release_date=str(release_date),
@@ -41,7 +41,7 @@ def _scene_result(path, valid_mask_path, identifier: str, release_date: date) ->
         missing_tile_count=0,
         tile_range=(0, 0, 0, 0),
         bounds_3857=(0.0, 0.0, 1.0, 1.0),
-        png_path=path.with_suffix(".png"),
+        png_path=png_path or path.with_suffix(".png"),
         geotiff_path=path,
         valid_mask_path=valid_mask_path,
     )
@@ -92,8 +92,24 @@ def test_run_detection_populates_release_dates_in_summary(tmp_path, monkeypatch)
     _write_rgb_tif(t1_valid_mask_path, valid_mask[:, :, None])
     _write_rgb_tif(t2_valid_mask_path, valid_mask[:, :, None])
 
-    scene_t1 = _scene_result(t1_rgb_path, t1_valid_mask_path, "WB_2022_R03", date(2022, 3, 16))
-    scene_t2 = _scene_result(t2_rgb_path, t2_valid_mask_path, "WB_2026_R03", date(2026, 3, 25))
+    shared_cache_dir = tmp_path / "wayback_mosaics" / "shared-entry"
+    shared_cache_dir.mkdir(parents=True, exist_ok=True)
+    shared_png = shared_cache_dir / "mosaic.png"
+    shared_png.write_bytes(b"preview")
+    scene_t1 = _scene_result(
+        t1_rgb_path,
+        t1_valid_mask_path,
+        "WB_2022_R03",
+        date(2022, 3, 16),
+        png_path=shared_png,
+    )
+    scene_t2 = _scene_result(
+        t2_rgb_path,
+        t2_valid_mask_path,
+        "WB_2026_R03",
+        date(2026, 3, 25),
+        png_path=shared_png,
+    )
 
     monkeypatch.setattr("src.services.processing.list_releases", lambda settings: releases)
     monkeypatch.setattr("src.services.processing.load_cached_response", lambda *args, **kwargs: None)

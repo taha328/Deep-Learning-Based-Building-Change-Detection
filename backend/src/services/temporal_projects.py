@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import base64
+from dataclasses import dataclass
 from datetime import UTC, datetime
 import json
 from pathlib import Path
@@ -16,6 +17,7 @@ from shapely.ops import unary_union
 from src.config import Settings
 from src.domain.cache import load_cached_response
 from src.domain.vectorize import build_temporal_growth_blocks, build_temporal_growth_envelope
+from src.execution_profiles import PipelineExecutionConfig, resolve_backend
 from src.schemas import (
     RunRequest,
     RunResponse,
@@ -43,6 +45,17 @@ PROJECT_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{3,128}$")
 PROJECT_REGISTRY_FILENAME = "temporal_projects_registry.json"
 
 
+@dataclass(frozen=True)
+class TemporalMilestonePlanEntry:
+    index: int
+    release_identifier: str
+    previous_release_identifier: str | None
+    expected_request_hash: str | None
+    cached_response: RunResponse | None
+    reusable: bool
+    blocking_errors: list[str]
+
+
 def _utc_now_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -63,12 +76,50 @@ def _milestone_sort_key(milestone: TemporalMilestone) -> tuple[datetime, str]:
         parsed_date = datetime.fromisoformat(release_date.replace("Z", "+00:00"))
     except ValueError:
         parsed_date = datetime.max.replace(tzinfo=UTC)
+    if parsed_date.tzinfo is None:
+        parsed_date = parsed_date.replace(tzinfo=UTC)
     return parsed_date, milestone.release_identifier
 
 
 def _sort_temporal_milestones(project: TemporalProject) -> TemporalProject:
     project.milestones.sort(key=_milestone_sort_key)
     return project
+
+
+def _populate_milestone_release_dates(project: TemporalProject, settings: Settings) -> TemporalProject:
+    releases_by_id = {release.identifier: release for release in list_releases(settings)}
+    for milestone in project.milestones:
+        release = releases_by_id.get(milestone.release_identifier)
+        if release is not None:
+            milestone.release_date = str(release.release_date)
+    return project
+
+
+def _default_temporal_execution_config(settings: Settings) -> PipelineExecutionConfig:
+    if settings.model_backend_default == "bandon_mps":
+        return PipelineExecutionConfig(model_backend="bandon_mps")
+    return PipelineExecutionConfig(model_backend="sam3", backend_mode="public_zerogpu")
+
+
+def resolve_temporal_project_execution_config(project: TemporalProject, settings: Settings) -> PipelineExecutionConfig:
+    if project.execution_config is not None:
+        return project.execution_config
+
+    saw_legacy_pair = False
+    for milestone in project.milestones:
+        if milestone.status != "complete" or not milestone.pair_request_hash:
+            continue
+        response = _load_cached_run_response(settings, milestone.pair_request_hash)
+        if response is None or response.summary is None:
+            continue
+        saw_legacy_pair = True
+        if response.summary.model_backend == "bandon_mps":
+            return PipelineExecutionConfig(model_backend="bandon_mps")
+
+    if saw_legacy_pair:
+        return PipelineExecutionConfig(model_backend="sam3", backend_mode="public_zerogpu")
+
+    return _default_temporal_execution_config(settings)
 
 
 def _project_dir(settings: Settings, project_id: str) -> Path:
@@ -481,6 +532,8 @@ def _load_project(settings: Settings, project_id: str) -> TemporalProject:
     if not path.exists():
         raise FileNotFoundError(f"Unknown temporal project: {project_id}")
     project = TemporalProject.model_validate(json.loads(path.read_text()))
+    project.execution_config = resolve_temporal_project_execution_config(project, settings)
+    project = _populate_milestone_release_dates(project, settings)
     if project.project_dir is None:
         project.project_dir = str(path.parent)
     project = _sort_temporal_milestones(project)
@@ -495,7 +548,9 @@ def _load_project(settings: Settings, project_id: str) -> TemporalProject:
 
 
 def _save_project(project: TemporalProject, settings: Settings) -> TemporalProject:
+    project = _populate_milestone_release_dates(project, settings)
     project = _sort_temporal_milestones(project)
+    project.execution_config = resolve_temporal_project_execution_config(project, settings)
     project = _hydrate_reference_imagery(project, settings)
     project = _hydrate_milestone_buffer_layers(project, settings)
     project = _refresh_temporal_derived_geometry_layers(project)
@@ -542,6 +597,141 @@ def _run_project_id(request_hash: str) -> str:
 
 def _cached_run_directory(settings: Settings, request_hash: str) -> Path:
     return settings.request_cache_dir / request_hash
+
+
+def _normalize_baseline_milestone(milestone: TemporalMilestone) -> None:
+    milestone.pair_request_hash = None
+    if milestone.status != "error":
+        milestone.error_message = None
+
+
+def _prepare_temporal_pair_request(
+    *,
+    aoi_geojson: dict[str, Any],
+    previous_release_identifier: str,
+    milestone_release_identifier: str,
+    releases,
+    settings: Settings,
+    remote_patch_budget_enabled: bool,
+    request_hash_context: dict[str, object] | None,
+):
+    validation_request = ValidationRequest(
+        aoi_geojson=aoi_geojson,
+        t1_release=previous_release_identifier,
+        t2_release=milestone_release_identifier,
+        mode="full_run",
+    )
+    validation_response, prepared = validate_request(
+        validation_request,
+        releases=releases,
+        settings=settings,
+        remote_patch_budget_enabled=remote_patch_budget_enabled,
+        request_hash_context=request_hash_context,
+    )
+    return validation_request, validation_response, prepared
+
+
+def _plan_temporal_milestone_runs(
+    project: TemporalProject,
+    *,
+    settings: Settings,
+    remote_patch_budget_enabled: bool,
+    request_hash_context: dict[str, object] | None,
+) -> list[TemporalMilestonePlanEntry]:
+    if project.aoi_geojson is None:
+        return []
+
+    releases = list_releases(settings)
+    plan: list[TemporalMilestonePlanEntry] = []
+    previous_release_id: str | None = None
+    previous_successful_release_id: str | None = None
+
+    for index, milestone in enumerate(project.milestones):
+        if index == 0:
+            _normalize_baseline_milestone(milestone)
+            previous_release_id = milestone.release_identifier
+            previous_successful_release_id = milestone.release_identifier
+            plan.append(
+                TemporalMilestonePlanEntry(
+                    index=index,
+                    release_identifier=milestone.release_identifier,
+                    previous_release_identifier=None,
+                    expected_request_hash=None,
+                    cached_response=None,
+                    reusable=milestone.status == "complete",
+                    blocking_errors=[],
+                )
+            )
+            continue
+
+        previous_identifier = previous_successful_release_id or previous_release_id
+        assert previous_identifier is not None
+        _, validation_response, prepared = _prepare_temporal_pair_request(
+            aoi_geojson=project.aoi_geojson,
+            previous_release_identifier=previous_identifier,
+            milestone_release_identifier=milestone.release_identifier,
+            releases=releases,
+            settings=settings,
+            remote_patch_budget_enabled=remote_patch_budget_enabled,
+            request_hash_context=request_hash_context,
+        )
+        expected_request_hash = prepared.request_hash if prepared is not None else None
+        cached_response = (
+            _load_cached_run_response(settings, expected_request_hash)
+            if expected_request_hash is not None
+            else None
+        )
+        reusable = (
+            not validation_response.blocking_errors
+            and milestone.status == "complete"
+            and expected_request_hash is not None
+            and milestone.pair_request_hash == expected_request_hash
+            and cached_response is not None
+        )
+        plan.append(
+            TemporalMilestonePlanEntry(
+                index=index,
+                release_identifier=milestone.release_identifier,
+                previous_release_identifier=previous_identifier,
+                expected_request_hash=expected_request_hash,
+                cached_response=cached_response,
+                reusable=reusable,
+                blocking_errors=list(validation_response.blocking_errors),
+            )
+        )
+        if not validation_response.blocking_errors:
+            previous_successful_release_id = milestone.release_identifier
+        previous_release_id = milestone.release_identifier
+
+    return plan
+
+
+def _apply_pair_response_to_milestone(
+    milestone: TemporalMilestone,
+    *,
+    response: RunResponse,
+    previous_cumulative: BaseGeometry,
+    aoi_geometry: BaseGeometry,
+    request_hash: str | None = None,
+) -> None:
+    automated_additions_geojson = (
+        response.new_buildings_geojson
+        or response.change_polygons_geojson
+        or _empty_feature_collection()
+    )
+    automated_additions_geometry = _geometry_from_geojson(automated_additions_geojson).intersection(aoi_geometry).buffer(0)
+    automated_candidate_geometry = unary_union([previous_cumulative, automated_additions_geometry]).intersection(aoi_geometry).buffer(0)
+
+    milestone.pair_request_hash = request_hash or (response.summary.request_hash if response.summary is not None else None)
+    milestone.automated_additions_geojson = automated_additions_geojson
+    milestone.automated_candidate_footprint_geojson = _feature_collection_from_geometry(automated_candidate_geometry)
+    milestone.automated_building_blocks_geojson = response.building_blocks_geojson or _empty_feature_collection()
+    milestone.buffer_layers_geojson = response.buffer_layers_geojson
+    milestone.warnings = [
+        warning
+        for warning in ((response.diagnostics.warnings if response.diagnostics else []) or [])
+        if isinstance(warning, str)
+    ]
 
 
 def _buffer_layer_geojson(buffer_layers_geojson: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
@@ -935,8 +1125,16 @@ def validate_temporal_project(
     settings: Settings,
     remote_patch_budget_enabled: bool = True,
     request_hash_context: dict[str, object] | None = None,
+    execution_config: PipelineExecutionConfig | None = None,
 ) -> TemporalProjectValidationResponse:
     normalized = project.model_copy(deep=True)
+    normalized.execution_config = execution_config or resolve_temporal_project_execution_config(normalized, settings)
+    normalized = _populate_milestone_release_dates(normalized, settings)
+    if request_hash_context is None:
+        backend = resolve_backend(normalized.execution_config, settings=settings)
+        settings = backend.configure_settings(settings)
+        remote_patch_budget_enabled = backend.enforce_remote_patch_budget()
+        request_hash_context = backend.request_hash_context(settings)
     project_warnings: list[str] = []
     blocking_errors: list[str] = []
 
@@ -955,6 +1153,8 @@ def validate_temporal_project(
 
     if not normalized.milestones:
         blocking_errors.append("At least one milestone is required.")
+    elif normalized.milestones:
+        _normalize_baseline_milestone(normalized.milestones[0])
 
     if not blocking_errors:
         pair_estimates, pair_warnings, pair_blocking_errors = _timeline_requests(
@@ -982,11 +1182,32 @@ def validate_temporal_project(
     )
 
 
-def _recompute_project_outputs(project: TemporalProject, aoi_geometry: BaseGeometry) -> TemporalProject:
+def _recompute_project_outputs_from_index(
+    project: TemporalProject,
+    aoi_geometry: BaseGeometry,
+    start_index: int,
+    end_index: int | None = None,
+) -> TemporalProject:
     _sort_temporal_milestones(project)
-    previous_cumulative = GeometryCollection()
+    if not project.milestones:
+        return project
 
-    for index, milestone in enumerate(project.milestones):
+    start_index = max(start_index, 0)
+    if start_index >= len(project.milestones):
+        return project
+    if end_index is None:
+        end_index = len(project.milestones) - 1
+    else:
+        end_index = min(max(end_index, start_index), len(project.milestones) - 1)
+
+    previous_cumulative = (
+        GeometryCollection()
+        if start_index == 0
+        else _geometry_from_geojson(project.milestones[start_index - 1].cumulative_union_geojson)
+    )
+
+    for index in range(start_index, end_index + 1):
+        milestone = project.milestones[index]
         release_date = milestone.release_date
         automated_candidate_geometry = _geometry_from_geojson(milestone.automated_candidate_footprint_geojson)
         if automated_candidate_geometry.is_empty and milestone.automated_additions_geojson is not None:
@@ -1076,6 +1297,10 @@ def _recompute_project_outputs(project: TemporalProject, aoi_geometry: BaseGeome
     return project
 
 
+def _recompute_project_outputs(project: TemporalProject, aoi_geometry: BaseGeometry) -> TemporalProject:
+    return _recompute_project_outputs_from_index(project, aoi_geometry, 0)
+
+
 def run_temporal_project(
     project_id: str,
     *,
@@ -1083,12 +1308,21 @@ def run_temporal_project(
     pair_runner: PairRunner,
     remote_patch_budget_enabled: bool = True,
     request_hash_context: dict[str, object] | None = None,
+    execution_config: PipelineExecutionConfig | None = None,
 ) -> TemporalProjectRunResponse:
+    project = _load_project(settings, project_id)
+    resolved_execution_config = execution_config or resolve_temporal_project_execution_config(project, settings)
+    if request_hash_context is None:
+        backend = resolve_backend(resolved_execution_config, settings=settings)
+        settings = backend.configure_settings(settings)
+        remote_patch_budget_enabled = backend.enforce_remote_patch_budget()
+        request_hash_context = backend.request_hash_context(settings)
     validation = validate_temporal_project(
-        _load_project(settings, project_id),
+        project,
         settings=settings,
         remote_patch_budget_enabled=remote_patch_budget_enabled,
         request_hash_context=request_hash_context,
+        execution_config=resolved_execution_config,
     )
     project = validation.project
     if not validation.valid:
@@ -1101,56 +1335,85 @@ def run_temporal_project(
 
     assert project.aoi_geojson is not None
     aoi_geometry = parse_aoi_geometry(project.aoi_geojson)
-    previous_cumulative = GeometryCollection()
-    previous_successful_release_identifier: str | None = None
+    _normalize_baseline_milestone(project.milestones[0])
+    project.milestones[0].automated_additions_geojson = _empty_feature_collection()
+    project.milestones[0].automated_candidate_footprint_geojson = _empty_feature_collection()
+    project.milestones[0].automated_building_blocks_geojson = _empty_feature_collection()
+    project.milestones[0].buffer_layers_geojson = {}
+    project = _recompute_project_outputs_from_index(project, aoi_geometry, 0, 0)
+    plan = _plan_temporal_milestone_runs(
+        project,
+        settings=settings,
+        remote_patch_budget_enabled=remote_patch_budget_enabled,
+        request_hash_context=request_hash_context,
+    )
+    dirty_start = next(
+        (
+            entry.index
+            for entry in plan
+            if entry.index > 0 and not entry.reusable
+        ),
+        None,
+    )
 
-    for index, milestone in enumerate(project.milestones):
+    if dirty_start is None:
+        project.updated_at = _utc_now_iso()
+        project = _refresh_project_bundle(project, settings)
+        _save_project(project, settings)
+        return TemporalProjectRunResponse(success=True, project=project)
+
+    previous_successful_release_identifier = project.milestones[dirty_start - 1].release_identifier if dirty_start > 0 else None
+    previous_cumulative = (
+        GeometryCollection()
+        if dirty_start == 0
+        else _geometry_from_geojson(project.milestones[dirty_start - 1].cumulative_union_geojson)
+    )
+
+    releases = list_releases(settings)
+    for index in range(dirty_start, len(project.milestones)):
+        milestone = project.milestones[index]
         milestone.warnings = []
         milestone.error_message = None
 
-        if index == 0:
-            previous_successful_release_identifier = milestone.release_identifier
-            milestone.automated_additions_geojson = _empty_feature_collection()
-            milestone.automated_candidate_footprint_geojson = _feature_collection_from_geometry(previous_cumulative)
-            milestone.automated_building_blocks_geojson = _empty_feature_collection()
-            project = _recompute_project_outputs(project, aoi_geometry)
-            previous_cumulative = _geometry_from_geojson(milestone.cumulative_union_geojson)
-            continue
-
         previous_release_identifier = previous_successful_release_identifier or project.milestones[index - 1].release_identifier
-        run_request = RunRequest(
+        run_request, validation_response, prepared = _prepare_temporal_pair_request(
             aoi_geojson=project.aoi_geojson,
-            t1_release=previous_release_identifier,
-            t2_release=milestone.release_identifier,
-            mode="full_run",
+            previous_release_identifier=previous_release_identifier,
+            milestone_release_identifier=milestone.release_identifier,
+            releases=releases,
+            settings=settings,
+            remote_patch_budget_enabled=remote_patch_budget_enabled,
+            request_hash_context=request_hash_context,
         )
-        response = pair_runner(run_request)
-        if not response.success:
+        if prepared is None or validation_response.blocking_errors:
             milestone.status = "error"
-            milestone.error_message = response.error_message or "Temporal pair run failed."
+            milestone.error_message = "; ".join(validation_response.blocking_errors) or "Temporal pair validation failed."
             project.updated_at = _utc_now_iso()
             continue
 
-        automated_additions_geojson = (
-            response.new_buildings_geojson
-            or response.change_polygons_geojson
-            or _empty_feature_collection()
+        cached_response = _load_cached_run_response(settings, prepared.request_hash)
+        response = cached_response if cached_response is not None else pair_runner(
+            RunRequest(
+                aoi_geojson=run_request.aoi_geojson,
+                t1_release=run_request.t1_release,
+                t2_release=run_request.t2_release,
+                mode=run_request.mode,
+            )
         )
-        automated_additions_geometry = _geometry_from_geojson(automated_additions_geojson).intersection(aoi_geometry).buffer(0)
-        automated_candidate_geometry = unary_union([previous_cumulative, automated_additions_geometry]).intersection(aoi_geometry).buffer(0)
+        if response is None or not response.success:
+            milestone.status = "error"
+            milestone.error_message = (response.error_message if response is not None else None) or "Temporal pair run failed."
+            project.updated_at = _utc_now_iso()
+            continue
 
-        milestone.pair_request_hash = response.summary.request_hash if response.summary is not None else None
-        milestone.automated_additions_geojson = automated_additions_geojson
-        milestone.automated_candidate_footprint_geojson = _feature_collection_from_geometry(automated_candidate_geometry)
-        milestone.automated_building_blocks_geojson = response.building_blocks_geojson or _empty_feature_collection()
-        milestone.buffer_layers_geojson = response.buffer_layers_geojson
-        milestone.warnings = [
-            warning
-            for warning in ((response.diagnostics.warnings if response.diagnostics else []) or [])
-            if isinstance(warning, str)
-        ]
-
-        project = _recompute_project_outputs(project, aoi_geometry)
+        _apply_pair_response_to_milestone(
+            milestone,
+            response=response,
+            previous_cumulative=previous_cumulative,
+            aoi_geometry=aoi_geometry,
+            request_hash=prepared.request_hash,
+        )
+        project = _recompute_project_outputs_from_index(project, aoi_geometry, index, index)
         previous_cumulative = _geometry_from_geojson(milestone.cumulative_union_geojson)
         previous_successful_release_identifier = milestone.release_identifier
 

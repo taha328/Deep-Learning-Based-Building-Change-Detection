@@ -44,6 +44,7 @@ def test_cached_response_is_upgraded_with_missing_raster_georeferencing(tmp_path
     result_dir.mkdir(parents=True, exist_ok=True)
 
     _write_test_raster(result_dir / "t1_wayback_rgb.tif")
+    assert not (result_dir / "t1_WB_2022_R03_z19.png").exists()
 
     legacy_payload = {
         "success": True,

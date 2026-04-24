@@ -238,11 +238,9 @@ def create_app(settings: Settings) -> gr.Blocks:
                     blocking_errors=[str(exc)],
                 ).model_dump(mode="json")
 
-            execution_config = PipelineExecutionConfig(model_backend=settings.model_backend_default)
             return validate_temporal_project_api(
                 parsed_project,
                 settings=settings,
-                execution_config=execution_config,
             ).model_dump(mode="json")
 
         def _run_temporal_project(request: dict, request_context: gr.Request) -> dict:
@@ -259,11 +257,9 @@ def create_app(settings: Settings) -> gr.Blocks:
                     ),
                 ).model_dump(mode="json")
 
-            execution_config = PipelineExecutionConfig(model_backend=settings.model_backend_default)
             return run_temporal_project_api(
                 project_id,
                 settings=settings,
-                execution_config=execution_config,
                 x_ip_token=request_context.headers.get("x-ip-token"),
             ).model_dump(mode="json")
 

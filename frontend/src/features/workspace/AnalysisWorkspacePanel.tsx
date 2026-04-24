@@ -1,7 +1,6 @@
 import type { FrontendRuntimeConfig } from "@/lib/env";
 import type { BackendAvailability, ReleaseMetadata } from "@/api/contracts";
 import type { TemporalMapPresentation } from "@/features/temporal/types";
-import { SettingsPanel } from "@/features/settings/SettingsPanel";
 import { TemporalMosaicPanel } from "@/features/temporal/TemporalMosaicPanel";
 
 export function AnalysisWorkspacePanel({
@@ -34,40 +33,22 @@ export function AnalysisWorkspacePanel({
   onTemporalMapPresentationChange: (presentation: TemporalMapPresentation | null) => void;
 }) {
   return (
-    <>
-      <div hidden={workflowMode !== "pairwise"} className="h-full">
-      <SettingsPanel
+    <div className="h-full">
+      <TemporalMosaicPanel
         workflowMode={workflowMode}
         onWorkflowModeChange={onWorkflowModeChange}
         backendUrl={backendUrl}
+        runtimeConfig={runtimeConfig}
         releases={releases}
         releasesLoading={releasesLoading}
         releasesError={releasesError}
         backendAvailability={backendAvailability}
         backendAvailabilityLoading={backendAvailabilityLoading}
         backendAvailabilityError={backendAvailabilityError}
-        runtimeConfig={runtimeConfig}
         isCollapsed={isCollapsed}
         onToggleCollapse={onToggleCollapse}
+        onMapPresentationChange={onTemporalMapPresentationChange}
       />
-      </div>
-      <div hidden={workflowMode !== "temporal"} className="h-full">
-        <TemporalMosaicPanel
-          workflowMode={workflowMode}
-          onWorkflowModeChange={onWorkflowModeChange}
-          backendUrl={backendUrl}
-          runtimeConfig={runtimeConfig}
-          releases={releases}
-          releasesLoading={releasesLoading}
-          releasesError={releasesError}
-          backendAvailability={backendAvailability}
-          backendAvailabilityLoading={backendAvailabilityLoading}
-          backendAvailabilityError={backendAvailabilityError}
-          isCollapsed={isCollapsed}
-          onToggleCollapse={onToggleCollapse}
-          onMapPresentationChange={onTemporalMapPresentationChange}
-        />
-      </div>
-    </>
+    </div>
   );
 }

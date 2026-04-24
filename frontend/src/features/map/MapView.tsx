@@ -822,6 +822,9 @@ export function MapView({
   const selectedTemporalMilestoneReady =
     temporalPresentation?.selectedMilestoneStatus === "complete" ||
     temporalPresentation?.selectedMilestoneStatus === "validated";
+  const hasPairwiseLayerContext = workflowMode === "pairwise" && Boolean(result?.success);
+  const hasTemporalMosaicLayerContext =
+    workflowMode === "temporal" && Boolean(temporalPresentation) && (temporalPresentation?.milestoneCount ?? 0) >= 2;
 
   const detectedPolygons = useMemo(
     () =>
@@ -1359,9 +1362,9 @@ export function MapView({
 
   const draftModeActive = drawingMode === "drawing" || drawingMode === "editing";
   const temporalReferenceImageryHasSource = Boolean(overlaySources.temporalReferenceImagery);
-  const temporalRasterOverlayAvailable = temporalReferenceImageryHasSource;
+  const temporalRasterOverlayAvailable = hasTemporalMosaicLayerContext && temporalReferenceImageryHasSource;
   const imagerySectionEntries =
-    workflowMode === "pairwise"
+    hasPairwiseLayerContext
       ? ([
           {
             key: "t1Preview",
@@ -1396,18 +1399,20 @@ export function MapView({
               : t("map.reference_imagery_unavailable"),
           },
         ] satisfies LayerEntry[])
-      : ([
-          {
-            key: "temporalReferenceImagery",
-            label: t("map.reference_imagery"),
-            enabled: selectedTemporalMilestoneReady && temporalReferenceImageryHasSource && rasterOverlaysGeoreferenced,
-            description: temporalReferenceImageryHasSource
-              ? (!rasterOverlaysGeoreferenced ? t("map.reference_imagery_missing_georeference") : undefined)
-              : t("map.reference_imagery_unavailable"),
-          },
-        ] satisfies LayerEntry[]);
+      : hasTemporalMosaicLayerContext
+        ? ([
+            {
+              key: "temporalReferenceImagery",
+              label: t("map.reference_imagery"),
+              enabled: selectedTemporalMilestoneReady && temporalReferenceImageryHasSource && rasterOverlaysGeoreferenced,
+              description: temporalReferenceImageryHasSource
+                ? (!rasterOverlaysGeoreferenced ? t("map.reference_imagery_missing_georeference") : undefined)
+                : t("map.reference_imagery_unavailable"),
+            },
+          ] satisfies LayerEntry[])
+      : ([] satisfies LayerEntry[]);
   const analysisSectionEntries =
-    workflowMode === "pairwise"
+    hasPairwiseLayerContext
       ? ([
           { key: "detectedPolygons", label: t("download.detected_polygons"), enabled: detectedPolygons.features.length > 0 },
           { key: "buildingBlocks", label: t("download.building_blocks"), enabled: buildingBlocks.features.length > 0 },
@@ -1415,37 +1420,41 @@ export function MapView({
           { key: "buffer15m", label: `${t("map.building_change_buffer")} 15 m`, enabled: pairwiseBuffers.buffer15m.features.length > 0 },
           { key: "buffer20m", label: `${t("map.building_change_buffer")} 20 m`, enabled: pairwiseBuffers.buffer20m.features.length > 0 },
         ] satisfies LayerEntry[])
-      : ([
-          {
-            key: "temporalAdditions",
-            label: t("map.additions"),
-            enabled: selectedTemporalMilestoneReady && temporalVectors.temporalAdditions.features.length > 0,
-          },
-          {
-            key: "temporalConvexHull",
-            label: t("map.convex_hull"),
-            enabled: selectedTemporalMilestoneReady && temporalVectors.temporalConvexHull.features.length > 0,
-          },
-          {
-            key: "temporalCumulative",
-            label: t("map.cumulative_union"),
-            enabled: selectedTemporalMilestoneReady && temporalVectors.temporalCumulative.features.length > 0,
-          },
-          {
-            key: "temporalCumulativeGrowthEnvelope",
-            label: t("map.growth_envelope"),
-            enabled: selectedTemporalMilestoneReady && temporalVectors.temporalCumulativeGrowthEnvelope.features.length > 0,
-          },
-          {
-            key: "temporalManualOverride",
-            label: t("map.manual_override"),
-            enabled: selectedTemporalMilestoneReady && temporalVectors.temporalManualOverride.features.length > 0,
-          },
-        ] satisfies LayerEntry[]);
+      : hasTemporalMosaicLayerContext
+        ? ([
+            {
+              key: "temporalAdditions",
+              label: t("map.additions"),
+              enabled: selectedTemporalMilestoneReady && temporalVectors.temporalAdditions.features.length > 0,
+            },
+            {
+              key: "temporalConvexHull",
+              label: t("map.convex_hull"),
+              enabled: selectedTemporalMilestoneReady && temporalVectors.temporalConvexHull.features.length > 0,
+            },
+            {
+              key: "temporalCumulative",
+              label: t("map.cumulative_union"),
+              enabled: selectedTemporalMilestoneReady && temporalVectors.temporalCumulative.features.length > 0,
+            },
+            {
+              key: "temporalCumulativeGrowthEnvelope",
+              label: t("map.growth_envelope"),
+              enabled: selectedTemporalMilestoneReady && temporalVectors.temporalCumulativeGrowthEnvelope.features.length > 0,
+            },
+            {
+              key: "temporalManualOverride",
+              label: t("map.manual_override"),
+              enabled: selectedTemporalMilestoneReady && temporalVectors.temporalManualOverride.features.length > 0,
+            },
+            { key: "buffer10m", label: `${t("map.building_change_buffer")} 10 m`, enabled: selectedTemporalMilestoneReady },
+            { key: "buffer15m", label: `${t("map.building_change_buffer")} 15 m`, enabled: selectedTemporalMilestoneReady },
+            { key: "buffer20m", label: `${t("map.building_change_buffer")} 20 m`, enabled: selectedTemporalMilestoneReady },
+          ] satisfies LayerEntry[])
+      : ([] satisfies LayerEntry[]);
   const advancedSectionEntries =
-    workflowMode === "pairwise"
-      ? ([] satisfies LayerEntry[])
-      : ([
+    hasTemporalMosaicLayerContext
+      ? ([
           {
             key: "temporalAutomated",
             label: t("map.automated_candidate"),
@@ -1466,11 +1475,10 @@ export function MapView({
             label: t("map.cumulative_growth_blocks"),
             enabled: selectedTemporalMilestoneReady && temporalVectors.temporalCumulativeGrowthBlocks.features.length > 0,
           },
-          { key: "buffer10m", label: `${t("map.building_change_buffer")} 10 m`, enabled: selectedTemporalMilestoneReady },
-          { key: "buffer15m", label: `${t("map.building_change_buffer")} 15 m`, enabled: selectedTemporalMilestoneReady },
-          { key: "buffer20m", label: `${t("map.building_change_buffer")} 20 m`, enabled: selectedTemporalMilestoneReady },
-        ] satisfies LayerEntry[]);
+        ] satisfies LayerEntry[])
+      : ([] satisfies LayerEntry[]);
   const baseSectionEntries = ([{ key: "labels", label: t("download.reference_labels"), enabled: true }] satisfies LayerEntry[]);
+  const showLayerPanel = hasPairwiseLayerContext || hasTemporalMosaicLayerContext;
   const renderLayerEntry = (entry: LayerEntry) => (
     <label
       key={entry.key}
@@ -1636,6 +1644,7 @@ export function MapView({
         ) : null}
       </div>
 
+      {showLayerPanel ? (
       <div className="absolute right-4 top-4 z-10 w-72 max-w-[calc(100%-2rem)]">
         <div className="rounded-sm bg-card shadow-panel backdrop-blur-sm border border-border">
           <button
@@ -1661,28 +1670,32 @@ export function MapView({
                 </p>
               ) : null}
               <div className="space-y-3">
-                <div>
-                  <p className="px-2 pb-1 label-xs-upper">
-                    {t("map.reference_imagery_section")}
-                  </p>
-                  {imagerySectionEntries.map(renderLayerEntry)}
-                </div>
-                <div>
-                  <p className="px-2 pb-1 label-xs-upper">
-                    {t("map.temporal_outputs_section")}
-                  </p>
-                  {analysisSectionEntries.map(renderLayerEntry)}
-                  {advancedSectionEntries.length ? (
-                    <details className="mt-1">
-                      <summary className="cursor-pointer px-2 py-2 text-label font-medium text-muted-foreground">
-                        {t("map.derived_layers_section")}
-                      </summary>
-                      <div className="space-y-1">
-                        {advancedSectionEntries.map(renderLayerEntry)}
-                      </div>
-                    </details>
-                  ) : null}
-                </div>
+                {imagerySectionEntries.length ? (
+                  <div>
+                    <p className="px-2 pb-1 label-xs-upper">
+                      {t("map.reference_imagery_section")}
+                    </p>
+                    {imagerySectionEntries.map(renderLayerEntry)}
+                  </div>
+                ) : null}
+                {analysisSectionEntries.length || advancedSectionEntries.length ? (
+                  <div>
+                    <p className="px-2 pb-1 label-xs-upper">
+                      {t("map.temporal_outputs_section")}
+                    </p>
+                    {analysisSectionEntries.map(renderLayerEntry)}
+                    {advancedSectionEntries.length ? (
+                      <details className="mt-1">
+                        <summary className="cursor-pointer px-2 py-2 text-label font-medium text-muted-foreground">
+                          {t("map.derived_layers_section")}
+                        </summary>
+                        <div className="space-y-1">
+                          {advancedSectionEntries.map(renderLayerEntry)}
+                        </div>
+                      </details>
+                    ) : null}
+                  </div>
+                ) : null}
                 <div>
                   <p className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">
                     {t("map.reference_labels_section")}
@@ -1694,6 +1707,7 @@ export function MapView({
           ) : null}
         </div>
       </div>
+      ) : null}
 
       {draftModeActive ? (
         <>

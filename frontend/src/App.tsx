@@ -1,22 +1,57 @@
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 
 import { listReleases, probeBackends } from "@/api/gradio";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useAppStore } from "@/app/store";
 import { I18nProvider } from "@/app/I18nProvider";
-import { MapView } from "@/features/map/MapView";
-import { AnalysisWorkspacePanel } from "@/features/workspace/AnalysisWorkspacePanel";
 import { getFrontendRuntimeConfig, getMapboxApiKey, type FrontendRuntimeConfig } from "@/lib/env";
 import { useI18n } from "@/lib/i18n";
 import type { TemporalMapPresentation } from "@/features/temporal/types";
+
+const AnalysisWorkspacePanel = lazy(() =>
+  import("@/features/workspace/AnalysisWorkspacePanel").then((module) => ({
+    default: module.AnalysisWorkspacePanel,
+  })),
+);
+
+const MapView = lazy(() =>
+  import("@/features/map/MapView").then((module) => ({
+    default: module.MapView,
+  })),
+);
+
+function WorkspaceSkeleton() {
+  return (
+    <div className="hidden h-full w-[30rem] max-w-[42vw] border-r border-border bg-sidebar lg:block">
+      <div className="space-y-4 p-5">
+        <div className="h-8 w-40 rounded-md bg-surface" />
+        <div className="h-28 rounded-xl border border-sidebar-border bg-surface" />
+        <div className="h-48 rounded-xl border border-sidebar-border bg-surface" />
+        <div className="h-56 rounded-xl border border-sidebar-border bg-surface" />
+      </div>
+    </div>
+  );
+}
+
+function MapSkeleton({ label }: { label: string }) {
+  return (
+    <div className="relative flex min-h-0 flex-1 items-center justify-center bg-surface">
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,_oklch(var(--card))_0%,_oklch(var(--surface))_48%,_oklch(var(--background))_100%)]" />
+      <div className="relative rounded-lg border border-border bg-card px-4 py-3 text-sm text-muted-foreground shadow-panel">
+        {label}
+      </div>
+    </div>
+  );
+}
 
 function AppContent() {
   const { t } = useI18n();
   const isRunning = useAppStore((state) => state.isRunning);
   const [panelCollapsed, setPanelCollapsed] = useState(false);
-  const [workflowMode, setWorkflowMode] = useState<"pairwise" | "temporal">("pairwise");
+  const [workflowMode, setWorkflowModeState] = useState<"pairwise" | "temporal">("temporal");
   const [temporalMapPresentation, setTemporalMapPresentation] = useState<TemporalMapPresentation | null>(null);
+  const setWorkflowMode = () => setWorkflowModeState("temporal");
   let runtimeConfig: FrontendRuntimeConfig | null = null;
   let backendUrl = "";
   let mapboxApiKey = "";
@@ -65,27 +100,31 @@ function AppContent() {
   return (
     <main className="relative flex h-screen flex-col overflow-hidden bg-background text-foreground lg:flex-row">
       <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
-        <AnalysisWorkspacePanel
-          workflowMode={workflowMode}
-          onWorkflowModeChange={setWorkflowMode}
-          backendUrl={backendUrl}
-          releases={releasesQuery.data ?? []}
-          releasesLoading={releasesQuery.isLoading}
-          releasesError={releasesQuery.error instanceof Error ? releasesQuery.error.message : null}
-          backendAvailability={backendsQuery.data ?? []}
-          backendAvailabilityLoading={backendsQuery.isLoading}
-          backendAvailabilityError={backendsQuery.error instanceof Error ? backendsQuery.error.message : null}
-          runtimeConfig={runtimeConfig}
-          isCollapsed={panelCollapsed}
-          onToggleCollapse={() => setPanelCollapsed((prev) => !prev)}
-          onTemporalMapPresentationChange={setTemporalMapPresentation}
-        />
-        <MapView
-          apiKey={mapboxApiKey}
-          backendUrl={backendUrl}
-          workflowMode={workflowMode}
-          temporalPresentation={workflowMode === "temporal" ? temporalMapPresentation : null}
-        />
+        <Suspense fallback={<WorkspaceSkeleton />}>
+          <AnalysisWorkspacePanel
+            workflowMode={workflowMode}
+            onWorkflowModeChange={setWorkflowMode}
+            backendUrl={backendUrl}
+            releases={releasesQuery.data ?? []}
+            releasesLoading={releasesQuery.isLoading}
+            releasesError={releasesQuery.error instanceof Error ? releasesQuery.error.message : null}
+            backendAvailability={backendsQuery.data ?? []}
+            backendAvailabilityLoading={backendsQuery.isLoading}
+            backendAvailabilityError={backendsQuery.error instanceof Error ? backendsQuery.error.message : null}
+            runtimeConfig={runtimeConfig}
+            isCollapsed={panelCollapsed}
+            onToggleCollapse={() => setPanelCollapsed((prev) => !prev)}
+            onTemporalMapPresentationChange={setTemporalMapPresentation}
+          />
+        </Suspense>
+        <Suspense fallback={<MapSkeleton label="Loading…" />}>
+          <MapView
+            apiKey={mapboxApiKey}
+            backendUrl={backendUrl}
+            workflowMode={workflowMode}
+            temporalPresentation={temporalMapPresentation}
+          />
+        </Suspense>
       </div>
     </main>
   );

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from src.execution_profiles import PipelineExecutionConfig
 
 
 ModeName = Literal["fast_preview", "full_run"]
@@ -269,6 +270,7 @@ class TemporalProject(BaseModel):
     milestones: list[TemporalMilestone] = Field(default_factory=list)
     created_at: str
     updated_at: str
+    execution_config: PipelineExecutionConfig | None = None
     warnings: list[str] = Field(default_factory=list)
     validation_blocking_errors: list[str] = Field(default_factory=list)
     download_bundle_path: str | None = None

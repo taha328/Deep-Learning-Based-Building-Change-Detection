@@ -28,6 +28,7 @@ from src.services.temporal_projects import (
     get_temporal_project,
     import_temporal_override,
     list_temporal_projects,
+    resolve_temporal_project_execution_config,
     run_temporal_project,
     save_temporal_project,
     validate_temporal_project,
@@ -139,13 +140,15 @@ def validate_temporal_project_api(
     execution_config: PipelineExecutionConfig | None = None,
 ) -> TemporalProjectValidationResponse:
     resolved_settings = _resolve_settings(settings)
-    backend = resolve_backend(execution_config, settings=resolved_settings)
+    resolved_execution_config = execution_config or resolve_temporal_project_execution_config(project, resolved_settings)
+    backend = resolve_backend(resolved_execution_config, settings=resolved_settings)
     configured_settings = backend.configure_settings(resolved_settings)
     return validate_temporal_project(
         project,
         settings=configured_settings,
         remote_patch_budget_enabled=backend.enforce_remote_patch_budget(),
         request_hash_context=backend.request_hash_context(configured_settings),
+        execution_config=resolved_execution_config,
     )
 
 
@@ -157,9 +160,10 @@ def run_temporal_project_api(
     x_ip_token: str | None = None,
 ) -> TemporalProjectRunResponse:
     resolved_settings = _resolve_settings(settings)
-    backend = resolve_backend(execution_config, settings=resolved_settings)
-    availability = backend.availability(resolved_settings)
     project = get_temporal_project(project_id, resolved_settings)
+    resolved_execution_config = execution_config or resolve_temporal_project_execution_config(project, resolved_settings)
+    backend = resolve_backend(resolved_execution_config, settings=resolved_settings)
+    availability = backend.availability(resolved_settings)
     if not availability.available:
         return TemporalProjectRunResponse(
             success=False,
@@ -186,6 +190,7 @@ def run_temporal_project_api(
         pair_runner=_pair_runner,
         remote_patch_budget_enabled=backend.enforce_remote_patch_budget(),
         request_hash_context=backend.request_hash_context(configured_settings),
+        execution_config=resolved_execution_config,
     )
 
 
