@@ -79,6 +79,18 @@ class ValidationRequest(BaseModel):
         return value
 
 
+class SegmentationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    aoi_geojson: dict[str, Any]
+    release: str
+    mode: ModeName
+    model_backend: Literal["sam3"] | None = "sam3"
+    sam3_backend_mode: Sam3BackendMode | None = None
+    semantic_threshold: float | None = None
+    min_segment_pixels: int | None = None
+
+
 class ValidationResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -139,7 +151,7 @@ class SummaryStats(BaseModel):
     request_hash: str
     mode: ModeName
     model_backend: str | None = None
-    result_semantics: Literal["new_buildings", "building_change"] | None = None
+    result_semantics: Literal["new_buildings", "building_change", "segmentation"] | None = None
     estimated_area_m2: float
     tile_count_t1: int
     tile_count_t2: int
@@ -155,6 +167,12 @@ class SummaryStats(BaseModel):
     dominant_src_date_t2: str | None = None
     dominant_src_res_m_t1: float | None = None
     dominant_src_res_m_t2: float | None = None
+    release_date: str | None = None
+    dominant_src_date: str | None = None
+    dominant_src_res_m: float | None = None
+    segmentation_prompt: str | None = None
+    total_segments: int = 0
+    total_segment_area_m2: float = 0.0
 
 
 class DiagnosticMetadata(BaseModel):
@@ -192,6 +210,7 @@ class RunResponse(BaseModel):
     preview_images: PreviewImages | None = None
     change_polygons_geojson: dict[str, Any] | None = None
     new_buildings_geojson: dict[str, Any] | None = None
+    segmentation_geojson: dict[str, Any] | None = None
     building_blocks_geojson: dict[str, Any] | None = None
     buffer_layers_geojson: dict[str, dict[str, Any]] = Field(default_factory=dict)
     tabular_metrics: TabularMetrics | None = None

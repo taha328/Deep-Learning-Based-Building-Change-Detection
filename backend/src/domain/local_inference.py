@@ -559,3 +559,35 @@ def run_local_tiled_inference(
             ),
         ),
     )
+
+
+def run_local_single_scene_inference(
+    scene_rgb: np.ndarray,
+    *,
+    settings: Settings,
+    semantic_threshold: float,
+    local_config: LocalInferenceConfig,
+    cache_dir=None,
+    x_ip_token: str | None = None,
+    progress_callback: Callable[[str], None] | None = None,
+) -> tuple[dict[str, np.ndarray], InferenceDiagnostics]:
+    del cache_dir, x_ip_token
+
+    probe = probe_local_runtime(local_config)
+    if not probe.available or probe.implementation is None:
+        raise RuntimeError(probe.message)
+
+    scene_runner = (
+        _run_repo_scene_segmentation
+        if probe.implementation == "official_repo"
+        else _run_transformers_scene_segmentation
+    )
+    prediction, diagnostics = scene_runner(
+        scene_rgb,
+        scene_label="source",
+        settings=settings,
+        semantic_threshold=semantic_threshold,
+        local_config=local_config,
+        progress_callback=progress_callback,
+    )
+    return {"segmentation_prediction": prediction}, diagnostics

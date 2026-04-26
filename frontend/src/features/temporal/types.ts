@@ -11,6 +11,7 @@ export interface TemporalMapPresentation {
   additions: FeatureCollection;
   effectiveBuildingBlocks: FeatureCollection;
   bufferLayers: Record<string, FeatureCollection>;
+  cumulativeBuffer10m: FeatureCollection;
   cumulativeUnion: FeatureCollection;
   cumulativeConvexHull: FeatureCollection;
   cumulativeGrowthBlocks: FeatureCollection;

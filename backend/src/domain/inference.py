@@ -571,6 +571,27 @@ def run_tiled_inference(
     )
 
 
+def run_single_scene_inference(
+    scene_rgb: np.ndarray,
+    *,
+    settings: Settings,
+    semantic_threshold: float,
+    cache_dir: Path | None = None,
+    x_ip_token: str | None = None,
+    progress_callback: Callable[[str], None] | None = None,
+) -> tuple[dict[str, np.ndarray], InferenceDiagnostics]:
+    prediction, diagnostics = _run_scene_segmentation(
+        scene_rgb,
+        scene_label="source",
+        settings=settings,
+        semantic_threshold=semantic_threshold,
+        cache_dir=cache_dir,
+        x_ip_token=x_ip_token,
+        progress_callback=progress_callback,
+    )
+    return {"segmentation_prediction": prediction}, diagnostics
+
+
 def derive_new_building_products(
     change_prob: np.ndarray,
     t1_building_prob: np.ndarray,

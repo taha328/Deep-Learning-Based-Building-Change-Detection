@@ -87,8 +87,13 @@ def _sort_temporal_milestones(project: TemporalProject) -> TemporalProject:
 
 
 def _populate_milestone_release_dates(project: TemporalProject, settings: Settings) -> TemporalProject:
+    if project.milestones and all(milestone.release_date for milestone in project.milestones):
+        return project
+
     releases_by_id = {release.identifier: release for release in list_releases(settings)}
     for milestone in project.milestones:
+        if milestone.release_date:
+            continue
         release = releases_by_id.get(milestone.release_identifier)
         if release is not None:
             milestone.release_date = str(release.release_date)
@@ -188,6 +193,10 @@ def _resolve_project_dir(settings: Settings, project_id: str, project_dir: str |
 
 def _project_json_path(settings: Settings, project_id: str) -> Path:
     return _resolve_project_dir(settings, project_id) / "project.json"
+
+
+def _project_summary_json_path(project_json_path: Path) -> Path:
+    return project_json_path.with_name("project_summary.json")
 
 
 def _artifact_path_for_milestone(project_dir: Path, release_identifier: str, name: str) -> Path:
@@ -365,18 +374,21 @@ def _reference_imagery_from_pair_response(
     response: RunResponse | None,
     *,
     use_t1_preview: bool,
+    include_data_url: bool = True,
 ) -> TemporalReferenceImagery | None:
     if response is None or response.preview_images is None:
         return None
 
     preview_images = response.preview_images
     image_path = preview_images.t1_preview_path if use_t1_preview else preview_images.t2_preview_path
-    image_png_data_url = (
-        preview_images.t1_preview_png_data_url
-        if use_t1_preview
-        else preview_images.t2_preview_png_data_url
-    )
-    if image_png_data_url is None:
+    image_png_data_url = None
+    if include_data_url:
+        image_png_data_url = (
+            preview_images.t1_preview_png_data_url
+            if use_t1_preview
+            else preview_images.t2_preview_png_data_url
+        )
+    if include_data_url and image_png_data_url is None:
         image_png_data_url = _png_file_to_data_url(image_path)
     raster_bounds_wgs84 = preview_images.raster_bounds_wgs84
 
@@ -390,15 +402,25 @@ def _reference_imagery_from_pair_response(
     )
 
 
-def _hydrate_reference_imagery(project: TemporalProject, settings: Settings) -> TemporalProject:
+def _hydrate_reference_imagery(
+    project: TemporalProject,
+    settings: Settings,
+    *,
+    include_data_urls: bool = False,
+) -> TemporalProject:
     milestones = project.milestones
     for index, milestone in enumerate(milestones):
         reference_imagery: TemporalReferenceImagery | None = None
+
+        if milestone.reference_imagery and milestone.reference_imagery.image_path:
+            milestone.reference_imagery.image_png_data_url = None
+            continue
 
         if milestone.pair_request_hash:
             reference_imagery = _reference_imagery_from_pair_response(
                 load_cached_response(settings, milestone.pair_request_hash),
                 use_t1_preview=False,
+                include_data_url=include_data_urls,
             )
 
         if reference_imagery is None and index + 1 < len(milestones):
@@ -407,11 +429,41 @@ def _hydrate_reference_imagery(project: TemporalProject, settings: Settings) -> 
                 reference_imagery = _reference_imagery_from_pair_response(
                     load_cached_response(settings, next_pair_request_hash),
                     use_t1_preview=True,
+                    include_data_url=include_data_urls,
                 )
 
         milestone.reference_imagery = reference_imagery
 
     return project
+
+
+def _strip_redundant_reference_imagery_data_urls(project: TemporalProject) -> bool:
+    changed = False
+    for milestone in project.milestones:
+        reference_imagery = milestone.reference_imagery
+        if (
+            reference_imagery is not None
+            and reference_imagery.image_path
+            and reference_imagery.image_png_data_url
+        ):
+            reference_imagery.image_png_data_url = None
+            changed = True
+    return changed
+
+
+def _milestone_has_derived_geometry_layers(milestone: TemporalMilestone) -> bool:
+    return (
+        milestone.effective_building_blocks_geojson is not None
+        and milestone.cumulative_growth_blocks_geojson is not None
+        and milestone.cumulative_growth_envelope_geojson is not None
+        and milestone.metrics is not None
+    )
+
+
+def _ensure_temporal_derived_geometry_layers(project: TemporalProject) -> TemporalProject:
+    if all(_milestone_has_derived_geometry_layers(milestone) for milestone in project.milestones):
+        return project
+    return _refresh_temporal_derived_geometry_layers(project)
 
 
 def _hydrate_milestone_buffer_layers(project: TemporalProject, settings: Settings) -> TemporalProject:
@@ -537,6 +589,7 @@ def _load_project(settings: Settings, project_id: str) -> TemporalProject:
     if project.project_dir is None:
         project.project_dir = str(path.parent)
     project = _sort_temporal_milestones(project)
+    should_compact_project_json = _strip_redundant_reference_imagery_data_urls(project)
     for milestone in project.milestones:
         if milestone.cumulative_convex_hull_geojson is None and milestone.cumulative_union_geojson is not None:
             milestone.cumulative_convex_hull_geojson = _feature_collection_from_convex_hull(
@@ -544,7 +597,14 @@ def _load_project(settings: Settings, project_id: str) -> TemporalProject:
             )
     project = _hydrate_reference_imagery(project, settings)
     project = _hydrate_milestone_buffer_layers(project, settings)
-    return _refresh_temporal_derived_geometry_layers(project)
+    project = _ensure_temporal_derived_geometry_layers(project)
+    if should_compact_project_json:
+        path.write_text(json.dumps(project.model_dump(mode="json"), indent=2))
+    try:
+        _write_project_summary(project, path)
+    except Exception:
+        pass
+    return project
 
 
 def _save_project(project: TemporalProject, settings: Settings) -> TemporalProject:
@@ -554,6 +614,7 @@ def _save_project(project: TemporalProject, settings: Settings) -> TemporalProje
     project = _hydrate_reference_imagery(project, settings)
     project = _hydrate_milestone_buffer_layers(project, settings)
     project = _refresh_temporal_derived_geometry_layers(project)
+    _strip_redundant_reference_imagery_data_urls(project)
     project.updated_at = _utc_now_iso()
     project_dir = _resolve_project_dir(settings, project.project_id, project.project_dir)
     project.project_dir = str(project_dir)
@@ -562,6 +623,7 @@ def _save_project(project: TemporalProject, settings: Settings) -> TemporalProje
     _save_project_registry(settings, registry)
     path = project_dir / "project.json"
     path.write_text(json.dumps(project.model_dump(mode="json"), indent=2))
+    _write_project_summary(project, path)
     return project
 
 
@@ -933,11 +995,39 @@ def _project_summary(project: TemporalProject, *, project_dir: str | None = None
     )
 
 
+def _write_project_summary(project: TemporalProject, project_json_path: Path) -> None:
+    summary = _project_summary(project, project_dir=str(project_json_path.parent))
+    _project_summary_json_path(project_json_path).write_text(json.dumps(summary.model_dump(mode="json"), indent=2))
+
+
+def _load_cached_project_summary(
+    project_json_path: Path,
+    *,
+    expected_project_id: str | None = None,
+) -> TemporalProjectSummary | None:
+    summary_path = _project_summary_json_path(project_json_path)
+    if not summary_path.exists():
+        return None
+    try:
+        if summary_path.stat().st_mtime < project_json_path.stat().st_mtime:
+            return None
+        summary = TemporalProjectSummary.model_validate(json.loads(summary_path.read_text()))
+    except Exception:
+        return None
+    if expected_project_id is not None and summary.project_id != expected_project_id:
+        return None
+    return summary
+
+
 def _load_saved_project_summary(
     project_json_path: Path,
     *,
     expected_project_id: str | None = None,
 ) -> TemporalProjectSummary | None:
+    cached_summary = _load_cached_project_summary(project_json_path, expected_project_id=expected_project_id)
+    if cached_summary is not None:
+        return cached_summary
+
     try:
         project = TemporalProject.model_validate(json.loads(project_json_path.read_text()))
     except Exception:
@@ -946,6 +1036,10 @@ def _load_saved_project_summary(
     if expected_project_id is not None and project.project_id != expected_project_id:
         return None
 
+    try:
+        _write_project_summary(project, project_json_path)
+    except Exception:
+        pass
     return _project_summary(project, project_dir=str(project_json_path.parent))
 
 

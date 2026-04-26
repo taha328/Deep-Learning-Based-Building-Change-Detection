@@ -37,6 +37,7 @@ type LayerToggleKey =
   | "buffer15m"
   | "buffer20m"
   | "temporalAdditions"
+  | "temporalCumulativeBuffer10m"
   | "temporalAutomated"
   | "temporalAutomatedBuildingBlocks"
   | "temporalEffectiveBuildingBlocks"
@@ -61,6 +62,7 @@ type WorkflowMode = "pairwise" | "temporal";
 
 type TemporalVectorSources = {
   temporalAdditions: FeatureCollection;
+  temporalCumulativeBuffer10m: FeatureCollection;
   temporalAutomated: FeatureCollection;
   temporalAutomatedBuildingBlocks: FeatureCollection;
   temporalEffectiveBuildingBlocks: FeatureCollection;
@@ -359,6 +361,7 @@ function ensureOperationalLayers(map: MapLibreMap) {
   ensureGeoJsonSource(map, "buffer-15m");
   ensureGeoJsonSource(map, "buffer-20m");
   ensureGeoJsonSource(map, "temporal-additions");
+  ensureGeoJsonSource(map, "temporal-cumulative-buffer-10m");
   ensureGeoJsonSource(map, "temporal-automated");
   ensureGeoJsonSource(map, "temporal-automated-building-blocks");
   ensureGeoJsonSource(map, "temporal-effective-building-blocks");
@@ -402,6 +405,10 @@ function ensureOperationalLayers(map: MapLibreMap) {
   ensureFillLayer(map, "temporal-additions-fill", "temporal-additions", {
     "fill-color": "#dc2626",
     "fill-opacity": 0.9,
+  });
+  ensureFillLayer(map, "temporal-cumulative-buffer-10m-fill", "temporal-cumulative-buffer-10m", {
+    "fill-color": "#dc2626",
+    "fill-opacity": 1,
   });
   ensureFillLayer(map, "temporal-automated-fill", "temporal-automated", {
     "fill-color": "#1d4ed8",
@@ -510,6 +517,7 @@ function syncMapPresentation(
   sourceData(map, "buffer-15m", params.pairwiseBuffers.buffer15m);
   sourceData(map, "buffer-20m", params.pairwiseBuffers.buffer20m);
   sourceData(map, "temporal-additions", params.temporalVectors.temporalAdditions);
+  sourceData(map, "temporal-cumulative-buffer-10m", params.temporalVectors.temporalCumulativeBuffer10m);
   sourceData(map, "temporal-automated", params.temporalVectors.temporalAutomated);
   sourceData(map, "temporal-automated-building-blocks", params.temporalVectors.temporalAutomatedBuildingBlocks);
   sourceData(map, "temporal-effective-building-blocks", params.temporalVectors.temporalEffectiveBuildingBlocks);
@@ -583,6 +591,7 @@ function syncMapPresentation(
   setLayerVisibility(map, "buffer-20m-fill", params.layerState.buffer20m);
   setLayerVisibility(map, "buffer-20m-line", params.layerState.buffer20m);
   setLayerVisibility(map, "temporal-additions-fill", params.layerState.temporalAdditions);
+  setLayerVisibility(map, "temporal-cumulative-buffer-10m-fill", params.layerState.temporalCumulativeBuffer10m);
   setLayerVisibility(map, "temporal-automated-fill", params.layerState.temporalAutomated);
   setLayerVisibility(map, "temporal-automated-building-blocks-fill", params.layerState.temporalAutomatedBuildingBlocks);
   setLayerVisibility(map, "temporal-effective-building-blocks-fill", params.layerState.temporalEffectiveBuildingBlocks);
@@ -612,6 +621,7 @@ function applyLayerVisibilityState(map: MapLibreMap, layerState: LayerToggleStat
   setLayerVisibility(map, "buffer-20m-fill", layerState.buffer20m);
   setLayerVisibility(map, "buffer-20m-line", layerState.buffer20m);
   setLayerVisibility(map, "temporal-additions-fill", layerState.temporalAdditions);
+  setLayerVisibility(map, "temporal-cumulative-buffer-10m-fill", layerState.temporalCumulativeBuffer10m);
   setLayerVisibility(map, "temporal-automated-fill", layerState.temporalAutomated);
   setLayerVisibility(map, "temporal-automated-building-blocks-fill", layerState.temporalAutomatedBuildingBlocks);
   setLayerVisibility(map, "temporal-effective-building-blocks-fill", layerState.temporalEffectiveBuildingBlocks);
@@ -636,11 +646,12 @@ function defaultLayerState(workflowMode: WorkflowMode, hasPairResult: boolean): 
     buffer15m: false,
     buffer20m: false,
     temporalAdditions: workflowMode === "temporal",
+    temporalCumulativeBuffer10m: workflowMode === "temporal",
     temporalAutomated: false,
     temporalAutomatedBuildingBlocks: false,
     temporalEffectiveBuildingBlocks: false,
     temporalConvexHull: false,
-    temporalCumulative: workflowMode === "temporal",
+    temporalCumulative: false,
     temporalCumulativeGrowthBlocks: false,
     temporalCumulativeGrowthEnvelope: false,
     temporalManualOverride: workflowMode === "temporal",
@@ -808,6 +819,7 @@ export function MapView({
   const temporalVectors = useMemo<TemporalVectorSources>(
     () => ({
       temporalAdditions: ensureFeatureCollection(temporalPresentation?.additions),
+      temporalCumulativeBuffer10m: ensureFeatureCollection(temporalPresentation?.cumulativeBuffer10m),
       temporalAutomated: ensureFeatureCollection(temporalPresentation?.automatedCandidate),
       temporalAutomatedBuildingBlocks: ensureFeatureCollection(temporalPresentation?.automatedBuildingBlocks),
       temporalEffectiveBuildingBlocks: ensureFeatureCollection(temporalPresentation?.effectiveBuildingBlocks),
@@ -900,6 +912,7 @@ export function MapView({
 
   const hasTemporalResult =
     temporalVectors.temporalAdditions.features.length > 0 ||
+    temporalVectors.temporalCumulativeBuffer10m.features.length > 0 ||
     temporalVectors.temporalAutomated.features.length > 0 ||
     temporalVectors.temporalAutomatedBuildingBlocks.features.length > 0 ||
     temporalVectors.temporalEffectiveBuildingBlocks.features.length > 0 ||
@@ -1428,6 +1441,11 @@ export function MapView({
               enabled: selectedTemporalMilestoneReady && temporalVectors.temporalAdditions.features.length > 0,
             },
             {
+              key: "temporalCumulativeBuffer10m",
+              label: t("map.cumulative_building_change_buffer_10m"),
+              enabled: selectedTemporalMilestoneReady && temporalVectors.temporalCumulativeBuffer10m.features.length > 0,
+            },
+            {
               key: "temporalConvexHull",
               label: t("map.convex_hull"),
               enabled: selectedTemporalMilestoneReady && temporalVectors.temporalConvexHull.features.length > 0,
@@ -1447,7 +1465,6 @@ export function MapView({
               label: t("map.manual_override"),
               enabled: selectedTemporalMilestoneReady && temporalVectors.temporalManualOverride.features.length > 0,
             },
-            { key: "buffer10m", label: `${t("map.building_change_buffer")} 10 m`, enabled: selectedTemporalMilestoneReady },
             { key: "buffer15m", label: `${t("map.building_change_buffer")} 15 m`, enabled: selectedTemporalMilestoneReady },
             { key: "buffer20m", label: `${t("map.building_change_buffer")} 20 m`, enabled: selectedTemporalMilestoneReady },
           ] satisfies LayerEntry[])

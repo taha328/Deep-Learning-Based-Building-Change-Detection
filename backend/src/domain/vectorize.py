@@ -33,6 +33,13 @@ class VectorizationContext:
     src_date_t2: str | None
 
 
+@dataclass(frozen=True)
+class SegmentationVectorizationContext:
+    release: str
+    src_date: str | None
+    prompt: str | None = None
+
+
 def empty_feature_collection() -> dict[str, Any]:
     return {"type": "FeatureCollection", "features": []}
 
@@ -103,6 +110,51 @@ def vectorize_change_regions(
     context: VectorizationContext,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     return _vectorize_regions(mask, reference_path, context, id_field="change_id")
+
+
+def vectorize_segmentation_regions(
+    mask: np.ndarray,
+    reference_path: Path,
+    context: SegmentationVectorizationContext,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    features_out: list[dict[str, Any]] = []
+
+    with rasterio.open(reference_path) as src:
+        transform = src.transform
+        crs = src.crs
+
+    for idx, (geom, value) in enumerate(
+        shapes(mask.astype(np.uint8), mask=mask.astype(np.uint8), transform=transform),
+        start=1,
+    ):
+        if int(value) != 1:
+            continue
+
+        geom_native = shape(geom)
+        geom_wgs84 = reproject_geometry(geom_native, str(crs), "EPSG:4326")
+        area_m2 = abs(GEOD.geometry_area_perimeter(geom_wgs84)[0])
+        centroid = geom_wgs84.centroid
+
+        record = {
+            "segment_id": idx,
+            "area_m2": float(area_m2),
+            "centroid_lon": float(centroid.x),
+            "centroid_lat": float(centroid.y),
+            "release": context.release,
+            "src_date": context.src_date,
+            "prompt": context.prompt,
+        }
+        records.append(record)
+        features_out.append(
+            {
+                "type": "Feature",
+                "geometry": mapping(geom_wgs84),
+                "properties": record,
+            }
+        )
+
+    return pd.DataFrame(records), {"type": "FeatureCollection", "features": features_out}
 
 
 def _iter_metric_geometries(feature_collection: dict[str, Any]) -> tuple[str, list[BaseGeometry], list[dict[str, Any]]]:

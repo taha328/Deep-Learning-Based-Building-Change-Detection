@@ -2,8 +2,8 @@ from datetime import date
 
 from src.config import Settings
 from src.domain.wayback import WaybackRelease
-from src.schemas import ValidationRequest
-from src.services.validation import validate_request
+from src.schemas import SegmentationRequest, ValidationRequest
+from src.services.validation import validate_request, validate_segmentation_request
 
 
 def _sample_releases(settings: Settings) -> list[WaybackRelease]:
@@ -105,3 +105,43 @@ def test_validation_allows_large_aoi_when_remote_patch_budget_is_disabled() -> N
     assert response.estimated_tile_count_t1 > settings.full_limits.max_scene_tiles
     assert any("AOI area" in message and "remains allowed" in message for message in response.warnings)
     assert any("tiles per date" in message and "remains allowed" in message for message in response.warnings)
+
+
+def test_segmentation_validation_accepts_single_release() -> None:
+    settings = Settings()
+    releases = _sample_releases(settings)
+    request = SegmentationRequest(
+        aoi_geojson={
+            "type": "Polygon",
+            "coordinates": [[[-7.0, 33.0], [-7.0, 33.001], [-6.999, 33.001], [-6.999, 33.0], [-7.0, 33.0]]],
+        },
+        release="WB_2023_R01",
+        mode="fast_preview",
+        semantic_threshold=0.4,
+    )
+
+    response, prepared = validate_segmentation_request(request, releases=releases, settings=settings)
+
+    assert response.valid is True
+    assert prepared is not None
+    assert prepared.release.identifier == "WB_2023_R01"
+    assert response.estimated_tile_count_t1 > 0
+    assert response.estimated_tile_count_t2 == 0
+
+
+def test_segmentation_validation_rejects_unknown_release() -> None:
+    settings = Settings()
+    request = SegmentationRequest(
+        aoi_geojson={
+            "type": "Polygon",
+            "coordinates": [[[-7.0, 33.0], [-7.0, 33.001], [-6.999, 33.001], [-6.999, 33.0], [-7.0, 33.0]]],
+        },
+        release="WB_UNKNOWN",
+        mode="fast_preview",
+    )
+
+    response, prepared = validate_segmentation_request(request, releases=_sample_releases(settings), settings=settings)
+
+    assert response.valid is False
+    assert prepared is None
+    assert any("Unknown Wayback release" in message for message in response.blocking_errors)

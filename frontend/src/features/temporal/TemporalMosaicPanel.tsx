@@ -343,6 +343,13 @@ function hasFeatureCollectionFeatures(value: Record<string, unknown> | null | un
   return ensureFeatureCollection(value).features.length > 0;
 }
 
+function mergeFeatureCollections(values: FeatureCollection[]): FeatureCollection {
+  return {
+    type: "FeatureCollection",
+    features: values.flatMap((value) => value.features),
+  };
+}
+
 function hasMilestoneBufferFeatures(milestone: TemporalMilestone): boolean {
   return (
     hasFeatureCollectionFeatures(milestone.buffer_layers_geojson?.["10m"]) ||
@@ -787,14 +794,22 @@ export function TemporalMosaicPanel({
     }
 
     const referenceImagery = selectedMilestone.reference_imagery;
-    const referenceImageryUrl = referenceImagery?.image_png_data_url
-      ? referenceImagery.image_png_data_url
-      : referenceImagery?.image_path
-        ? buildGradioFileUrl(backendUrl, referenceImagery.image_path)
+    const referenceImageryUrl = referenceImagery?.image_path
+      ? buildGradioFileUrl(backendUrl, referenceImagery.image_path)
+      : referenceImagery?.image_png_data_url
+        ? referenceImagery.image_png_data_url
         : null;
     const referenceImageryBounds = hasValidRasterBounds(referenceImagery?.raster_bounds_wgs84)
       ? referenceImagery.raster_bounds_wgs84
       : null;
+    const selectedMilestoneIndex = project.milestones.findIndex(
+      (milestone) => milestone.release_identifier === selectedMilestone.release_identifier,
+    );
+    const cumulativeBuffer10m = mergeFeatureCollections(
+      project.milestones
+        .slice(0, selectedMilestoneIndex + 1)
+        .map((milestone) => ensureFeatureCollection(milestone.buffer_layers_geojson?.["10m"])),
+    );
 
     onMapPresentationChange({
       selectedReleaseIdentifier: selectedMilestone.release_identifier,
@@ -811,6 +826,7 @@ export function TemporalMosaicPanel({
         "15m": ensureFeatureCollection(selectedMilestone.buffer_layers_geojson?.["15m"]),
         "20m": ensureFeatureCollection(selectedMilestone.buffer_layers_geojson?.["20m"]),
       },
+      cumulativeBuffer10m,
       cumulativeUnion: ensureFeatureCollection(selectedMilestone.cumulative_union_geojson),
       cumulativeConvexHull: ensureFeatureCollection(selectedMilestone.cumulative_convex_hull_geojson),
       cumulativeGrowthBlocks: ensureFeatureCollection(selectedMilestone.cumulative_growth_blocks_geojson),

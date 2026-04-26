@@ -464,3 +464,120 @@ def export_bandon_outputs(
         buffer_rows=buffer_rows,
     )
     return previews, artifacts, str(bundle_path), tables
+
+
+def export_segmentation_outputs(
+    *,
+    result_dir: Path,
+    reference_raster_path: Path,
+    source_rgb: np.ndarray,
+    segmentation_prob: np.ndarray,
+    segmentation_mask: np.ndarray,
+    segmentation_labels: np.ndarray,
+    segmentation_df: pd.DataFrame,
+    segmentation_geojson: dict,
+    summary_df: pd.DataFrame,
+) -> tuple[PreviewImages, list[ArtifactEntry], str, TabularMetrics]:
+    source_preview_path = _save_png(result_dir / "source_preview.png", source_rgb)
+    probability_preview_path = _save_png(
+        result_dir / "segmentation_probability_preview.png",
+        probability_rgb(segmentation_prob),
+    )
+    overlay_preview_path = _save_png(
+        result_dir / "segmentation_overlay_preview.png",
+        blend_rgb_mask(source_rgb, segmentation_mask.astype(bool), color=(0, 255, 0), alpha=0.45),
+    )
+
+    source_raster_path = save_multiband_like(
+        reference_raster_path,
+        result_dir / "source_wayback_rgb.tif",
+        source_rgb,
+        "uint8",
+    )
+    probability_raster = save_single_band_like(
+        reference_raster_path,
+        result_dir / "segmentation_probability.tif",
+        segmentation_prob,
+        "float32",
+    )
+    mask_raster = save_single_band_like(
+        reference_raster_path,
+        result_dir / "segmentation_mask.tif",
+        segmentation_mask.astype(np.uint8),
+        "uint8",
+    )
+    labels_raster = save_single_band_like(
+        reference_raster_path,
+        result_dir / "segmentation_labels.tif",
+        segmentation_labels.astype(np.uint16),
+        "uint16",
+    )
+
+    segmentation_csv = write_csv(result_dir / "segmentation_polygons.csv", segmentation_df)
+    segmentation_geojson_path = write_geojson(result_dir / "segmentation_polygons.geojson", segmentation_geojson)
+    summary_csv = write_csv(result_dir / "summary.csv", summary_df)
+
+    artifacts = [
+        ArtifactEntry(name="source_preview_png", path=str(source_preview_path), media_type="image/png", description="Source RGB preview"),
+        ArtifactEntry(
+            name="segmentation_probability_preview_png",
+            path=str(probability_preview_path),
+            media_type="image/png",
+            description="SAM3 segmentation score preview",
+        ),
+        ArtifactEntry(
+            name="segmentation_overlay_preview_png",
+            path=str(overlay_preview_path),
+            media_type="image/png",
+            description="SAM3 segmentation overlay preview",
+        ),
+        ArtifactEntry(name="source_wayback_rgb_tif", path=str(source_raster_path), media_type="image/tiff", description="Source RGB GeoTIFF"),
+        ArtifactEntry(
+            name="segmentation_probability_tif",
+            path=str(probability_raster),
+            media_type="image/tiff",
+            description="SAM3 segmentation probability raster",
+        ),
+        ArtifactEntry(name="segmentation_mask_tif", path=str(mask_raster), media_type="image/tiff", description="SAM3 segmentation mask raster"),
+        ArtifactEntry(
+            name="segmentation_labels_tif",
+            path=str(labels_raster),
+            media_type="image/tiff",
+            description="Connected-component labels for segmentation regions",
+        ),
+        ArtifactEntry(name="segmentation_polygons_csv", path=str(segmentation_csv), media_type="text/csv", description="Segmentation polygon metrics"),
+        ArtifactEntry(
+            name="segmentation_polygons_geojson",
+            path=str(segmentation_geojson_path),
+            media_type="application/geo+json",
+            description="Segmentation polygons",
+        ),
+        ArtifactEntry(name="summary_csv", path=str(summary_csv), media_type="text/csv", description="Segmentation summary"),
+    ]
+
+    bundle_path = result_dir / "export_bundle.zip"
+    with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
+        for file_path in sorted(result_dir.glob("*")):
+            if file_path.is_file() and file_path.name != bundle_path.name:
+                zip_file.write(file_path, arcname=file_path.name)
+
+    artifacts.append(
+        ArtifactEntry(
+            name="export_bundle_zip",
+            path=str(bundle_path),
+            media_type="application/zip",
+            description="Complete export bundle",
+        )
+    )
+
+    previews = PreviewImages(
+        t2_preview_path=str(source_preview_path),
+        change_probability_preview_path=str(probability_preview_path),
+        change_overlay_preview_path=str(overlay_preview_path),
+        **_get_raster_georeferencing(reference_raster_path),
+    )
+    tables = TabularMetrics(
+        summary_rows=summary_df.to_dict(orient="records"),
+        change_rows=segmentation_df.to_dict(orient="records"),
+    )
+    return previews, artifacts, str(bundle_path), tables

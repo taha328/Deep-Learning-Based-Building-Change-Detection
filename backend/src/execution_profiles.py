@@ -9,8 +9,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from src.config import Settings
 from src.domain.bandon_runner import probe_bandon_runtime
-from src.domain.inference import run_tiled_inference
-from src.domain.local_inference import LocalInferenceConfig, probe_local_runtime, run_local_tiled_inference
+from src.domain.inference import run_single_scene_inference, run_tiled_inference
+from src.domain.local_inference import LocalInferenceConfig, probe_local_runtime, run_local_single_scene_inference, run_local_tiled_inference
 
 
 ModelBackendMode = Literal["sam3", "bandon_mps"]
@@ -109,6 +109,10 @@ class DetectionBackend(ABC):
         del settings
         return None
 
+    def create_segmentation_runner(self, settings: Settings):
+        del settings
+        return None
+
 
 class PublicSam3ZeroGpuBackend(DetectionBackend):
     model_backend: ModelBackendMode = "sam3"
@@ -154,6 +158,10 @@ class PublicSam3ZeroGpuBackend(DetectionBackend):
     def create_inference_runner(self, settings: Settings):
         del settings
         return run_tiled_inference
+
+    def create_segmentation_runner(self, settings: Settings):
+        del settings
+        return run_single_scene_inference
 
 
 class LocalInferenceBackend(DetectionBackend):
@@ -207,6 +215,17 @@ class LocalInferenceBackend(DetectionBackend):
             ),
         )
 
+    def create_segmentation_runner(self, settings: Settings):
+        del settings
+        return partial(
+            run_local_single_scene_inference,
+            local_config=LocalInferenceConfig(
+                checkpoint_path=self.execution_config.local.checkpoint_path,
+                device_preference=self.execution_config.local.device_preference,
+                prompt=self.execution_config.local.prompt,
+            ),
+        )
+
 
 class HuggingFaceGpuBackend(DetectionBackend):
     model_backend: ModelBackendMode = "sam3"
@@ -253,6 +272,10 @@ class HuggingFaceGpuBackend(DetectionBackend):
     def create_inference_runner(self, settings: Settings):
         del settings
         return run_tiled_inference
+
+    def create_segmentation_runner(self, settings: Settings):
+        del settings
+        return run_single_scene_inference
 
 
 class BandonMpsDetectionBackend(DetectionBackend):

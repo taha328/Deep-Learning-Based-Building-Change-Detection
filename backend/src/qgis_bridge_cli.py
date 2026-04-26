@@ -9,9 +9,16 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.config import Settings, get_settings
-from src.core_api import list_releases_api, probe_backends_api, run_detection_api, validate_request_api
+from src.core_api import (
+    list_releases_api,
+    probe_backends_api,
+    run_detection_api,
+    run_segmentation_api,
+    validate_request_api,
+    validate_segmentation_api,
+)
 from src.execution_profiles import PipelineExecutionConfig
-from src.schemas import RunRequest, ValidationRequest
+from src.schemas import RunRequest, SegmentationRequest, ValidationRequest
 
 
 EVENT_PREFIX = "__BC_EVENT__"
@@ -36,7 +43,9 @@ def _settings_from_config(config: RunnerConfig | None) -> Settings:
     settings = get_settings()
     if config is None or not config.runtime_cache_dir:
         return settings
-    return settings.model_copy(update={"runtime_cache_dir": Path(config.runtime_cache_dir)})
+    configured = settings.model_copy(update={"runtime_cache_dir": Path(config.runtime_cache_dir)})
+    configured.ensure_runtime_cache_dirs()
+    return configured
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -47,7 +56,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         sub = subparsers.add_parser(command)
         sub.add_argument("--config-file", dest="config_file")
 
-    for command in ("validate_request", "run_detection"):
+    for command in ("validate_request", "run_detection", "validate_segmentation", "run_segmentation"):
         sub = subparsers.add_parser(command)
         sub.add_argument("--request-file", required=True)
         sub.add_argument("--config-file", dest="config_file")
@@ -82,6 +91,16 @@ def main(argv: list[str] | None = None) -> int:
         print(response.model_dump_json())
         return 0
 
+    if args.command == "validate_segmentation":
+        request = SegmentationRequest.model_validate(request_payload)
+        response = validate_segmentation_api(
+            request,
+            settings=settings,
+            execution_config=config.execution if config else None,
+        )
+        print(response.model_dump_json())
+        return 0
+
     if args.command == "run_detection":
         request = RunRequest.model_validate(request_payload)
 
@@ -89,6 +108,26 @@ def main(argv: list[str] | None = None) -> int:
             _emit_event({"event": "progress", "progress": value, "message": message})
 
         response = run_detection_api(
+            request,
+            settings=settings,
+            execution_config=config.execution if config else None,
+            progress_callback=progress_callback,
+        )
+        _emit_event(
+            {
+                "event": "result",
+                "payload": response.model_dump(mode="json"),
+            }
+        )
+        return 0
+
+    if args.command == "run_segmentation":
+        request = SegmentationRequest.model_validate(request_payload)
+
+        def progress_callback(value: float, message: str) -> None:
+            _emit_event({"event": "progress", "progress": value, "message": message})
+
+        response = run_segmentation_api(
             request,
             settings=settings,
             execution_config=config.execution if config else None,
