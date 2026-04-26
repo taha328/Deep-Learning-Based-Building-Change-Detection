@@ -12,8 +12,8 @@ from src.config import Settings
 from src.domain.inference import InferenceDiagnostics
 from src.domain.mosaic import AlignmentResult, MosaicResult
 from src.domain.wayback import MetadataSummary, TileAvailabilitySummary, WaybackRelease
-from src.schemas import PreviewImages, RunRequest, TabularMetrics
-from src.services.processing import run_detection
+from src.schemas import PreviewImages, RunRequest, SegmentationRequest, TabularMetrics
+from src.services.processing import run_detection, run_segmentation
 
 
 def _write_rgb_tif(path, array: np.ndarray) -> None:
@@ -32,10 +32,19 @@ def _write_rgb_tif(path, array: np.ndarray) -> None:
             dst.write(array[:, :, band_index], band_index + 1)
 
 
-def _scene_result(path, valid_mask_path, identifier: str, release_date: date, *, png_path=None) -> MosaicResult:
+def _scene_result(
+    path,
+    valid_mask_path,
+    identifier: str,
+    release_date: date,
+    *,
+    png_path=None,
+    zoom: int = 19,
+) -> MosaicResult:
     return MosaicResult(
         identifier=identifier,
         release_date=str(release_date),
+        zoom=zoom,
         tile_count=1,
         available_tile_count=1,
         missing_tile_count=0,
@@ -187,6 +196,86 @@ def test_run_detection_populates_release_dates_in_summary(tmp_path, monkeypatch)
     assert response.summary.dominant_src_date_t1 == "2021-02-23"
 
 
+def test_run_segmentation_uses_single_release_and_segmentation_semantics(tmp_path, monkeypatch) -> None:
+    settings = Settings(
+        runtime_cache_dir=tmp_path,
+        wayback_tilemap_preflight_enabled=False,
+        default_min_new_building_pixels=1,
+    )
+    release = WaybackRelease(
+        identifier="WB_2026_R03",
+        release_date=date(2026, 3, 25),
+        label="2026-03-25 | WB_2026_R03",
+        release_num=2,
+        tile_matrix_sets=("default028mm",),
+        resource_url_template="https://example.com/t2",
+    )
+    request = SegmentationRequest(
+        aoi_geojson={
+            "type": "Polygon",
+            "coordinates": [[[-7.0, 33.0], [-6.9995, 33.0], [-6.9995, 33.0005], [-7.0, 33.0005], [-7.0, 33.0]]],
+        },
+        release="WB_2026_R03",
+        mode="fast_preview",
+        semantic_threshold=0.5,
+        min_segment_pixels=1,
+    )
+
+    rgb = np.zeros((4, 4, 3), dtype=np.uint8)
+    valid_mask = np.ones((4, 4), dtype=np.uint8)
+    source_rgb_path = tmp_path / "source.tif"
+    source_valid_mask_path = tmp_path / "source_valid.tif"
+    _write_rgb_tif(source_rgb_path, rgb)
+    _write_rgb_tif(source_valid_mask_path, valid_mask[:, :, None])
+    scene = _scene_result(source_rgb_path, source_valid_mask_path, "WB_2026_R03", date(2026, 3, 25))
+    download_calls: list[str] = []
+
+    monkeypatch.setattr("src.services.processing.list_releases", lambda settings: [release])
+    monkeypatch.setattr("src.services.processing.load_cached_response", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "src.services.processing.summarize_wayback_metadata",
+        lambda *args, **kwargs: MetadataSummary(dominant_src_date="2026-03-20", dominant_src_res_m=0.31),
+    )
+
+    def fake_download(download_release, *args, **kwargs):
+        download_calls.append(download_release.identifier)
+        return scene
+
+    monkeypatch.setattr("src.services.processing.download_wayback_mosaic", fake_download)
+    monkeypatch.setattr(
+        "src.services.processing.export_segmentation_outputs",
+        lambda **kwargs: (PreviewImages(), [], None, TabularMetrics()),
+    )
+    monkeypatch.setattr("src.services.processing.save_cached_response", lambda *args, **kwargs: None)
+
+    def fake_inference_runner(scene_rgb, **kwargs):
+        assert scene_rgb.shape == rgb.shape
+        assert kwargs["semantic_threshold"] == 0.5
+        prediction = np.zeros((4, 4), dtype=np.float32)
+        prediction[1:3, 1:3] = 1.0
+        return {"segmentation_prediction": prediction}, InferenceDiagnostics(
+            patch_count=1,
+            patch_prepare_seconds=0.0,
+            remote_seconds=0.0,
+            mask_decode_seconds=0.0,
+        )
+
+    response = run_segmentation(
+        request,
+        settings=settings,
+        inference_runner=fake_inference_runner,
+    )
+
+    assert response.success is True
+    assert download_calls == ["WB_2026_R03"]
+    assert response.summary is not None
+    assert response.summary.result_semantics == "segmentation"
+    assert response.summary.total_segments == 1
+    assert response.segmentation_geojson is not None
+    assert response.new_buildings_geojson is None
+    assert response.change_polygons_geojson is None
+
+
 def test_run_detection_reports_tile_availability_stage_before_download(tmp_path, monkeypatch) -> None:
     settings = Settings(
         runtime_cache_dir=tmp_path,
@@ -325,6 +414,166 @@ def test_run_detection_reports_tile_availability_stage_before_download(tmp_path,
     assert "Downloading Wayback imagery" in progress_messages
     assert progress_messages.index("Resolving Wayback metadata") < progress_messages.index("Checking tile availability")
     assert progress_messages.index("Checking tile availability") < progress_messages.index("Downloading Wayback imagery")
+
+
+def test_run_detection_downgrades_older_release_zoom_when_high_zoom_has_no_safe_coverage(tmp_path, monkeypatch) -> None:
+    settings = Settings(
+        runtime_cache_dir=tmp_path,
+        arosics_enabled=False,
+        wayback_tilemap_preflight_enabled=True,
+        zoom=19,
+        min_zoom=17,
+    )
+    releases = [
+        WaybackRelease(
+            identifier="WB_2014_R03",
+            release_date=date(2014, 3, 19),
+            label="2014-03-19 | WB_2014_R03",
+            release_num=1,
+            tile_matrix_sets=("default028mm",),
+            resource_url_template="https://example.com/t1",
+        ),
+        WaybackRelease(
+            identifier="WB_2026_R03",
+            release_date=date(2026, 3, 25),
+            label="2026-03-25 | WB_2026_R03",
+            release_num=2,
+            tile_matrix_sets=("default028mm",),
+            resource_url_template="https://example.com/t2",
+        ),
+    ]
+    request = RunRequest(
+        aoi_geojson={
+            "type": "Polygon",
+            "coordinates": [[[-7.0, 33.0], [-6.9995, 33.0], [-6.9995, 33.0005], [-7.0, 33.0005], [-7.0, 33.0]]],
+        },
+        t1_release="WB_2014_R03",
+        t2_release="WB_2026_R03",
+        mode="fast_preview",
+    )
+
+    rgb = np.zeros((4, 4, 3), dtype=np.uint8)
+    valid_mask = np.ones((4, 4), dtype=np.uint8)
+    t1_rgb_path = tmp_path / "t1.tif"
+    t2_rgb_path = tmp_path / "t2.tif"
+    t1_valid_mask_path = tmp_path / "t1_valid.tif"
+    t2_valid_mask_path = tmp_path / "t2_valid.tif"
+    _write_rgb_tif(t1_rgb_path, rgb)
+    _write_rgb_tif(t2_rgb_path, rgb)
+    _write_rgb_tif(t1_valid_mask_path, valid_mask[:, :, None])
+    _write_rgb_tif(t2_valid_mask_path, valid_mask[:, :, None])
+
+    scene_t1 = _scene_result(t1_rgb_path, t1_valid_mask_path, "WB_2014_R03", date(2014, 3, 19), zoom=17)
+    scene_t2 = _scene_result(t2_rgb_path, t2_valid_mask_path, "WB_2026_R03", date(2026, 3, 25), zoom=19)
+    download_zooms: dict[str, int] = {}
+
+    monkeypatch.setattr("src.services.processing.list_releases", lambda settings: releases)
+    monkeypatch.setattr("src.services.processing.load_cached_response", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.services.processing.build_session", lambda settings: object())
+
+    def fake_metadata(*args, **kwargs):
+        release_identifier = args[1]
+        zoom = kwargs["zoom"]
+        if release_identifier == "WB_2014_R03" and zoom > 17:
+            return MetadataSummary(dominant_src_date=None, dominant_src_res_m=None, metadata_region_count=0)
+        return MetadataSummary(dominant_src_date="2021-02-23", dominant_src_res_m=0.31, metadata_region_count=1)
+
+    monkeypatch.setattr("src.services.processing.summarize_wayback_metadata", fake_metadata)
+
+    def fake_preflight(*args, **kwargs):
+        release = args[1]
+        zoom = kwargs["zoom"]
+        if release.identifier == "WB_2014_R03" and zoom > 17:
+            return TileAvailabilitySummary(
+                candidate_count=1,
+                available_count=0,
+                missing_count=1,
+                failed_check_count=0,
+                preflight_complete=True,
+                availability_fraction=0.0,
+                available_tiles=frozenset(),
+            )
+        return TileAvailabilitySummary(
+            candidate_count=1,
+            available_count=1,
+            missing_count=0,
+            failed_check_count=0,
+            preflight_complete=True,
+            availability_fraction=1.0,
+            available_tiles=frozenset({(0, 0)}),
+        )
+
+    monkeypatch.setattr("src.services.processing.preflight_wayback_tile_availability", fake_preflight)
+
+    def fake_download(release, *args, **kwargs):
+        download_zooms[release.identifier] = kwargs["zoom"]
+        return scene_t1 if release.identifier == "WB_2014_R03" else scene_t2
+
+    monkeypatch.setattr("src.services.processing.download_wayback_mosaic", fake_download)
+    monkeypatch.setattr(
+        "src.services.processing.align_mosaic_pair",
+        lambda *args, **kwargs: AlignmentResult(
+            t1_rgb=rgb,
+            t2_rgb=rgb,
+            t1_valid_mask=valid_mask.astype(bool),
+            t2_valid_mask=valid_mask.astype(bool),
+            diagnostics={"method": "reprojection_only", "used_arosics": False, "warnings": []},
+        ),
+    )
+    monkeypatch.setattr("src.services.processing.resolve_min_new_building_pixels", lambda *args, **kwargs: 1)
+    monkeypatch.setattr(
+        "src.services.processing.derive_new_building_products",
+        lambda *args, **kwargs: {
+            "change_mask": np.zeros((4, 4), dtype=bool),
+            "t1_building_mask": np.zeros((4, 4), dtype=bool),
+            "t1_building_mask_dilated": np.zeros((4, 4), dtype=bool),
+            "t2_building_mask": np.zeros((4, 4), dtype=bool),
+            "new_building_mask_raw": np.zeros((4, 4), dtype=bool),
+            "new_building_mask_filtered": np.zeros((4, 4), dtype=bool),
+            "new_building_mask": np.zeros((4, 4), dtype=bool),
+            "new_building_labels": np.zeros((4, 4), dtype=np.int32),
+        },
+    )
+    empty_fc = {"type": "FeatureCollection", "features": []}
+    monkeypatch.setattr(
+        "src.services.processing.vectorize_new_buildings",
+        lambda *args, **kwargs: (pd.DataFrame(columns=["area_m2"]), empty_fc),
+    )
+    monkeypatch.setattr(
+        "src.services.processing.merge_close_buildings",
+        lambda *args, **kwargs: (pd.DataFrame(columns=["area_m2"]), empty_fc),
+    )
+    monkeypatch.setattr(
+        "src.services.processing.build_building_blocks",
+        lambda *args, **kwargs: (pd.DataFrame(columns=["area_m2"]), empty_fc),
+    )
+    monkeypatch.setattr("src.services.processing.build_metric_buffer_layers", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        "src.services.processing.export_run_outputs",
+        lambda **kwargs: (PreviewImages(), [], None, TabularMetrics()),
+    )
+    monkeypatch.setattr("src.services.processing.save_cached_response", lambda *args, **kwargs: None)
+
+    def fake_inference_runner(*args, **kwargs):
+        probs = {
+            "change_prediction": np.zeros((4, 4), dtype=np.float32),
+            "t1_semantic_prediction": np.zeros((4, 4), dtype=np.float32),
+            "t2_semantic_prediction": np.zeros((4, 4), dtype=np.float32),
+        }
+        return probs, InferenceDiagnostics(patch_count=2, patch_prepare_seconds=0.0, remote_seconds=0.0, mask_decode_seconds=0.0)
+
+    response = run_detection(
+        request,
+        settings=settings,
+        inference_runner=fake_inference_runner,
+    )
+
+    assert response.success is True
+    assert download_zooms == {"WB_2014_R03": 17, "WB_2026_R03": 19}
+    assert response.diagnostics is not None
+    assert "z=17" in " ".join(response.diagnostics.warnings)
+    assert response.diagnostics.coverage["t1"]["zoom"] == 17
+    assert response.diagnostics.coverage["t2"]["zoom"] == 19
 
 
 def test_run_detection_does_not_forward_scene_tile_caps_to_download(tmp_path, monkeypatch) -> None:

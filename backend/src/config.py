@@ -30,6 +30,7 @@ class Settings(BaseModel):
     )
     tile_matrix_set: str = "default028mm"
     zoom: int = 19
+    min_zoom: int = 13
     request_timeout_sec: int = 120
     download_workers: int = 6
     download_retries: int = 3
@@ -115,19 +116,19 @@ class Settings(BaseModel):
     gradio_allowed_paths: tuple[Path, ...] = ()
 
     def model_post_init(self, __context: object) -> None:
-        self.runtime_cache_dir.mkdir(parents=True, exist_ok=True)
-        outputs_dir = self.runtime_cache_dir / "requests"
-        outputs_dir.mkdir(parents=True, exist_ok=True)
-        temporal_dir = self.runtime_cache_dir / "temporal_projects"
-        temporal_dir.mkdir(parents=True, exist_ok=True)
-        wayback_mosaics_dir = self.runtime_cache_dir / "wayback_mosaics"
-        wayback_mosaics_dir.mkdir(parents=True, exist_ok=True)
+        self.ensure_runtime_cache_dirs()
         if not self.gradio_allowed_paths:
-            self.gradio_allowed_paths = (outputs_dir, temporal_dir)
+            self.gradio_allowed_paths = (self.request_cache_dir, self.temporal_projects_dir)
         configured_spaces = self.remote_segmentation_spaces or (self.remote_segmentation_space,)
         if self.remote_segmentation_space and self.remote_segmentation_space not in configured_spaces:
             configured_spaces = (self.remote_segmentation_space, *configured_spaces)
         self.remote_segmentation_spaces = _dedupe_strs(configured_spaces)
+
+    def ensure_runtime_cache_dirs(self) -> None:
+        self.runtime_cache_dir.mkdir(parents=True, exist_ok=True)
+        self.request_cache_dir.mkdir(parents=True, exist_ok=True)
+        self.temporal_projects_dir.mkdir(parents=True, exist_ok=True)
+        self.wayback_mosaic_cache_dir.mkdir(parents=True, exist_ok=True)
 
     @property
     def request_cache_dir(self) -> Path:
@@ -211,6 +212,7 @@ def get_settings() -> Settings:
         wmts_capabilities_url=os.getenv("APP_WMTS_CAPABILITIES_URL", base.wmts_capabilities_url),
         tile_matrix_set=os.getenv("APP_TILE_MATRIX_SET", base.tile_matrix_set),
         zoom=_int_env("APP_TILE_ZOOM", base.zoom),
+        min_zoom=_int_env("APP_TILE_MIN_ZOOM", base.min_zoom),
         request_timeout_sec=_int_env("APP_REQUEST_TIMEOUT_SEC", base.request_timeout_sec),
         download_workers=_int_env("APP_DOWNLOAD_WORKERS", base.download_workers),
         download_retries=_int_env("APP_DOWNLOAD_RETRIES", base.download_retries),

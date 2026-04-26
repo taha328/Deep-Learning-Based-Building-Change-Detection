@@ -1,23 +1,26 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from functools import partial
 import gradio as gr
 import pandas as pd
 from PIL import Image
 from pathlib import Path
 import requests
+import rasterio
 from typing import Any, Callable, Literal
 
 from src.config import Settings
 from src.domain.cache import load_cached_response, request_result_dir, save_cached_response
 from src.domain.bandon_runner import run_bandon_inference
-from src.domain.exports import export_bandon_outputs, export_run_outputs
-from src.domain.inference import derive_new_building_products, run_tiled_inference
+from src.domain.exports import export_bandon_outputs, export_run_outputs, export_segmentation_outputs
+from src.domain.inference import derive_new_building_products, run_single_scene_inference, run_tiled_inference
 from src.domain.mosaic import align_mosaic_pair, download_wayback_mosaic
 from src.domain.postprocess import remove_small_components, suppress_edge_hugging_components
 from src.domain.tiling import estimate_patch_count
 from src.domain.vectorize import (
+    SegmentationVectorizationContext,
     VectorizationContext,
     build_building_blocks,
     build_change_blocks,
@@ -27,6 +30,7 @@ from src.domain.vectorize import (
     merge_close_buildings,
     vectorize_change_regions,
     vectorize_new_buildings,
+    vectorize_segmentation_regions,
 )
 from src.domain.wayback import (
     MetadataSummary,
@@ -35,9 +39,15 @@ from src.domain.wayback import (
     preflight_wayback_tile_availability,
     summarize_wayback_metadata,
 )
-from src.schemas import DiagnosticMetadata, RunRequest, RunResponse, SummaryStats
+from src.schemas import DiagnosticMetadata, RunRequest, RunResponse, SegmentationRequest, SummaryStats
 from src.services.releases import list_releases
-from src.services.validation import PreparedRequest, resolve_min_new_building_pixels, validate_request
+from src.services.validation import (
+    PreparedRequest,
+    resolve_min_new_building_pixels,
+    validate_request,
+    validate_segmentation_request,
+)
+from src.utils.raster import read_rgb
 from src.utils.logging import get_logger
 from src.utils.profiling import StageTimings
 
@@ -46,6 +56,14 @@ LOGGER = get_logger(__name__)
 
 
 ProgressReporter = gr.Progress | Callable[[float, str], None] | None
+
+
+@dataclass(frozen=True)
+class ResolvedWaybackRelease:
+    release: Any
+    zoom: int
+    metadata: MetadataSummary
+    tilemap: TileAvailabilitySummary | None
 
 
 def _report(progress: ProgressReporter, value: float, message: str) -> None:
@@ -94,6 +112,7 @@ def _summarize_release_metadata_for_request(
     release_identifier: str,
     aoi_bbox: dict[str, float],
     normalized_aoi: dict[str, Any],
+    zoom: int,
 ) -> MetadataSummary:
     session = build_session(settings)
     try:
@@ -103,7 +122,7 @@ def _summarize_release_metadata_for_request(
             aoi_bbox,
             grid_size=settings.metadata_grid_size,
             aoi_geojson=normalized_aoi,
-            zoom=settings.zoom,
+            zoom=zoom,
         )
     finally:
         _close_session_if_possible(session)
@@ -114,6 +133,7 @@ def _preflight_release_tile_availability_for_request(
     *,
     release,
     aoi_bbox: dict[str, float],
+    zoom: int,
 ) -> TileAvailabilitySummary:
     session = build_session(settings)
     try:
@@ -121,7 +141,7 @@ def _preflight_release_tile_availability_for_request(
             session,
             release,
             aoi_bbox,
-            zoom=settings.zoom,
+            zoom=zoom,
             max_workers=settings.wayback_metadata_workers,
         )
     finally:
@@ -131,6 +151,8 @@ def _preflight_release_tile_availability_for_request(
 def _pair_summary_df(
     *,
     prepared: PreparedRequest,
+    zoom_t1: int,
+    zoom_t2: int,
     scene_t1_metadata: MetadataSummary,
     scene_t2_metadata: MetadataSummary,
     t1_tilemap: TileAvailabilitySummary | None = None,
@@ -141,6 +163,7 @@ def _pair_summary_df(
             {
                 "label": "t1",
                 "identifier": prepared.t1_release.identifier,
+                "zoom": zoom_t1,
                 "release_date": str(prepared.t1_release.release_date),
                 "dominant_src_date": scene_t1_metadata.dominant_src_date,
                 "dominant_src_res_m": scene_t1_metadata.dominant_src_res_m,
@@ -157,6 +180,7 @@ def _pair_summary_df(
             {
                 "label": "t2",
                 "identifier": prepared.t2_release.identifier,
+                "zoom": zoom_t2,
                 "release_date": str(prepared.t2_release.release_date),
                 "dominant_src_date": scene_t2_metadata.dominant_src_date,
                 "dominant_src_res_m": scene_t2_metadata.dominant_src_res_m,
@@ -174,13 +198,106 @@ def _pair_summary_df(
     )
 
 
+def _segmentation_summary_df(
+    *,
+    release_identifier: str,
+    release_date: str,
+    zoom: int,
+    scene_metadata: MetadataSummary,
+    tilemap: TileAvailabilitySummary | None,
+    tile_count: int,
+    prompt: str | None,
+) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "label": "source",
+                "identifier": release_identifier,
+                "zoom": zoom,
+                "release_date": release_date,
+                "dominant_src_date": scene_metadata.dominant_src_date,
+                "dominant_src_res_m": scene_metadata.dominant_src_res_m,
+                "capture_date_count": scene_metadata.capture_date_count,
+                "mixed_capture_dates": scene_metadata.mixed_capture_dates,
+                "metadata_region_count": scene_metadata.metadata_region_count,
+                "metadata_coverage_fraction": scene_metadata.metadata_coverage_fraction,
+                "tilemap_candidate_count": tilemap.candidate_count if tilemap is not None else None,
+                "tilemap_available_count": tilemap.available_count if tilemap is not None else None,
+                "tilemap_missing_count": tilemap.missing_count if tilemap is not None else None,
+                "tilemap_availability_fraction": tilemap.availability_fraction if tilemap is not None else None,
+                "tile_count": tile_count,
+                "prompt": prompt,
+            }
+        ]
+    )
+
+
+def _metadata_has_usable_coverage(metadata: MetadataSummary) -> bool:
+    return (
+        metadata.metadata_region_count > 0
+        or metadata.dominant_src_date is not None
+        or (metadata.metadata_coverage_fraction is not None and metadata.metadata_coverage_fraction > 0.0)
+    )
+
+
+def _resolve_release_for_aoi(
+    settings: Settings,
+    *,
+    release,
+    aoi_bbox: dict[str, float],
+    normalized_aoi: dict[str, Any],
+) -> ResolvedWaybackRelease:
+    last_metadata: MetadataSummary | None = None
+    last_tilemap: TileAvailabilitySummary | None = None
+
+    for zoom in range(settings.zoom, settings.min_zoom - 1, -1):
+        metadata = _summarize_release_metadata_for_request(
+            settings,
+            release_identifier=release.identifier,
+            aoi_bbox=aoi_bbox,
+            normalized_aoi=normalized_aoi,
+            zoom=zoom,
+        )
+        tilemap = (
+            _preflight_release_tile_availability_for_request(
+                settings,
+                release=release,
+                aoi_bbox=aoi_bbox,
+                zoom=zoom,
+            )
+            if settings.wayback_tilemap_preflight_enabled
+            else None
+        )
+        last_metadata = metadata
+        last_tilemap = tilemap
+
+        if tilemap is not None:
+            if tilemap.available_count > 0:
+                return ResolvedWaybackRelease(release=release, zoom=zoom, metadata=metadata, tilemap=tilemap)
+            if tilemap.failed_check_count > 0 and _metadata_has_usable_coverage(metadata):
+                return ResolvedWaybackRelease(release=release, zoom=zoom, metadata=metadata, tilemap=tilemap)
+            continue
+
+        if _metadata_has_usable_coverage(metadata):
+            return ResolvedWaybackRelease(release=release, zoom=zoom, metadata=metadata, tilemap=None)
+
+    return ResolvedWaybackRelease(
+        release=release,
+        zoom=settings.zoom,
+        metadata=last_metadata or MetadataSummary(dominant_src_date=None, dominant_src_res_m=None),
+        tilemap=last_tilemap,
+    )
+
+
 def _coverage_entry(
     release_identifier: str,
+    zoom: int,
     metadata: MetadataSummary,
     tilemap: TileAvailabilitySummary | None,
 ) -> dict[str, Any]:
     entry: dict[str, Any] = {
         "release_identifier": release_identifier,
+        "zoom": zoom,
         "metadata_region_count": metadata.metadata_region_count,
         "capture_date_count": metadata.capture_date_count,
         "mixed_capture_dates": metadata.mixed_capture_dates,
@@ -205,14 +322,16 @@ def _build_failure_diagnostics(
     scene_t2_metadata: MetadataSummary | None = None,
     tilemap_t1: TileAvailabilitySummary | None = None,
     tilemap_t2: TileAvailabilitySummary | None = None,
+    zoom_t1: int | None = None,
+    zoom_t2: int | None = None,
     warnings: list[str] | None = None,
     backend: dict[str, Any] | None = None,
 ) -> DiagnosticMetadata:
     coverage: dict[str, Any] = {}
     if scene_t1_metadata is not None:
-        coverage["t1"] = _coverage_entry(prepared.t1_release.identifier, scene_t1_metadata, tilemap_t1)
+        coverage["t1"] = _coverage_entry(prepared.t1_release.identifier, zoom_t1 or 0, scene_t1_metadata, tilemap_t1)
     if scene_t2_metadata is not None:
-        coverage["t2"] = _coverage_entry(prepared.t2_release.identifier, scene_t2_metadata, tilemap_t2)
+        coverage["t2"] = _coverage_entry(prepared.t2_release.identifier, zoom_t2 or 0, scene_t2_metadata, tilemap_t2)
     return DiagnosticMetadata(
         cache_hit=False,
         stage_seconds=dict(timings.values),
@@ -253,6 +372,297 @@ def _tilemap_unavailability_message(
         f"Selected Wayback release {release_identifier} has metadata coverage but zero downloadable WMTS tiles "
         f"for the requested AOI at z={zoom}."
     )
+
+
+def run_segmentation(
+    request: SegmentationRequest,
+    *,
+    settings: Settings,
+    progress: ProgressReporter = None,
+    x_ip_token: str | None = None,
+    inference_runner=run_single_scene_inference,
+    remote_patch_budget_enabled: bool = True,
+    request_hash_context: dict[str, object] | None = None,
+) -> RunResponse:
+    releases = list_releases(settings)
+    validation, prepared = validate_segmentation_request(
+        request,
+        releases=releases,
+        settings=settings,
+        remote_patch_budget_enabled=remote_patch_budget_enabled,
+        request_hash_context=request_hash_context,
+    )
+    if not validation.valid or prepared is None:
+        return RunResponse(
+            success=False,
+            error_code="invalid_request",
+            error_message="; ".join(validation.blocking_errors) or "The request is invalid.",
+        )
+
+    cached = load_cached_response(settings, prepared.request_hash)
+    if cached is not None:
+        if cached.diagnostics is not None:
+            cached.diagnostics.cache_hit = True
+        return cached
+
+    timings = StageTimings()
+    result_dir = request_result_dir(settings, prepared.request_hash)
+
+    from src.utils.geometry import bounds_dict, parse_aoi_geometry
+
+    geometry = parse_aoi_geometry(prepared.normalized_aoi)
+    aoi_bbox = bounds_dict(geometry)
+    semantic_threshold = (
+        float(request.semantic_threshold)
+        if request.semantic_threshold is not None
+        else float(settings.default_semantic_threshold)
+    )
+    min_segment_pixels = max(
+        int(request.min_segment_pixels)
+        if request.min_segment_pixels is not None
+        else int(settings.default_min_new_building_pixels),
+        1,
+    )
+    run_warnings: list[str] = []
+    backend_diagnostics: dict[str, Any] = {
+        "model_backend": "sam3",
+        "segmentation_prompt": settings.remote_segmentation_prompt,
+    }
+
+    LOGGER.info("Running SAM3 segmentation for request %s", prepared.request_hash)
+    _report(progress, 0.05, "Resolving Wayback metadata")
+    if settings.wayback_tilemap_preflight_enabled:
+        _report(progress, 0.1, "Checking tile availability")
+
+    with timings.track("release_resolution"):
+        resolved_release = _resolve_release_for_aoi(
+            settings,
+            release=prepared.release,
+            aoi_bbox=aoi_bbox,
+            normalized_aoi=prepared.normalized_aoi,
+        )
+    scene_metadata = resolved_release.metadata
+    tilemap = resolved_release.tilemap
+    if resolved_release.zoom < settings.zoom:
+        run_warnings.append(
+            f"Release {prepared.release.identifier} is being downloaded at z={resolved_release.zoom} because z={settings.zoom} has no safe AOI coverage."
+        )
+
+    if scene_metadata.mixed_capture_dates:
+        run_warnings.append(
+            f"Release {prepared.release.identifier} intersects {scene_metadata.capture_date_count} capture-date regions within the AOI."
+        )
+    if tilemap is not None:
+        if tilemap.failed_check_count > 0:
+            run_warnings.append(
+                f"Tile availability preflight was incomplete: {tilemap.failed_check_count} tile checks failed."
+            )
+        elif tilemap.available_count < tilemap.candidate_count:
+            run_warnings.append(
+                f"Release {prepared.release.identifier} has partial z={resolved_release.zoom} tile coverage for the AOI "
+                f"({tilemap.available_count}/{tilemap.candidate_count} tiles available)."
+            )
+        if tilemap.preflight_complete and tilemap.available_count == 0:
+            return RunResponse(
+                success=False,
+                error_code="wayback_tile_coverage_unavailable",
+                error_message=_tilemap_unavailability_message(
+                    release_identifier=prepared.release.identifier,
+                    metadata=scene_metadata,
+                    tilemap=tilemap,
+                    zoom=resolved_release.zoom,
+                ),
+                diagnostics=DiagnosticMetadata(
+                    cache_hit=False,
+                    stage_seconds=timings.values,
+                    tile_counts={"source": prepared.tile_count, "total": prepared.tile_count},
+                    thresholds={"semantic_threshold": semantic_threshold},
+                    min_new_building_pixels=min_segment_pixels,
+                    backend=backend_diagnostics,
+                    warnings=run_warnings,
+                    coverage={"source": _coverage_entry(prepared.release.identifier, resolved_release.zoom, scene_metadata, tilemap)},
+                ),
+            )
+
+    summary_df = _segmentation_summary_df(
+        release_identifier=prepared.release.identifier,
+        release_date=str(prepared.release.release_date),
+        zoom=resolved_release.zoom,
+        scene_metadata=scene_metadata,
+        tilemap=tilemap,
+        tile_count=prepared.tile_count,
+        prompt=settings.remote_segmentation_prompt,
+    )
+
+    _report(progress, 0.18, "Downloading Wayback imagery")
+    try:
+        with timings.track("download"):
+            scene = download_wayback_mosaic(
+                prepared.release,
+                aoi_bbox,
+                settings=settings,
+                zoom=resolved_release.zoom,
+                out_dir=result_dir,
+                label="source",
+                max_tiles=None,
+                available_tiles=tilemap.available_tiles if tilemap is not None and tilemap.preflight_complete else None,
+            )
+    except ValueError as exc:
+        return RunResponse(success=False, error_code="wayback_tile_coverage_unavailable", error_message=str(exc))
+    except requests.RequestException as exc:
+        return RunResponse(
+            success=False,
+            error_code="wayback_tile_download_failed",
+            error_message=f"{type(exc).__name__}: {exc}",
+        )
+
+    _report(progress, 0.35, "Preparing source imagery")
+    with timings.track("mosaic"):
+        source_rgb = read_rgb(scene.geotiff_path)
+        with rasterio.open(scene.valid_mask_path) as src:
+            valid_mask = src.read(1).astype(bool)
+
+    actual_patch_count = estimate_patch_count(
+        source_rgb.shape[0],
+        source_rgb.shape[1],
+        settings.patch_size,
+        settings.stride,
+    )
+    if remote_patch_budget_enabled and actual_patch_count > prepared.mode_limits.max_remote_patches_per_scene:
+        return RunResponse(
+            success=False,
+            error_code="remote_patch_budget_exceeded",
+            error_message=(
+                "Source imagery requires "
+                f"{actual_patch_count} remote SAM3 patches, exceeding the {prepared.mode_limits.label} "
+                f"limit of {prepared.mode_limits.max_remote_patches_per_scene}. Reduce the AOI extent."
+            ),
+            diagnostics=DiagnosticMetadata(
+                cache_hit=False,
+                stage_seconds=timings.values,
+                tile_counts={"source": scene.tile_count, "total": scene.tile_count},
+                thresholds={"semantic_threshold": semantic_threshold},
+                min_new_building_pixels=min_segment_pixels,
+                backend=backend_diagnostics,
+                warnings=run_warnings,
+                coverage={"source": _coverage_entry(prepared.release.identifier, resolved_release.zoom, scene_metadata, tilemap)},
+            ),
+        )
+
+    _report(progress, 0.45, "Running SAM3 segmentation")
+    try:
+        with timings.track("segmentation_inference"):
+            probs, inference_diag = inference_runner(
+                source_rgb,
+                settings=settings,
+                semantic_threshold=semantic_threshold,
+                cache_dir=result_dir,
+                x_ip_token=x_ip_token,
+                progress_callback=lambda message: _report(progress, 0.55, message),
+            )
+    except RuntimeError as exc:
+        message = str(exc)
+        error_code = (
+            "remote_provider_quota_exhausted"
+            if "exceeded your gpu quota" in message.lower()
+            else "remote_provider_unavailable"
+        )
+        return RunResponse(
+            success=False,
+            error_code=error_code,
+            error_message=message,
+            diagnostics=DiagnosticMetadata(
+                cache_hit=False,
+                stage_seconds=timings.values,
+                tile_counts={"source": scene.tile_count, "total": scene.tile_count},
+                thresholds={"semantic_threshold": semantic_threshold},
+                min_new_building_pixels=min_segment_pixels,
+                backend=backend_diagnostics,
+                warnings=run_warnings,
+                coverage={"source": _coverage_entry(prepared.release.identifier, resolved_release.zoom, scene_metadata, tilemap)},
+            ),
+        )
+    timings.values["patch_preparation"] = inference_diag.patch_prepare_seconds
+    timings.values["remote_inference"] = inference_diag.remote_seconds
+    timings.values["mask_decode"] = inference_diag.mask_decode_seconds
+
+    segmentation_prob = probs["segmentation_prediction"]
+    _report(progress, 0.72, "Applying post-processing")
+    with timings.track("postprocessing"):
+        raw_segmentation_mask = (segmentation_prob >= semantic_threshold) & valid_mask
+        segmentation_mask, segmentation_labels = remove_small_components(
+            raw_segmentation_mask,
+            min_segment_pixels,
+        )
+
+    _report(progress, 0.82, "Vectorizing segmentation")
+    with timings.track("vectorization"):
+        segmentation_df, segmentation_geojson = vectorize_segmentation_regions(
+            segmentation_mask,
+            scene.geotiff_path,
+            SegmentationVectorizationContext(
+                release=prepared.release.identifier,
+                src_date=scene_metadata.dominant_src_date,
+                prompt=settings.remote_segmentation_prompt,
+            ),
+        )
+
+    _report(progress, 0.92, "Exporting artifacts")
+    with timings.track("export"):
+        previews, artifacts, zip_path, tabular_metrics = export_segmentation_outputs(
+            result_dir=result_dir,
+            reference_raster_path=scene.geotiff_path,
+            source_rgb=source_rgb,
+            segmentation_prob=segmentation_prob,
+            segmentation_mask=segmentation_mask,
+            segmentation_labels=segmentation_labels,
+            segmentation_df=segmentation_df,
+            segmentation_geojson=segmentation_geojson,
+            summary_df=summary_df,
+        )
+
+    total_segment_area = float(segmentation_df["area_m2"].sum()) if not segmentation_df.empty else 0.0
+    response = RunResponse(
+        success=True,
+        summary=SummaryStats(
+            request_hash=prepared.request_hash,
+            mode=request.mode,
+            model_backend="sam3",
+            result_semantics="segmentation",
+            estimated_area_m2=round(prepared.area_m2, 2),
+            tile_count_t1=scene.tile_count,
+            tile_count_t2=0,
+            total_new_buildings=0,
+            total_building_blocks=0,
+            total_new_building_area_m2=0.0,
+            total_building_block_area_m2=0.0,
+            release_date=str(prepared.release.release_date),
+            dominant_src_date=scene_metadata.dominant_src_date,
+            dominant_src_res_m=scene_metadata.dominant_src_res_m,
+            segmentation_prompt=settings.remote_segmentation_prompt,
+            total_segments=int(len(segmentation_df)),
+            total_segment_area_m2=round(total_segment_area, 2),
+        ),
+        preview_images=previews,
+        segmentation_geojson=segmentation_geojson,
+        tabular_metrics=tabular_metrics,
+        artifacts=artifacts,
+        downloadable_zip_path=zip_path,
+        diagnostics=DiagnosticMetadata(
+            cache_hit=False,
+            stage_seconds=timings.values,
+            tile_counts={"source": scene.tile_count, "total": scene.tile_count},
+            patch_count=inference_diag.patch_count,
+            thresholds={"semantic_threshold": semantic_threshold},
+            min_new_building_pixels=min_segment_pixels,
+            backend=backend_diagnostics,
+            warnings=run_warnings,
+            coverage={"source": _coverage_entry(prepared.release.identifier, resolved_release.zoom, scene_metadata, tilemap)},
+        ),
+    )
+    save_cached_response(settings, prepared.request_hash, response)
+    _report(progress, 1.0, "Completed")
+    return response
 
 
 def run_detection(
@@ -332,46 +742,36 @@ def run_detection(
 
     LOGGER.info("Running detection for request %s", prepared.request_hash)
     _report(progress, 0.05, "Resolving Wayback metadata")
+    if settings.wayback_tilemap_preflight_enabled:
+        _report(progress, 0.1, "Checking tile availability")
 
     with timings.track("release_resolution"):
         with ThreadPoolExecutor(max_workers=2) as executor:
-            future_t1_metadata = executor.submit(
-                _summarize_release_metadata_for_request,
+            future_t1_resolution = executor.submit(
+                _resolve_release_for_aoi,
                 settings,
-                release_identifier=prepared.t1_release.identifier,
+                release=prepared.t1_release,
                 aoi_bbox=aoi_bbox,
                 normalized_aoi=prepared.normalized_aoi,
             )
-            future_t2_metadata = executor.submit(
-                _summarize_release_metadata_for_request,
+            future_t2_resolution = executor.submit(
+                _resolve_release_for_aoi,
                 settings,
-                release_identifier=prepared.t2_release.identifier,
+                release=prepared.t2_release,
                 aoi_bbox=aoi_bbox,
                 normalized_aoi=prepared.normalized_aoi,
             )
-            scene_t1_metadata = future_t1_metadata.result()
-            scene_t2_metadata = future_t2_metadata.result()
-
-    tilemap_t1: TileAvailabilitySummary | None = None
-    tilemap_t2: TileAvailabilitySummary | None = None
-    if settings.wayback_tilemap_preflight_enabled:
-        _report(progress, 0.12, "Checking tile availability")
-        with timings.track("availability_preflight"):
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                future_t1_tilemap = executor.submit(
-                    _preflight_release_tile_availability_for_request,
-                    settings,
-                    release=prepared.t1_release,
-                    aoi_bbox=aoi_bbox,
-                )
-                future_t2_tilemap = executor.submit(
-                    _preflight_release_tile_availability_for_request,
-                    settings,
-                    release=prepared.t2_release,
-                    aoi_bbox=aoi_bbox,
-                )
-                tilemap_t1 = future_t1_tilemap.result()
-                tilemap_t2 = future_t2_tilemap.result()
+            resolved_t1 = future_t1_resolution.result()
+            resolved_t2 = future_t2_resolution.result()
+    scene_t1_metadata = resolved_t1.metadata
+    scene_t2_metadata = resolved_t2.metadata
+    tilemap_t1 = resolved_t1.tilemap
+    tilemap_t2 = resolved_t2.tilemap
+    for label, resolved in (("T1", resolved_t1), ("T2", resolved_t2)):
+        if resolved.zoom < settings.zoom:
+            run_warnings.append(
+                f"{label} release {resolved.release.identifier} is being downloaded at z={resolved.zoom} because z={settings.zoom} has no safe AOI coverage."
+            )
 
     for label, release_identifier, metadata, tilemap in (
         ("T1", prepared.t1_release.identifier, scene_t1_metadata, tilemap_t1),
@@ -387,23 +787,26 @@ def run_detection(
                     f"{label} tile availability preflight was incomplete: {tilemap.failed_check_count} tile checks failed."
                 )
             elif tilemap.available_count < tilemap.candidate_count:
+                resolved_zoom = resolved_t1.zoom if label == "T1" else resolved_t2.zoom
                 run_warnings.append(
-                    f"{label} release {release_identifier} has partial z={settings.zoom} tile coverage for the AOI "
+                    f"{label} release {release_identifier} has partial z={resolved_zoom} tile coverage for the AOI "
                     f"({tilemap.available_count}/{tilemap.candidate_count} tiles available)."
                 )
 
     with timings.track("tile_indexing"):
         pair_summary_df = _pair_summary_df(
             prepared=prepared,
+            zoom_t1=resolved_t1.zoom,
+            zoom_t2=resolved_t2.zoom,
             scene_t1_metadata=scene_t1_metadata,
             scene_t2_metadata=scene_t2_metadata,
             t1_tilemap=tilemap_t1,
             t2_tilemap=tilemap_t2,
         )
 
-    for tilemap, release_identifier, metadata in (
-        (tilemap_t1, prepared.t1_release.identifier, scene_t1_metadata),
-        (tilemap_t2, prepared.t2_release.identifier, scene_t2_metadata),
+    for tilemap, release_identifier, metadata, resolved_zoom in (
+        (tilemap_t1, prepared.t1_release.identifier, scene_t1_metadata, resolved_t1.zoom),
+        (tilemap_t2, prepared.t2_release.identifier, scene_t2_metadata, resolved_t2.zoom),
     ):
         if tilemap is not None and tilemap.preflight_complete and tilemap.available_count == 0:
             return RunResponse(
@@ -413,7 +816,7 @@ def run_detection(
                     release_identifier=release_identifier,
                     metadata=metadata,
                     tilemap=tilemap,
-                    zoom=settings.zoom,
+                    zoom=resolved_zoom,
                 ),
                 diagnostics=_build_failure_diagnostics(
                     timings=timings,
@@ -426,6 +829,8 @@ def run_detection(
                     scene_t2_metadata=scene_t2_metadata,
                     tilemap_t1=tilemap_t1,
                     tilemap_t2=tilemap_t2,
+                    zoom_t1=resolved_t1.zoom,
+                    zoom_t2=resolved_t2.zoom,
                     warnings=run_warnings,
                     backend=backend_diagnostics,
                 ),
@@ -438,6 +843,7 @@ def run_detection(
                 prepared.t1_release,
                 aoi_bbox,
                 settings=settings,
+                zoom=resolved_t1.zoom,
                 out_dir=result_dir,
                 label="t1",
                 max_tiles=None,
@@ -447,6 +853,7 @@ def run_detection(
                 prepared.t2_release,
                 aoi_bbox,
                 settings=settings,
+                zoom=resolved_t2.zoom,
                 out_dir=result_dir,
                 label="t2",
                 max_tiles=None,
@@ -468,6 +875,8 @@ def run_detection(
                 scene_t2_metadata=scene_t2_metadata,
                 tilemap_t1=tilemap_t1,
                 tilemap_t2=tilemap_t2,
+                zoom_t1=resolved_t1.zoom,
+                zoom_t2=resolved_t2.zoom,
                 warnings=run_warnings,
                 backend=backend_diagnostics,
             ),
@@ -488,6 +897,8 @@ def run_detection(
                 scene_t2_metadata=scene_t2_metadata,
                 tilemap_t1=tilemap_t1,
                 tilemap_t2=tilemap_t2,
+                zoom_t1=resolved_t1.zoom,
+                zoom_t2=resolved_t2.zoom,
                 warnings=run_warnings,
                 backend=backend_diagnostics,
             ),
@@ -518,6 +929,8 @@ def run_detection(
                 scene_t2_metadata=scene_t2_metadata,
                 tilemap_t1=tilemap_t1,
                 tilemap_t2=tilemap_t2,
+                zoom_t1=resolved_t1.zoom,
+                zoom_t2=resolved_t2.zoom,
                 warnings=run_warnings,
             ),
         )
@@ -557,6 +970,8 @@ def run_detection(
                 scene_t2_metadata=scene_t2_metadata,
                 tilemap_t1=tilemap_t1,
                 tilemap_t2=tilemap_t2,
+                zoom_t1=resolved_t1.zoom,
+                zoom_t2=resolved_t2.zoom,
                 warnings=run_warnings + alignment_warnings,
                 backend=backend_diagnostics,
             ),
@@ -597,13 +1012,15 @@ def run_detection(
                     min_new_building_pixels=min_pixels,
                     old_building_mask_dilation_pixels=old_building_mask_dilation_pixels,
                     new_building_core_distance_pixels=new_building_core_distance_pixels,
-                    scene_t1_metadata=scene_t1_metadata,
-                    scene_t2_metadata=scene_t2_metadata,
-                    tilemap_t1=tilemap_t1,
-                    tilemap_t2=tilemap_t2,
-                    warnings=run_warnings + alignment_warnings,
-                    backend=backend_diagnostics,
-                ),
+                scene_t1_metadata=scene_t1_metadata,
+                scene_t2_metadata=scene_t2_metadata,
+                tilemap_t1=tilemap_t1,
+                tilemap_t2=tilemap_t2,
+                zoom_t1=resolved_t1.zoom,
+                zoom_t2=resolved_t2.zoom,
+                warnings=run_warnings + alignment_warnings,
+                backend=backend_diagnostics,
+            ),
             )
 
         if bandon_result.change_probability.shape != arr_t2.shape[:2]:
@@ -621,13 +1038,15 @@ def run_detection(
                     min_new_building_pixels=min_pixels,
                     old_building_mask_dilation_pixels=old_building_mask_dilation_pixels,
                     new_building_core_distance_pixels=new_building_core_distance_pixels,
-                    scene_t1_metadata=scene_t1_metadata,
-                    scene_t2_metadata=scene_t2_metadata,
-                    tilemap_t1=tilemap_t1,
-                    tilemap_t2=tilemap_t2,
-                    warnings=run_warnings + alignment_warnings,
-                    backend=backend_diagnostics,
-                ),
+                scene_t1_metadata=scene_t1_metadata,
+                scene_t2_metadata=scene_t2_metadata,
+                tilemap_t1=tilemap_t1,
+                tilemap_t2=tilemap_t2,
+                zoom_t1=resolved_t1.zoom,
+                zoom_t2=resolved_t2.zoom,
+                warnings=run_warnings + alignment_warnings,
+                backend=backend_diagnostics,
+            ),
             )
 
         backend_diagnostics["bandon"] = {
@@ -752,8 +1171,8 @@ def run_detection(
                 backend=backend_diagnostics,
                 warnings=run_warnings + alignment_warnings,
                 coverage={
-                    "t1": _coverage_entry(prepared.t1_release.identifier, scene_t1_metadata, tilemap_t1),
-                    "t2": _coverage_entry(prepared.t2_release.identifier, scene_t2_metadata, tilemap_t2),
+                    "t1": _coverage_entry(prepared.t1_release.identifier, resolved_t1.zoom, scene_t1_metadata, tilemap_t1),
+                    "t2": _coverage_entry(prepared.t2_release.identifier, resolved_t2.zoom, scene_t2_metadata, tilemap_t2),
                 },
             ),
         )
@@ -795,6 +1214,8 @@ def run_detection(
                 scene_t2_metadata=scene_t2_metadata,
                 tilemap_t1=tilemap_t1,
                 tilemap_t2=tilemap_t2,
+                zoom_t1=resolved_t1.zoom,
+                zoom_t2=resolved_t2.zoom,
                 warnings=run_warnings + alignment_warnings,
                 backend=backend_diagnostics,
             ),
@@ -914,8 +1335,8 @@ def run_detection(
             backend=backend_diagnostics,
             warnings=run_warnings + alignment_warnings,
             coverage={
-                "t1": _coverage_entry(prepared.t1_release.identifier, scene_t1_metadata, tilemap_t1),
-                "t2": _coverage_entry(prepared.t2_release.identifier, scene_t2_metadata, tilemap_t2),
+                "t1": _coverage_entry(prepared.t1_release.identifier, resolved_t1.zoom, scene_t1_metadata, tilemap_t1),
+                "t2": _coverage_entry(prepared.t2_release.identifier, resolved_t2.zoom, scene_t2_metadata, tilemap_t2),
             },
         ),
     )

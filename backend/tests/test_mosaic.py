@@ -70,10 +70,12 @@ def _make_mosaic_result(
     release_date: str,
     geotiff_path: Path,
     valid_mask_path: Path,
+    zoom: int = 19,
 ) -> MosaicResult:
     return MosaicResult(
         identifier=identifier,
         release_date=release_date,
+        zoom=zoom,
         tile_count=1,
         available_tile_count=1,
         missing_tile_count=0,

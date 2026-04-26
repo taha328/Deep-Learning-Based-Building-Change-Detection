@@ -47,6 +47,7 @@ class TileDownloadResult:
 class MosaicResult:
     identifier: str
     release_date: str
+    zoom: int
     tile_count: int
     available_tile_count: int
     missing_tile_count: int
@@ -494,33 +495,35 @@ def download_wayback_mosaic(
     bbox: dict[str, float],
     *,
     settings: Settings,
+    zoom: int | None = None,
     out_dir: Path,
     label: str,
     max_tiles: int | None = None,
     available_tiles: frozenset[tuple[int, int]] | None = None,
 ) -> MosaicResult:
+    resolved_zoom = settings.zoom if zoom is None else zoom
     if settings.tile_matrix_set not in release.tile_matrix_sets:
         raise ValueError(f"{settings.tile_matrix_set} is not available for release {release.identifier}.")
 
-    x_min, x_max, y_min, y_max = tile_range_for_bbox(bbox, settings.zoom)
+    x_min, x_max, y_min, y_max = tile_range_for_bbox(bbox, resolved_zoom)
     tile_count = (x_max - x_min + 1) * (y_max - y_min + 1)
     if max_tiles is not None and tile_count > max_tiles:
         raise ValueError(
-            f"AOI would download {tile_count} tiles for {release.identifier} at z={settings.zoom}; "
+            f"AOI would download {tile_count} tiles for {release.identifier} at z={resolved_zoom}; "
             "reduce the AOI or switch modes."
         )
 
     tile_range = (x_min, x_max, y_min, y_max)
     width = (x_max - x_min + 1) * 256
     height = (y_max - y_min + 1) * 256
-    left, _, _, top = tile_bounds_3857(x_min, y_min, settings.zoom)
-    _, bottom, right, _ = tile_bounds_3857(x_max, y_max, settings.zoom)
+    left, _, _, top = tile_bounds_3857(x_min, y_min, resolved_zoom)
+    _, bottom, right, _ = tile_bounds_3857(x_max, y_max, resolved_zoom)
     bounds_3857 = (left, bottom, right, top)
 
     cache_key = _wayback_mosaic_cache_key(
         release=release,
         tile_matrix_set=settings.tile_matrix_set,
-        zoom=settings.zoom,
+        zoom=resolved_zoom,
         tile_range=tile_range,
     )
     cache_dir = settings.wayback_mosaic_cache_dir / cache_key
@@ -529,7 +532,7 @@ def download_wayback_mosaic(
             cache_dir,
             release=release,
             tile_matrix_set=settings.tile_matrix_set,
-            zoom=settings.zoom,
+            zoom=resolved_zoom,
             tile_range=tile_range,
             width=width,
             height=height,
@@ -543,11 +546,12 @@ def download_wayback_mosaic(
                 out_dir,
                 label=label,
                 release=release,
-                zoom=settings.zoom,
+                zoom=resolved_zoom,
             )
             return MosaicResult(
                 identifier=release.identifier,
                 release_date=str(release.release_date),
+                zoom=resolved_zoom,
                 tile_count=int(cached_metadata["tile_count"]),
                 available_tile_count=int(cached_metadata["actual_available_tile_count"]),
                 missing_tile_count=int(cached_metadata["actual_missing_tile_count"]),
@@ -573,7 +577,7 @@ def download_wayback_mosaic(
                     (
                         x,
                         y,
-                        build_tile_url(release.resource_url_template, settings.tile_matrix_set, settings.zoom, x, y),
+                        build_tile_url(release.resource_url_template, settings.tile_matrix_set, resolved_zoom, x, y),
                     )
                 )
 
@@ -606,7 +610,7 @@ def download_wayback_mosaic(
 
         if available_tile_count == 0:
             raise ValueError(
-                f"Selected Wayback release {release.identifier} has no available imagery tiles for the requested AOI at z={settings.zoom}."
+                f"Selected Wayback release {release.identifier} has no available imagery tiles for the requested AOI at z={resolved_zoom}."
             )
 
         if available_tiles is not None and transient_failure_count == 0:
@@ -617,7 +621,7 @@ def download_wayback_mosaic(
         metadata = _build_cache_metadata(
             release=release,
             tile_matrix_set=settings.tile_matrix_set,
-            zoom=settings.zoom,
+            zoom=resolved_zoom,
             tile_range=tile_range,
             bounds_3857=bounds_3857,
             tile_count=tile_count,
@@ -659,16 +663,17 @@ def download_wayback_mosaic(
         finally:
             shutil.rmtree(staging_dir, ignore_errors=True)
         png_path, tif_path, valid_mask_path = _materialize_cached_mosaic(
-            cache_dir,
-            out_dir,
-            label=label,
-            release=release,
-            zoom=settings.zoom,
-        )
+                cache_dir,
+                out_dir,
+                label=label,
+                release=release,
+                zoom=resolved_zoom,
+            )
 
     return MosaicResult(
         identifier=release.identifier,
         release_date=str(release.release_date),
+        zoom=resolved_zoom,
         tile_count=tile_count,
         available_tile_count=available_tile_count,
         missing_tile_count=missing_tile_count,
