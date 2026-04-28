@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from logging.config import fileConfig
 
 from alembic import context
@@ -19,8 +20,9 @@ target_metadata = Base.metadata
 
 
 def _database_url() -> str:
-    if config.get_main_option("sqlalchemy.url"):
-        return get_settings().database_url
+    env_database_url = os.getenv("DATABASE_URL")
+    if env_database_url:
+        return env_database_url
     return get_settings().database_url
 
 
@@ -51,4 +53,3 @@ if context.is_offline_mode():
     run_migrations_offline()
 else:
     run_migrations_online()
-

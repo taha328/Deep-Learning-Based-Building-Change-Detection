@@ -287,4 +287,12 @@ def import_temporal_override_api(
     *,
     settings: Settings | None = None,
 ) -> TemporalProjectRunResponse:
-    return import_temporal_override(request, settings=_resolve_settings(settings))
+    resolved_settings = _resolve_settings(settings)
+    response = import_temporal_override(request, settings=resolved_settings)
+
+    if resolved_settings.persistence_backend == "postgres":
+        from src.repositories.temporal_project_repository import save_project as save_project_record
+
+        save_project_record(response.project, settings=resolved_settings)
+
+    return response

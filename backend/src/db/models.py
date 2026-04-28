@@ -36,6 +36,7 @@ class ProjectRecord(TimestampMixin, Base):
     runs: Mapped[list[RunRecord]] = relationship(back_populates="project")
     artifacts: Mapped[list[ArtifactRecord]] = relationship(back_populates="project")
     geometry_layers: Mapped[list[GeometryLayerRecord]] = relationship(back_populates="project", cascade="all, delete-orphan")
+    jobs: Mapped[list[JobRecord]] = relationship(back_populates="project")
 
     __table_args__ = (
         Index("ix_projects_aoi_geom_gist", "aoi_geom", postgresql_using="gist"),
@@ -158,4 +159,39 @@ class GeometryLayerRecord(TimestampMixin, Base):
         Index("ix_geometry_layers_geom_gist", "geom", postgresql_using="gist"),
         Index("ix_geometry_layers_created_at", "created_at"),
         Index("ix_geometry_layers_updated_at", "updated_at"),
+    )
+
+
+class JobRecord(TimestampMixin, Base):
+    __tablename__ = "jobs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    job_id: Mapped[str] = mapped_column(String(128), unique=True, index=True, nullable=False)
+    celery_task_id: Mapped[str | None] = mapped_column(String(128), index=True, nullable=True)
+    job_kind: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    status: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    project_db_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("projects.id", ondelete="SET NULL"), nullable=True)
+    project_id: Mapped[str | None] = mapped_column(String(128), index=True, nullable=True)
+    request_hash: Mapped[str | None] = mapped_column(String(128), index=True, nullable=True)
+    progress: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    stage: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_run_id: Mapped[str | None] = mapped_column(String(128), index=True, nullable=True)
+    raw_request: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    raw_result: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    project: Mapped[ProjectRecord | None] = relationship(back_populates="jobs")
+
+    __table_args__ = (
+        Index("ix_jobs_celery_task_id", "celery_task_id"),
+        Index("ix_jobs_job_kind", "job_kind"),
+        Index("ix_jobs_status", "status"),
+        Index("ix_jobs_project_id", "project_id"),
+        Index("ix_jobs_created_at", "created_at"),
+        Index("ix_jobs_updated_at", "updated_at"),
     )

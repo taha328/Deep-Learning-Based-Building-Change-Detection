@@ -145,6 +145,37 @@ export const runResponseSchema = z.object({
   diagnostics: diagnosticsSchema.nullable().optional(),
 });
 
+export const jobStatusSchema = z.enum(["queued", "running", "complete", "failed", "cancel_requested", "cancelled"]);
+
+export const jobStartResponseSchema = z.object({
+  job_id: z.string(),
+  celery_task_id: z.string().nullable().optional(),
+  job_kind: z.string(),
+  status: jobStatusSchema,
+});
+
+export const jobResponseSchema = z.object({
+  job_id: z.string(),
+  celery_task_id: z.string().nullable().optional(),
+  job_kind: z.string(),
+  status: jobStatusSchema,
+  project_id: z.string().nullable().optional(),
+  request_hash: z.string().nullable().optional(),
+  progress: z.number().int().nullable().optional(),
+  stage: z.string().nullable().optional(),
+  message: z.string().nullable().optional(),
+  error_code: z.string().nullable().optional(),
+  error_message: z.string().nullable().optional(),
+  result_run_id: z.string().nullable().optional(),
+  raw_request: z.record(z.any()).nullable().optional(),
+  raw_result: z.record(z.any()).nullable().optional(),
+  cancel_requested: z.boolean().default(false),
+  created_at: z.string(),
+  updated_at: z.string(),
+  started_at: z.string().nullable().optional(),
+  completed_at: z.string().nullable().optional(),
+});
+
 export const temporalSourceModeSchema = z.enum(["automated", "manual_override", "hybrid_reviewed"]);
 export const temporalMilestoneStatusSchema = z.enum(["pending", "validated", "complete", "error"]);
 export const temporalSemanticsSchema = z.enum(["expansion_only"]);
@@ -264,6 +295,9 @@ export type PipelineExecutionConfig = z.infer<typeof pipelineExecutionConfigSche
 export type ValidationRequest = z.infer<typeof validationRequestSchema>;
 export type ValidationResponse = z.infer<typeof validationResponseSchema>;
 export type RunResponse = z.infer<typeof runResponseSchema>;
+export type JobStatus = z.infer<typeof jobStatusSchema>;
+export type JobStartResponse = z.infer<typeof jobStartResponseSchema>;
+export type JobResponse = z.infer<typeof jobResponseSchema>;
 export type TemporalSourceMode = z.infer<typeof temporalSourceModeSchema>;
 export type TemporalMilestoneStatus = z.infer<typeof temporalMilestoneStatusSchema>;
 export type TemporalSemantics = z.infer<typeof temporalSemanticsSchema>;

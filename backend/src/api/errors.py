@@ -17,5 +17,5 @@ class ApiError(BaseModel):
 def raise_api_error(status_code: int, code: str, message: str, details: dict[str, Any] | None = None) -> NoReturn:
     raise HTTPException(
         status_code=status_code,
-        detail={"error": ApiError(code=code, message=message, details=details).model_dump(mode="json")},
+        detail=ApiError(code=code, message=message, details=details).model_dump(mode="json"),
     )

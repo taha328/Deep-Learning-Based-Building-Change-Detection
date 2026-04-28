@@ -16,6 +16,7 @@ type ErrorDetail = {
   code?: string;
   message?: string;
   details?: unknown;
+  error?: ErrorDetail;
 };
 
 export async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
@@ -30,18 +31,26 @@ export async function apiFetch<T>(path: string, options?: RequestInit): Promise<
   if (!response.ok) {
     const payload = await response.json().catch(() => null);
     const detail = (payload?.detail ?? payload?.error ?? payload) as ErrorDetail | string | null;
-    const message =
+    const normalizedDetail =
       detail && typeof detail === "object"
-        ? detail.message ?? response.statusText
+        ? {
+            code: detail.code ?? detail.error?.code,
+            message: detail.message ?? detail.error?.message,
+            details: detail.details ?? detail.error?.details ?? detail.error ?? detail,
+          }
+        : null;
+    const message =
+      normalizedDetail
+        ? normalizedDetail.message ?? response.statusText
         : typeof detail === "string"
           ? detail
           : response.statusText;
 
     const error = new ApiClientError(message);
     error.status = response.status;
-    if (detail && typeof detail === "object") {
-      error.code = detail.code;
-      error.details = detail.details ?? detail;
+    if (normalizedDetail) {
+      error.code = normalizedDetail.code;
+      error.details = normalizedDetail.details;
     } else {
       error.details = detail;
     }

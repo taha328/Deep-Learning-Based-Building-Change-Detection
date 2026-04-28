@@ -99,6 +99,26 @@ class Settings(BaseModel):
     database_url: str = "postgresql+psycopg://building_change:building_change@localhost:5432/building_change"
     database_echo: bool = False
     persistence_backend: PersistenceBackendName = "filesystem"
+    redis_url: str = "redis://localhost:6379/0"
+    celery_broker_url: str | None = None
+    celery_result_backend: str | None = None
+    celery_task_default_queue: str = "building_change"
+    celery_worker_pool: str = "solo"
+    celery_worker_concurrency: int = 1
+    celery_task_acks_late: bool = False
+    celery_task_reject_on_worker_lost: bool = False
+    celery_worker_prefetch_multiplier: int = 1
+    celery_job_stale_after_minutes: int = 60
+    jobs_enabled: bool = True
+    cors_allowed_origins: tuple[str, ...] = (
+        "http://localhost:5173",
+        "http://localhost:5174",
+        "http://localhost:5175",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:5174",
+        "http://127.0.0.1:5175",
+    )
+    cors_allow_origin_regex: str | None = r"http://(localhost|127\.0\.0\.1):\d+"
     preview_limits: ModeLimits = Field(
         default_factory=lambda: ModeLimits(
             name="fast_preview",
@@ -369,6 +389,28 @@ def get_settings() -> Settings:
         database_url=os.getenv("DATABASE_URL", base.database_url),
         database_echo=_bool_env("DATABASE_ECHO", base.database_echo),
         persistence_backend=os.getenv("PERSISTENCE_BACKEND", base.persistence_backend),  # type: ignore[arg-type]
+        redis_url=os.getenv("REDIS_URL", base.redis_url),
+        celery_broker_url=_optional_str_env("CELERY_BROKER_URL"),
+        celery_result_backend=_optional_str_env("CELERY_RESULT_BACKEND"),
+        celery_task_default_queue=os.getenv("CELERY_TASK_DEFAULT_QUEUE", base.celery_task_default_queue),
+        celery_worker_pool=os.getenv("CELERY_WORKER_POOL", base.celery_worker_pool),
+        celery_worker_concurrency=_int_env("CELERY_WORKER_CONCURRENCY", base.celery_worker_concurrency),
+        celery_task_acks_late=_bool_env("CELERY_TASK_ACKS_LATE", base.celery_task_acks_late),
+        celery_task_reject_on_worker_lost=_bool_env(
+            "CELERY_TASK_REJECT_ON_WORKER_LOST",
+            base.celery_task_reject_on_worker_lost,
+        ),
+        celery_worker_prefetch_multiplier=_int_env(
+            "CELERY_WORKER_PREFETCH_MULTIPLIER",
+            base.celery_worker_prefetch_multiplier,
+        ),
+        celery_job_stale_after_minutes=_int_env(
+            "CELERY_JOB_STALE_AFTER_MINUTES",
+            base.celery_job_stale_after_minutes,
+        ),
+        jobs_enabled=_bool_env("JOBS_ENABLED", base.jobs_enabled),
+        cors_allowed_origins=_tuple_str_env("CORS_ALLOWED_ORIGINS", base.cors_allowed_origins),
+        cors_allow_origin_regex=os.getenv("CORS_ALLOW_ORIGIN_REGEX", base.cors_allow_origin_regex),
         preview_limits=ModeLimits(
             name="fast_preview",
             label="Fast Preview",

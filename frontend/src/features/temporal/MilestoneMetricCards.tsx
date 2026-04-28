@@ -3,7 +3,6 @@ import {
   AlertTriangle,
   ArrowDown,
   ArrowUp,
-  Check,
   Minus,
 } from "lucide-react";
 
@@ -17,17 +16,8 @@ type MilestoneMetricCardsProps = {
   milestones: TemporalMilestone[];
   selectedMilestoneId: string | null;
   onSelectMilestone: (releaseIdentifier: string) => void;
-  locale: string;
   t: TranslateFn;
   className?: string;
-};
-
-type TemporalDateStripProps = {
-  milestones: TemporalMilestone[];
-  selectedMilestoneId: string | null;
-  onSelectMilestone: (id: string) => void;
-  maxAddedArea: number;
-  locale: string;
 };
 
 type DonutMetricProps = {
@@ -37,18 +27,9 @@ type DonutMetricProps = {
   toneColor?: "primary" | "accent" | "warning";
 };
 
-type TemporalBarChartProps = {
-  milestones: TemporalMilestone[];
-  selectedMilestoneId: string | null;
-  onSelectMilestone: (id: string) => void;
-  maxAddedArea: number;
-  locale: string;
-};
-
 type ComparisonCardProps = {
   milestone: TemporalMilestone;
   previousMilestone: TemporalMilestone | null;
-  locale: string;
   t: TranslateFn;
 };
 
@@ -128,13 +109,19 @@ function hasMetrics(milestone: TemporalMilestone): milestone is TemporalMileston
 // UI Components
 // ============================================================================
 
-function TemporalDateStrip({
+type TemporalBarChartProps = {
+  milestones: TemporalMilestone[];
+  selectedMilestoneId: string | null;
+  onSelectMilestone: (id: string) => void;
+  maxAddedArea: number;
+};
+
+function TemporalBarChart({
   milestones,
   selectedMilestoneId,
   onSelectMilestone,
   maxAddedArea,
-  locale,
-}: TemporalDateStripProps) {
+}: TemporalBarChartProps) {
   const completedMilestones = milestones.filter((m) => m.status === "complete" && hasMetrics(m));
 
   if (completedMilestones.length === 0) {
@@ -142,39 +129,32 @@ function TemporalDateStrip({
   }
 
   return (
-    <div className="rounded-xl border border-sidebar-border/80 bg-background/60 p-3.5">
-      <p className="mb-2 text-caption font-semibold uppercase tracking-wider text-muted-foreground">
-        {completedMilestones.length > 1 ? "Timeline" : "Date"}
-      </p>
-      <div className="flex gap-1.5 overflow-x-auto pb-1">
+    <div className="rounded-lg border border-sidebar-border/60 bg-surface/40 p-3.5">
+      <p className="mb-3 text-caption font-semibold uppercase tracking-wider text-muted-foreground">Added surface over time</p>
+      <div className="space-y-2">
         {completedMilestones.map((milestone) => {
           const isSelected = milestone.release_identifier === selectedMilestoneId;
-          const addedAreaPercent = maxAddedArea > 0 && milestone.metrics ? (milestone.metrics.added_area_m2 / maxAddedArea) * 100 : 0;
+          const barWidth = maxAddedArea > 0 && milestone.metrics ? (milestone.metrics.added_area_m2 / maxAddedArea) * 100 : 0;
 
           return (
             <button
               key={milestone.release_identifier}
               onClick={() => onSelectMilestone(milestone.release_identifier)}
               className={cn(
-                "min-w-[7.5rem] shrink-0 rounded-xl border p-2.5 text-left transition-all",
-                isSelected ? "border-primary/60 bg-primary/10 shadow-sm" : "border-sidebar-border bg-surface/70 hover:border-primary/40",
+                "group w-full rounded-lg border p-2 text-left transition-all",
+                isSelected
+                  ? "border-primary/40 bg-primary/5"
+                  : "border-sidebar-border/50 bg-surface/40 hover:border-primary/30 hover:bg-surface/60",
               )}
             >
-              <div className="flex items-center justify-between gap-1">
-                <div className="min-w-0 flex-1">
-                  <p className="text-caption font-semibold text-foreground">{milestoneYear(milestone)}</p>
-                  <p className="text-[0.68rem] text-muted-foreground truncate">
-                    {formatArea(milestone.metrics?.added_area_m2, "—")}
-                  </p>
-                </div>
-                {milestone.status === "complete" ? (
-                  <Check className="h-3.5 w-3.5 shrink-0 text-primary" />
-                ) : null}
+              <div className="mb-1.5 flex items-center justify-between gap-2">
+                <span className="text-label font-semibold text-foreground">{milestoneYear(milestone)}</span>
+                <span className="text-caption font-mono text-muted-foreground">{formatArea(milestone.metrics?.added_area_m2, "—")}</span>
               </div>
-              <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-muted">
+              <div className="h-2 overflow-hidden rounded-full bg-muted">
                 <div
-                  className="h-full rounded-full bg-primary transition-all duration-500"
-                  style={{ width: `${clampPercent(addedAreaPercent)}%` }}
+                  className={cn("h-full rounded-full transition-all duration-500", isSelected ? "bg-primary" : "bg-muted-foreground/60")}
+                  style={{ width: `${clampPercent(barWidth)}%` }}
                 />
               </div>
             </button>
@@ -232,57 +212,8 @@ function DonutMetric({ value, label, centerLabel, toneColor = "primary" }: Donut
   );
 }
 
-function TemporalBarChart({
-  milestones,
-  selectedMilestoneId,
-  onSelectMilestone,
-  maxAddedArea,
-  locale,
-}: TemporalBarChartProps) {
-  const completedMilestones = milestones.filter((m) => m.status === "complete" && hasMetrics(m));
 
-  if (completedMilestones.length === 0) {
-    return null;
-  }
-
-  return (
-    <div className="rounded-lg border border-sidebar-border/60 bg-surface/40 p-3.5">
-      <p className="mb-3 text-caption font-semibold uppercase tracking-wider text-muted-foreground">Added surface over time</p>
-      <div className="space-y-2">
-        {completedMilestones.map((milestone) => {
-          const isSelected = milestone.release_identifier === selectedMilestoneId;
-          const barWidth = maxAddedArea > 0 && milestone.metrics ? (milestone.metrics.added_area_m2 / maxAddedArea) * 100 : 0;
-
-          return (
-            <button
-              key={milestone.release_identifier}
-              onClick={() => onSelectMilestone(milestone.release_identifier)}
-              className={cn(
-                "group w-full rounded-lg border p-2 text-left transition-all",
-                isSelected
-                  ? "border-primary/40 bg-primary/5"
-                  : "border-sidebar-border/50 bg-surface/40 hover:border-primary/30 hover:bg-surface/60",
-              )}
-            >
-              <div className="flex items-center justify-between gap-2 mb-1.5">
-                <span className="text-label font-semibold text-foreground">{milestoneYear(milestone)}</span>
-                <span className="text-caption font-mono text-muted-foreground">{formatArea(milestone.metrics?.added_area_m2, "—")}</span>
-              </div>
-              <div className="h-2 overflow-hidden rounded-full bg-muted">
-                <div
-                  className={cn("h-full rounded-full transition-all duration-500", isSelected ? "bg-primary" : "bg-muted-foreground/60")}
-                  style={{ width: `${clampPercent(barWidth)}%` }}
-                />
-              </div>
-            </button>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-function ComparisonCard({ milestone, previousMilestone, locale, t }: ComparisonCardProps) {
+function ComparisonCard({ milestone, previousMilestone, t }: ComparisonCardProps) {
   if (!milestone.metrics) {
     return null;
   }
@@ -445,7 +376,6 @@ export function MilestoneMetricCards({
   milestones,
   selectedMilestoneId,
   onSelectMilestone,
-  locale,
   t,
   className,
 }: MilestoneMetricCardsProps) {
@@ -473,24 +403,18 @@ export function MilestoneMetricCards({
   const addedSharePercent = percentage(metrics.added_area_m2, metrics.total_area_m2);
   const envelopeDensityPercent = percentage(metrics.total_area_m2, metrics.growth_envelope_area_m2);
   const growth = growthIntensityLabel(addedSharePercent, t);
-
   const maxAddedArea = Math.max(...completedMilestones.filter((m) => m.metrics).map((m) => m.metrics!.added_area_m2));
 
   return (
     <div className={cn("space-y-3", className)}>
-      {/* Temporal date selector */}
       {completedMilestones.length > 1 ? (
-        <TemporalDateStrip
+        <TemporalBarChart
           milestones={milestones}
           selectedMilestoneId={selectedMilestoneId}
           onSelectMilestone={onSelectMilestone}
           maxAddedArea={maxAddedArea}
-          locale={locale}
         />
       ) : null}
-
-      {/* Extra breathing room before primary summary */}
-      {completedMilestones.length > 1 ? <div className="mt-1" /> : null}
 
       {/* Executive KPI card - primary visual emphasis */}
       <div className="rounded-2xl border border-primary/35 bg-gradient-to-br from-primary/12 via-surface to-surface p-4 shadow-md">
@@ -542,17 +466,6 @@ export function MilestoneMetricCards({
         </div>
       </div>
 
-      {/* Temporal Bar Chart */}
-      {completedMilestones.length > 1 ? (
-        <TemporalBarChart
-          milestones={milestones}
-          selectedMilestoneId={selectedMilestoneId}
-          onSelectMilestone={onSelectMilestone}
-          maxAddedArea={maxAddedArea}
-          locale={locale}
-        />
-      ) : null}
-
       {/* Donut visualizations */}
       <div className="grid grid-cols-2 gap-2.5">
         <DonutMetric
@@ -571,7 +484,7 @@ export function MilestoneMetricCards({
 
       {/* Comparison with previous */}
       {previousMilestone || completedMilestones.length > 0 ? (
-        <ComparisonCard milestone={milestone} previousMilestone={previousMilestone} locale={locale} t={t} />
+        <ComparisonCard milestone={milestone} previousMilestone={previousMilestone} t={t} />
       ) : null}
 
       {/* Spatial composition */}

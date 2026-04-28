@@ -16,6 +16,12 @@ const EMPTY_FEATURE_COLLECTION: FeatureCollection = {
   features: [],
 };
 
+const BUILDING_CHANGE_BUFFER_FILL_COLORS = {
+  "10m": "#dc2626",
+  "15m": "#facc15",
+  "20m": "#2563eb",
+} as const;
+
 type SearchResult = {
   id: string;
   label: string;
@@ -38,6 +44,8 @@ type LayerToggleKey =
   | "buffer20m"
   | "temporalAdditions"
   | "temporalCumulativeBuffer10m"
+  | "temporalCumulativeBuffer15m"
+  | "temporalCumulativeBuffer20m"
   | "temporalAutomated"
   | "temporalAutomatedBuildingBlocks"
   | "temporalEffectiveBuildingBlocks"
@@ -63,6 +71,8 @@ type WorkflowMode = "pairwise" | "temporal";
 type TemporalVectorSources = {
   temporalAdditions: FeatureCollection;
   temporalCumulativeBuffer10m: FeatureCollection;
+  temporalCumulativeBuffer15m: FeatureCollection;
+  temporalCumulativeBuffer20m: FeatureCollection;
   temporalAutomated: FeatureCollection;
   temporalAutomatedBuildingBlocks: FeatureCollection;
   temporalEffectiveBuildingBlocks: FeatureCollection;
@@ -361,6 +371,8 @@ function ensureOperationalLayers(map: MapLibreMap) {
   ensureGeoJsonSource(map, "buffer-15m");
   ensureGeoJsonSource(map, "buffer-20m");
   ensureGeoJsonSource(map, "temporal-additions");
+  ensureGeoJsonSource(map, "temporal-cumulative-buffer-20m");
+  ensureGeoJsonSource(map, "temporal-cumulative-buffer-15m");
   ensureGeoJsonSource(map, "temporal-cumulative-buffer-10m");
   ensureGeoJsonSource(map, "temporal-automated");
   ensureGeoJsonSource(map, "temporal-automated-building-blocks");
@@ -402,13 +414,21 @@ function ensureOperationalLayers(map: MapLibreMap) {
     "line-color": "#93c5fd",
     "line-width": 1.5,
   });
+  ensureFillLayer(map, "temporal-cumulative-buffer-20m-fill", "temporal-cumulative-buffer-20m", {
+    "fill-color": BUILDING_CHANGE_BUFFER_FILL_COLORS["20m"],
+    "fill-opacity": 1,
+  });
+  ensureFillLayer(map, "temporal-cumulative-buffer-15m-fill", "temporal-cumulative-buffer-15m", {
+    "fill-color": BUILDING_CHANGE_BUFFER_FILL_COLORS["15m"],
+    "fill-opacity": 1,
+  });
+  ensureFillLayer(map, "temporal-cumulative-buffer-10m-fill", "temporal-cumulative-buffer-10m", {
+    "fill-color": BUILDING_CHANGE_BUFFER_FILL_COLORS["10m"],
+    "fill-opacity": 1,
+  });
   ensureFillLayer(map, "temporal-additions-fill", "temporal-additions", {
     "fill-color": "#dc2626",
     "fill-opacity": 0.9,
-  });
-  ensureFillLayer(map, "temporal-cumulative-buffer-10m-fill", "temporal-cumulative-buffer-10m", {
-    "fill-color": "#dc2626",
-    "fill-opacity": 1,
   });
   ensureFillLayer(map, "temporal-automated-fill", "temporal-automated", {
     "fill-color": "#1d4ed8",
@@ -454,8 +474,8 @@ function ensureOperationalLayers(map: MapLibreMap) {
     "line-dasharray": [4, 3],
   });
   ensureFillLayer(map, "buffer-10m-fill", "buffer-10m", {
-    "fill-color": "#22c55e",
-    "fill-opacity": 0.4,
+    "fill-color": BUILDING_CHANGE_BUFFER_FILL_COLORS["10m"],
+    "fill-opacity": 1,
     "fill-outline-color": "#16a34a",
   });
   ensureLineLayer(map, "buffer-10m-line", "buffer-10m", {
@@ -464,8 +484,8 @@ function ensureOperationalLayers(map: MapLibreMap) {
     "line-dasharray": [4, 3],
   });
   ensureFillLayer(map, "buffer-15m-fill", "buffer-15m", {
-    "fill-color": "#f59e0b",
-    "fill-opacity": 0.35,
+    "fill-color": BUILDING_CHANGE_BUFFER_FILL_COLORS["15m"],
+    "fill-opacity": 1,
     "fill-outline-color": "#d97706",
   });
   ensureLineLayer(map, "buffer-15m-line", "buffer-15m", {
@@ -474,8 +494,8 @@ function ensureOperationalLayers(map: MapLibreMap) {
     "line-dasharray": [5, 3],
   });
   ensureFillLayer(map, "buffer-20m-fill", "buffer-20m", {
-    "fill-color": "#c084fc",
-    "fill-opacity": 0.3,
+    "fill-color": BUILDING_CHANGE_BUFFER_FILL_COLORS["20m"],
+    "fill-opacity": 1,
     "fill-outline-color": "#a855f7",
   });
   ensureLineLayer(map, "buffer-20m-line", "buffer-20m", {
@@ -517,6 +537,8 @@ function syncMapPresentation(
   sourceData(map, "buffer-15m", params.pairwiseBuffers.buffer15m);
   sourceData(map, "buffer-20m", params.pairwiseBuffers.buffer20m);
   sourceData(map, "temporal-additions", params.temporalVectors.temporalAdditions);
+  sourceData(map, "temporal-cumulative-buffer-20m", params.temporalVectors.temporalCumulativeBuffer20m);
+  sourceData(map, "temporal-cumulative-buffer-15m", params.temporalVectors.temporalCumulativeBuffer15m);
   sourceData(map, "temporal-cumulative-buffer-10m", params.temporalVectors.temporalCumulativeBuffer10m);
   sourceData(map, "temporal-automated", params.temporalVectors.temporalAutomated);
   sourceData(map, "temporal-automated-building-blocks", params.temporalVectors.temporalAutomatedBuildingBlocks);
@@ -591,6 +613,8 @@ function syncMapPresentation(
   setLayerVisibility(map, "buffer-20m-fill", params.layerState.buffer20m);
   setLayerVisibility(map, "buffer-20m-line", params.layerState.buffer20m);
   setLayerVisibility(map, "temporal-additions-fill", params.layerState.temporalAdditions);
+  setLayerVisibility(map, "temporal-cumulative-buffer-20m-fill", params.layerState.temporalCumulativeBuffer20m);
+  setLayerVisibility(map, "temporal-cumulative-buffer-15m-fill", params.layerState.temporalCumulativeBuffer15m);
   setLayerVisibility(map, "temporal-cumulative-buffer-10m-fill", params.layerState.temporalCumulativeBuffer10m);
   setLayerVisibility(map, "temporal-automated-fill", params.layerState.temporalAutomated);
   setLayerVisibility(map, "temporal-automated-building-blocks-fill", params.layerState.temporalAutomatedBuildingBlocks);
@@ -621,6 +645,8 @@ function applyLayerVisibilityState(map: MapLibreMap, layerState: LayerToggleStat
   setLayerVisibility(map, "buffer-20m-fill", layerState.buffer20m);
   setLayerVisibility(map, "buffer-20m-line", layerState.buffer20m);
   setLayerVisibility(map, "temporal-additions-fill", layerState.temporalAdditions);
+  setLayerVisibility(map, "temporal-cumulative-buffer-20m-fill", layerState.temporalCumulativeBuffer20m);
+  setLayerVisibility(map, "temporal-cumulative-buffer-15m-fill", layerState.temporalCumulativeBuffer15m);
   setLayerVisibility(map, "temporal-cumulative-buffer-10m-fill", layerState.temporalCumulativeBuffer10m);
   setLayerVisibility(map, "temporal-automated-fill", layerState.temporalAutomated);
   setLayerVisibility(map, "temporal-automated-building-blocks-fill", layerState.temporalAutomatedBuildingBlocks);
@@ -642,11 +668,13 @@ function defaultLayerState(workflowMode: WorkflowMode, hasPairResult: boolean): 
     detectedPolygons: workflowMode === "pairwise" ? hasPairResult : false,
     buildingBlocks: false,
     buffers: false,
-    buffer10m: false,
+    buffer10m: workflowMode === "temporal",
     buffer15m: false,
     buffer20m: false,
     temporalAdditions: workflowMode === "temporal",
-    temporalCumulativeBuffer10m: workflowMode === "temporal",
+    temporalCumulativeBuffer10m: false,
+    temporalCumulativeBuffer15m: false,
+    temporalCumulativeBuffer20m: false,
     temporalAutomated: false,
     temporalAutomatedBuildingBlocks: false,
     temporalEffectiveBuildingBlocks: false,
@@ -820,6 +848,8 @@ export function MapView({
     () => ({
       temporalAdditions: ensureFeatureCollection(temporalPresentation?.additions),
       temporalCumulativeBuffer10m: ensureFeatureCollection(temporalPresentation?.cumulativeBuffer10m),
+      temporalCumulativeBuffer15m: ensureFeatureCollection(temporalPresentation?.cumulativeBuffer15m),
+      temporalCumulativeBuffer20m: ensureFeatureCollection(temporalPresentation?.cumulativeBuffer20m),
       temporalAutomated: ensureFeatureCollection(temporalPresentation?.automatedCandidate),
       temporalAutomatedBuildingBlocks: ensureFeatureCollection(temporalPresentation?.automatedBuildingBlocks),
       temporalEffectiveBuildingBlocks: ensureFeatureCollection(temporalPresentation?.effectiveBuildingBlocks),
@@ -913,6 +943,8 @@ export function MapView({
   const hasTemporalResult =
     temporalVectors.temporalAdditions.features.length > 0 ||
     temporalVectors.temporalCumulativeBuffer10m.features.length > 0 ||
+    temporalVectors.temporalCumulativeBuffer15m.features.length > 0 ||
+    temporalVectors.temporalCumulativeBuffer20m.features.length > 0 ||
     temporalVectors.temporalAutomated.features.length > 0 ||
     temporalVectors.temporalAutomatedBuildingBlocks.features.length > 0 ||
     temporalVectors.temporalEffectiveBuildingBlocks.features.length > 0 ||
@@ -926,6 +958,9 @@ export function MapView({
     setLayerState((current) => ({
       ...defaultLayerState(workflowMode, Boolean(result?.success)),
       labels: current.labels,
+      temporalCumulativeBuffer10m: current.temporalCumulativeBuffer10m,
+      temporalCumulativeBuffer15m: current.temporalCumulativeBuffer15m,
+      temporalCumulativeBuffer20m: current.temporalCumulativeBuffer20m,
       temporalConvexHull: current.temporalConvexHull,
       temporalCumulativeGrowthEnvelope: current.temporalCumulativeGrowthEnvelope,
     }));
@@ -1441,9 +1476,34 @@ export function MapView({
               enabled: selectedTemporalMilestoneReady && temporalVectors.temporalAdditions.features.length > 0,
             },
             {
+              key: "buffer10m",
+              label: `${t("map.building_change_buffer")} 10 m`,
+              enabled: selectedTemporalMilestoneReady && pairwiseBuffers.buffer10m.features.length > 0,
+            },
+            {
+              key: "buffer15m",
+              label: `${t("map.building_change_buffer")} 15 m`,
+              enabled: selectedTemporalMilestoneReady && pairwiseBuffers.buffer15m.features.length > 0,
+            },
+            {
+              key: "buffer20m",
+              label: `${t("map.building_change_buffer")} 20 m`,
+              enabled: selectedTemporalMilestoneReady && pairwiseBuffers.buffer20m.features.length > 0,
+            },
+            {
               key: "temporalCumulativeBuffer10m",
               label: t("map.cumulative_building_change_buffer_10m"),
               enabled: selectedTemporalMilestoneReady && temporalVectors.temporalCumulativeBuffer10m.features.length > 0,
+            },
+            {
+              key: "temporalCumulativeBuffer15m",
+              label: t("map.cumulative_building_change_buffer_15m"),
+              enabled: selectedTemporalMilestoneReady && temporalVectors.temporalCumulativeBuffer15m.features.length > 0,
+            },
+            {
+              key: "temporalCumulativeBuffer20m",
+              label: t("map.cumulative_building_change_buffer_20m"),
+              enabled: selectedTemporalMilestoneReady && temporalVectors.temporalCumulativeBuffer20m.features.length > 0,
             },
             {
               key: "temporalConvexHull",
@@ -1465,8 +1525,6 @@ export function MapView({
               label: t("map.manual_override"),
               enabled: selectedTemporalMilestoneReady && temporalVectors.temporalManualOverride.features.length > 0,
             },
-            { key: "buffer15m", label: `${t("map.building_change_buffer")} 15 m`, enabled: selectedTemporalMilestoneReady },
-            { key: "buffer20m", label: `${t("map.building_change_buffer")} 20 m`, enabled: selectedTemporalMilestoneReady },
           ] satisfies LayerEntry[])
       : ([] satisfies LayerEntry[]);
   const advancedSectionEntries =

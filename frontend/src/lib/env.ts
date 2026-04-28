@@ -24,7 +24,6 @@ export interface FrontendRuntimeConfig {
 const DEFAULT_REMOTE_BACKEND_URL = "http://127.0.0.1:8000";
 const DEFAULT_LOCAL_BACKEND_URL = "http://127.0.0.1:8000";
 const DEFAULT_FASTAPI_BACKEND_URL = "http://127.0.0.1:8000";
-const DEFAULT_MAPBOX_API_KEY = "pk.eyJ1IjoidGFoYWVsIiwiYSI6ImNtbnl6dHdqcjA3Z3EycXNmZHQyM3FkZWQifQ.IDf_zeGoMaPHcrsLOD5q7A";
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
 
 function readVariable(key: string): string | undefined {
@@ -138,5 +137,5 @@ export function getFastApiBaseUrl(): string {
 }
 
 export function getMapboxApiKey(): string {
-  return readVariable("MAPBOX_API_KEY") ?? readVariable("VITE_MAPBOX_API_KEY") ?? DEFAULT_MAPBOX_API_KEY;
+  return readVariable("MAPBOX_API_KEY") ?? readVariable("VITE_MAPBOX_API_KEY") ?? "";
 }

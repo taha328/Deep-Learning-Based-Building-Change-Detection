@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
@@ -15,6 +16,53 @@ def _run_status(response: RunResponse | TemporalProjectRunResponse) -> str:
     return "complete" if response.success else "failed"
 
 
+def build_detection_run_id(request_hash: str | None) -> str:
+    return request_hash or f"detection-{uuid.uuid4().hex}"
+
+
+def build_temporal_run_id(project_id: str) -> str:
+    return f"temporal-{project_id}-{uuid.uuid4().hex}"
+
+
+def get_latest_detection_run_id(
+    request_hash: str,
+    *,
+    settings: Settings | None = None,
+    session: Session | None = None,
+) -> str | None:
+    if session is None:
+        with session_scope(settings) as scoped_session:
+            return get_latest_detection_run_id(request_hash, settings=settings, session=scoped_session)
+
+    record = (
+        session.query(RunRecord)
+        .filter(RunRecord.request_hash == request_hash, RunRecord.run_kind == "detection")
+        .order_by(RunRecord.created_at.desc())
+        .first()
+    )
+    return record.run_id if record else None
+
+
+def get_latest_temporal_run_id(
+    project_id: str,
+    *,
+    settings: Settings | None = None,
+    session: Session | None = None,
+) -> str | None:
+    if session is None:
+        with session_scope(settings) as scoped_session:
+            return get_latest_temporal_run_id(project_id, settings=settings, session=scoped_session)
+
+    record = (
+        session.query(RunRecord)
+        .join(ProjectRecord, ProjectRecord.id == RunRecord.project_db_id)
+        .filter(RunRecord.run_kind == "temporal_project", ProjectRecord.project_id == project_id)
+        .order_by(RunRecord.created_at.desc())
+        .first()
+    )
+    return record.run_id if record else None
+
+
 def save_detection_run(
     *,
     request: RunRequest,
@@ -26,16 +74,17 @@ def save_detection_run(
         with session_scope(settings) as scoped_session:
             return save_detection_run(request=request, response=response, settings=settings, session=scoped_session)
 
+    status = _run_status(response)
     request_hash = response.summary.request_hash if response.summary else None
-    run_id = request_hash or f"detection-{datetime.now(UTC).timestamp()}"
+    run_id = build_detection_run_id(request_hash)
     run = session.query(RunRecord).filter(RunRecord.run_id == run_id).one_or_none()
     if run is None:
-        run = RunRecord(run_id=run_id, run_kind="detection")
+        run = RunRecord(run_id=run_id, run_kind="detection", status=status)
         session.add(run)
         session.flush()
 
     run.request_hash = request_hash
-    run.status = _run_status(response)
+    run.status = status
     run.mode = request.mode
     run.model_backend = response.summary.model_backend if response.summary else request.model_backend
     run.completed_at = datetime.now(UTC)
@@ -58,16 +107,20 @@ def save_temporal_run(
         with session_scope(settings) as scoped_session:
             return save_temporal_run(project_id=project_id, response=response, settings=settings, session=scoped_session)
 
-    project = session.query(ProjectRecord).filter(ProjectRecord.project_id == project_id).one_or_none()
-    run_id = f"temporal-{project_id}"
-    run = session.query(RunRecord).filter(RunRecord.run_id == run_id).one_or_none()
-    if run is None:
-        run = RunRecord(run_id=run_id, run_kind="temporal_project")
-        session.add(run)
-        session.flush()
+    response_project_id = response.project.project_id if response.project else project_id
+    project = session.query(ProjectRecord).filter(ProjectRecord.project_id == response_project_id).one_or_none()
+    status = _run_status(response)
+    run = RunRecord(
+        run_id=build_temporal_run_id(response_project_id),
+        run_kind="temporal_project",
+        status=status,
+        project_db_id=project.id if project else None,
+    )
+    session.add(run)
+    session.flush()
 
     run.project_db_id = project.id if project else None
-    run.status = _run_status(response)
+    run.status = status
     run.model_backend = (
         response.project.execution_config.model_backend
         if response.project.execution_config is not None
@@ -75,7 +128,6 @@ def save_temporal_run(
     )
     run.completed_at = datetime.now(UTC)
     run.error_message = response.error_message
-    run.raw_request = {"project_id": project_id}
+    run.raw_request = {"project_id": response_project_id}
     run.raw_response = response.model_dump(mode="json")
     return response
-

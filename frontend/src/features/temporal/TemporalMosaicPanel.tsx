@@ -10,7 +10,6 @@ import {
   FolderOpen,
   Layers3,
   Loader2,
-  PenSquare,
   Pentagon,
   Plus,
   Save,
@@ -417,15 +416,6 @@ function milestoneBadgeTone(status: TemporalMilestone["status"]): string {
   return "bg-surface text-foreground border-sidebar-border";
 }
 
-function MilestoneMetaRow({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex items-start justify-between gap-4">
-      <dt className="text-label-muted">{label}</dt>
-      <dd className="max-w-[13rem] text-right text-label leading-5">{value}</dd>
-    </div>
-  );
-}
-
 interface TemporalMosaicPanelProps {
   workflowMode: "pairwise" | "temporal";
   onWorkflowModeChange: (mode: "pairwise" | "temporal") => void;
@@ -604,7 +594,7 @@ export function TemporalMosaicPanel({
         stageLabel: "Metadata",
         detail: "Temporal mosaic timeline run started.",
       });
-      return runTemporalProject(projectId);
+      return runTemporalProject(projectId, undefined, setRunProgress);
     },
     onSuccess: (response) => {
       setIsRunning(false);
@@ -785,6 +775,16 @@ export function TemporalMosaicPanel({
         .slice(0, selectedMilestoneIndex + 1)
         .map((milestone) => ensureFeatureCollection(milestone.buffer_layers_geojson?.["10m"])),
     );
+    const cumulativeBuffer15m = mergeFeatureCollections(
+      project.milestones
+        .slice(0, selectedMilestoneIndex + 1)
+        .map((milestone) => ensureFeatureCollection(milestone.buffer_layers_geojson?.["15m"])),
+    );
+    const cumulativeBuffer20m = mergeFeatureCollections(
+      project.milestones
+        .slice(0, selectedMilestoneIndex + 1)
+        .map((milestone) => ensureFeatureCollection(milestone.buffer_layers_geojson?.["20m"])),
+    );
 
     onMapPresentationChange({
       selectedReleaseIdentifier: selectedMilestone.release_identifier,
@@ -802,6 +802,8 @@ export function TemporalMosaicPanel({
         "20m": ensureFeatureCollection(selectedMilestone.buffer_layers_geojson?.["20m"]),
       },
       cumulativeBuffer10m,
+      cumulativeBuffer15m,
+      cumulativeBuffer20m,
       cumulativeUnion: ensureFeatureCollection(selectedMilestone.cumulative_union_geojson),
       cumulativeConvexHull: ensureFeatureCollection(selectedMilestone.cumulative_convex_hull_geojson),
       cumulativeGrowthBlocks: ensureFeatureCollection(selectedMilestone.cumulative_growth_blocks_geojson),
@@ -1387,23 +1389,11 @@ export function TemporalMosaicPanel({
                           </span>
                         </div>
 
-                        <dl className="space-y-2 rounded-lg border border-sidebar-border/80 bg-surface/60 px-3.5 py-3">
-                          <MilestoneMetaRow
-                            label={t("temporal.metrics_date_label")}
-                            value={formatReleaseDate(selectedMilestone.release_date, locale, t("temporal.unknown_date"))}
-                          />
-                          <MilestoneMetaRow
-                            label={t("temporal.metrics_identifier_label")}
-                            value={selectedMilestone.release_identifier}
-                          />
-                        </dl>
-
                         <MilestoneMetricCards
                           milestone={selectedMilestone}
                           milestones={project?.milestones ?? []}
                           selectedMilestoneId={selectedMilestoneId}
                           onSelectMilestone={setSelectedMilestoneId}
-                          locale={locale}
                           t={t}
                         />
 
