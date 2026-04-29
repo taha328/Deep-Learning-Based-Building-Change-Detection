@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 import zipfile
 
 import numpy as np
@@ -10,6 +11,8 @@ from PIL import Image
 import rasterio
 from pyproj import Transformer
 
+from src.domain.artifact_manifest import build_manifest, iter_exportable_artifacts, write_manifest_atomic
+from src.domain.stage_timing import StageTimingRecorder
 from src.schemas import ArtifactEntry, PreviewImages, TabularMetrics
 from src.utils.raster import save_multiband_like, save_single_band_like
 
@@ -108,6 +111,123 @@ def write_csv(path: Path, dataframe: pd.DataFrame) -> Path:
     return path
 
 
+def _fallback_exportable_paths(request_dir: Path) -> list[Path]:
+    source_request_file_re = re.compile(r"^(t1|t2|source)_.+_z\d+(_valid_mask)?\.tif$")
+    allowed_names = {
+        "change_probability.tif",
+        "t1_building_probability.tif",
+        "t2_building_probability.tif",
+        "t1_building_mask.tif",
+        "t2_building_mask.tif",
+        "new_building_mask.tif",
+        "new_building_labels.tif",
+        "building_change_mask.tif",
+        "building_change_labels.tif",
+        "segmentation_probability.tif",
+        "segmentation_mask.tif",
+        "segmentation_labels.tif",
+        "new_buildings.csv",
+        "new_buildings.geojson",
+        "building_blocks.csv",
+        "building_blocks.geojson",
+        "building_change_polygons.csv",
+        "building_change_polygons.geojson",
+        "building_change_blocks.csv",
+        "building_change_blocks.geojson",
+        "segmentation_polygons.csv",
+        "segmentation_polygons.geojson",
+        "wayback_pair_summary.csv",
+        "summary.csv",
+    }
+    excluded_names = {
+        "manifest.json",
+        "manifest.json.tmp",
+        "export_bundle.zip",
+        "run_response.json",
+    }
+    paths: list[Path] = []
+    for candidate in sorted(request_dir.iterdir()):
+        if not candidate.is_file():
+            continue
+        name = candidate.name
+        if name in excluded_names:
+            continue
+        if name.endswith(".zip"):
+            continue
+        if name in {"t1_wayback_rgb.tif", "t2_wayback_rgb.tif", "source_wayback_rgb.tif"}:
+            continue
+        if source_request_file_re.fullmatch(name):
+            continue
+        if name.endswith("_valid_mask.tif"):
+            continue
+        if name.startswith("t1_") and name.endswith("_valid_mask.tif"):
+            continue
+        if name.startswith("t2_") and name.endswith("_valid_mask.tif"):
+            continue
+        if name.startswith("bandon_input_") or name == "t1_invalid_mask_for_arosics.tif" or name == "t2_invalid_mask_for_arosics.tif":
+            continue
+        if name == "bandon_run":
+            continue
+        if name.endswith("_preview.png") or name in allowed_names:
+            paths.append(candidate)
+            continue
+        if name.startswith("building_block_buffer_") or name.startswith("building_change_buffer_"):
+            paths.append(candidate)
+    return paths
+
+
+def _runtime_root_for_request_dir(request_dir: Path) -> Path:
+    return request_dir.resolve().parents[1]
+
+
+def _assert_exportable_path_allowed(request_dir: Path, file_path: Path) -> None:
+    runtime_root = _runtime_root_for_request_dir(request_dir)
+    resolved = file_path.resolve()
+    if runtime_root != resolved and runtime_root not in resolved.parents:
+        raise ValueError(f"Refusing to export artifact outside runtime cache: {resolved}")
+
+
+def write_run_manifest(
+    result_dir: Path,
+    artifacts: list[ArtifactEntry],
+    *,
+    extra_artifacts: list[dict[str, object]] | None = None,
+) -> Path:
+    manifest_artifacts = [artifact.model_dump(mode="json") for artifact in artifacts]
+    if extra_artifacts:
+        manifest_artifacts.extend(extra_artifacts)
+    manifest = build_manifest(result_dir.name, result_dir, manifest_artifacts)
+    return write_manifest_atomic(result_dir, manifest)
+
+
+def create_export_bundle_from_manifest(request_dir: Path, *, force: bool = False) -> Path:
+    request_dir = request_dir.resolve()
+    bundle_path = request_dir / "export_bundle.zip"
+    if bundle_path.exists() and not force:
+        return bundle_path
+
+    timing = StageTimingRecorder(run_id=request_dir.name, pipeline_kind="export")
+    with timing.stage("total"):
+        with timing.stage("export_manifest_read"):
+            exportable_paths = iter_exportable_artifacts(request_dir)
+        with timing.stage("export_artifact_selection", manifest_hit=bool(exportable_paths)):
+            if not exportable_paths:
+                exportable_paths = _fallback_exportable_paths(request_dir)
+            if not exportable_paths:
+                raise ValueError(f"No exportable final artifacts found in {request_dir}.")
+            for file_path in exportable_paths:
+                _assert_exportable_path_allowed(request_dir, file_path)
+        with timing.stage("export_zip_write", artifact_count=len(exportable_paths)):
+            with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as zip_file:
+                for file_path in exportable_paths:
+                    zip_file.write(file_path, arcname=file_path.name)
+    try:
+        timing.write_timing_report(request_dir / "export_timing.json")
+    except OSError:
+        pass
+    return bundle_path
+
+
 def export_run_outputs(
     *,
     result_dir: Path,
@@ -127,7 +247,7 @@ def export_run_outputs(
     building_blocks_geojson: dict,
     buffer_layers: dict[str, tuple[pd.DataFrame, dict]],
     summary_df: pd.DataFrame,
-) -> tuple[PreviewImages, list[ArtifactEntry], str, TabularMetrics]:
+) -> tuple[PreviewImages, list[ArtifactEntry], str | None, TabularMetrics]:
     t1_preview_path = _save_png(result_dir / "t1_preview.png", t1_rgb)
     t2_preview_path = _save_png(result_dir / "t2_preview.png", t2_rgb)
     change_prob_preview_path = _save_png(result_dir / "change_probability_preview.png", probability_rgb(change_prob))
@@ -260,21 +380,7 @@ def export_run_outputs(
         )
         buffer_rows[label] = buffer_df.to_dict(orient="records")
 
-    bundle_path = result_dir / "export_bundle.zip"
-    with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
-        for file_path in sorted(result_dir.glob("*")):
-            if file_path.is_file() and file_path.name != bundle_path.name:
-                zip_file.write(file_path, arcname=file_path.name)
-
-    artifacts.append(
-        ArtifactEntry(
-            name="export_bundle_zip",
-            path=str(bundle_path),
-            media_type="application/zip",
-            description="Complete export bundle",
-        )
-    )
-
+    write_run_manifest(result_dir, artifacts)
     previews = PreviewImages(
         t1_preview_path=str(t1_preview_path),
         t2_preview_path=str(t2_preview_path),
@@ -288,7 +394,7 @@ def export_run_outputs(
         building_block_rows=building_blocks_df.to_dict(orient="records"),
         buffer_rows=buffer_rows,
     )
-    return previews, artifacts, str(bundle_path), tables
+    return previews, artifacts, None, tables
 
 
 def export_bandon_outputs(
@@ -307,7 +413,7 @@ def export_bandon_outputs(
     buffer_layers: dict[str, tuple[pd.DataFrame, dict]],
     summary_df: pd.DataFrame,
     bandon_metadata_path: Path | None = None,
-) -> tuple[PreviewImages, list[ArtifactEntry], str, TabularMetrics]:
+) -> tuple[PreviewImages, list[ArtifactEntry], str | None, TabularMetrics]:
     t1_preview_path = _save_png(result_dir / "t1_preview.png", t1_rgb)
     t2_preview_path = _save_png(result_dir / "t2_preview.png", t2_rgb)
     change_prob_preview_path = _save_png(result_dir / "change_probability_preview.png", probability_rgb(change_prob))
@@ -436,21 +542,7 @@ def export_bandon_outputs(
             )
         )
 
-    bundle_path = result_dir / "export_bundle.zip"
-    with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
-        for file_path in sorted(result_dir.glob("*")):
-            if file_path.is_file() and file_path.name != bundle_path.name:
-                zip_file.write(file_path, arcname=file_path.name)
-
-    artifacts.append(
-        ArtifactEntry(
-            name="export_bundle_zip",
-            path=str(bundle_path),
-            media_type="application/zip",
-            description="Complete export bundle",
-        )
-    )
-
+    write_run_manifest(result_dir, artifacts)
     previews = PreviewImages(
         t1_preview_path=str(t1_preview_path),
         t2_preview_path=str(t2_preview_path),
@@ -463,7 +555,7 @@ def export_bandon_outputs(
         change_rows=change_polygons_df.to_dict(orient="records"),
         buffer_rows=buffer_rows,
     )
-    return previews, artifacts, str(bundle_path), tables
+    return previews, artifacts, None, tables
 
 
 def export_segmentation_outputs(
@@ -477,7 +569,7 @@ def export_segmentation_outputs(
     segmentation_df: pd.DataFrame,
     segmentation_geojson: dict,
     summary_df: pd.DataFrame,
-) -> tuple[PreviewImages, list[ArtifactEntry], str, TabularMetrics]:
+) -> tuple[PreviewImages, list[ArtifactEntry], str | None, TabularMetrics]:
     source_preview_path = _save_png(result_dir / "source_preview.png", source_rgb)
     probability_preview_path = _save_png(
         result_dir / "segmentation_probability_preview.png",
@@ -555,21 +647,7 @@ def export_segmentation_outputs(
         ArtifactEntry(name="summary_csv", path=str(summary_csv), media_type="text/csv", description="Segmentation summary"),
     ]
 
-    bundle_path = result_dir / "export_bundle.zip"
-    with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
-        for file_path in sorted(result_dir.glob("*")):
-            if file_path.is_file() and file_path.name != bundle_path.name:
-                zip_file.write(file_path, arcname=file_path.name)
-
-    artifacts.append(
-        ArtifactEntry(
-            name="export_bundle_zip",
-            path=str(bundle_path),
-            media_type="application/zip",
-            description="Complete export bundle",
-        )
-    )
-
+    write_run_manifest(result_dir, artifacts)
     previews = PreviewImages(
         t2_preview_path=str(source_preview_path),
         change_probability_preview_path=str(probability_preview_path),
@@ -580,4 +658,4 @@ def export_segmentation_outputs(
         summary_rows=summary_df.to_dict(orient="records"),
         change_rows=segmentation_df.to_dict(orient="records"),
     )
-    return previews, artifacts, str(bundle_path), tables
+    return previews, artifacts, None, tables

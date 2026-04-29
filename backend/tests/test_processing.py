@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import date
+import json
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -194,6 +196,20 @@ def test_run_detection_populates_release_dates_in_summary(tmp_path, monkeypatch)
     assert response.summary.release_date_t1 == "2022-03-16"
     assert response.summary.release_date_t2 == "2026-03-25"
     assert response.summary.dominant_src_date_t1 == "2021-02-23"
+    timing_path = settings.request_cache_dir / response.summary.request_hash / "timing.json"
+    timing_payload = json.loads(timing_path.read_text(encoding="utf-8"))
+    assert {stage["name"] for stage in timing_payload["stages"]} >= {
+        "validation",
+        "imagery_cache_lookup",
+        "backend_resolution",
+        "release_resolution.t1.total",
+        "release_resolution.t1.metadata_lookup",
+        "release_resolution.t2.total",
+        "release_resolution.t2.metadata_lookup",
+        "inference",
+        "artifact_write",
+        "manifest_write",
+    }
 
 
 def test_run_segmentation_uses_single_release_and_segmentation_semantics(tmp_path, monkeypatch) -> None:
@@ -818,6 +834,157 @@ def test_run_detection_supports_bandon_backend(tmp_path, monkeypatch) -> None:
     assert response.summary.total_change_polygons == 0
     assert response.diagnostics is not None
     assert response.diagnostics.backend["model_backend"] == "bandon_mps"
+
+
+def test_run_detection_bandon_writes_manifest_and_nested_timing_without_auto_bundle(tmp_path, monkeypatch) -> None:
+    settings = Settings(
+        runtime_cache_dir=tmp_path,
+        arosics_enabled=False,
+        wayback_tilemap_preflight_enabled=False,
+    )
+    releases = [
+        WaybackRelease(
+            identifier="WB_2022_R03",
+            release_date=date(2022, 3, 16),
+            label="2022-03-16 | WB_2022_R03",
+            release_num=1,
+            tile_matrix_sets=("default028mm",),
+            resource_url_template="https://example.com/t1",
+        ),
+        WaybackRelease(
+            identifier="WB_2026_R03",
+            release_date=date(2026, 3, 25),
+            label="2026-03-25 | WB_2026_R03",
+            release_num=2,
+            tile_matrix_sets=("default028mm",),
+            resource_url_template="https://example.com/t2",
+        ),
+    ]
+    request = RunRequest(
+        aoi_geojson={
+            "type": "Polygon",
+            "coordinates": [[[-7.0, 33.0], [-6.9995, 33.0], [-6.9995, 33.0005], [-7.0, 33.0005], [-7.0, 33.0]]],
+        },
+        t1_release="WB_2022_R03",
+        t2_release="WB_2026_R03",
+        mode="fast_preview",
+    )
+
+    request_dir = settings.request_cache_dir / "request-artifacts"
+    request_dir.mkdir(parents=True, exist_ok=True)
+    run_tmp_dir = settings.tmp_cache_dir / "request-artifacts"
+    run_tmp_dir.mkdir(parents=True, exist_ok=True)
+    valid_mask = np.ones((4, 4), dtype=np.uint8)
+    rgb = np.zeros((4, 4, 3), dtype=np.uint8)
+    t1_rgb_path = request_dir / "t1_wayback_rgb.tif"
+    t2_rgb_path = request_dir / "t2_wayback_rgb.tif"
+    t1_valid_mask_path = request_dir / "t1_WB_2022_R03_z19_valid_mask.tif"
+    t2_valid_mask_path = request_dir / "t2_WB_2026_R03_z19_valid_mask.tif"
+    _write_rgb_tif(t1_rgb_path, rgb)
+    _write_rgb_tif(t2_rgb_path, rgb)
+    _write_rgb_tif(t1_valid_mask_path, valid_mask[:, :, None])
+    _write_rgb_tif(t2_valid_mask_path, valid_mask[:, :, None])
+
+    scene_t1 = _scene_result(t1_rgb_path, t1_valid_mask_path, "WB_2022_R03", date(2022, 3, 16))
+    scene_t2 = _scene_result(t2_rgb_path, t2_valid_mask_path, "WB_2026_R03", date(2026, 3, 25))
+
+    monkeypatch.setattr("src.services.processing.list_releases", lambda settings: releases)
+    monkeypatch.setattr("src.services.processing.load_cached_response", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.services.processing.build_session", lambda settings: object())
+    monkeypatch.setattr(
+        "src.services.processing.summarize_wayback_metadata",
+        lambda *args, **kwargs: MetadataSummary(dominant_src_date="2021-02-23", dominant_src_res_m=0.31),
+    )
+    monkeypatch.setattr(
+        "src.services.processing.download_wayback_mosaic",
+        lambda release, *args, **kwargs: scene_t1 if release.identifier == "WB_2022_R03" else scene_t2,
+    )
+    monkeypatch.setattr(
+        "src.services.processing.align_mosaic_pair",
+        lambda *args, **kwargs: AlignmentResult(
+            t1_rgb=rgb,
+            t2_rgb=rgb,
+            t1_valid_mask=valid_mask.astype(bool),
+            t2_valid_mask=valid_mask.astype(bool),
+            diagnostics={"method": "reprojection_only", "used_arosics": False, "warnings": []},
+        ),
+    )
+    monkeypatch.setattr("src.services.processing.resolve_min_new_building_pixels", lambda *args, **kwargs: 1)
+    def fake_run_bandon_inference(*, out_dir, **kwargs):
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "run_metadata.json").write_text("{}", encoding="utf-8")
+        return type(
+            "BandonResult",
+            (),
+            {
+                "change_probability": np.full((4, 4), 0.9, dtype=np.float32),
+                "change_mask": np.ones((4, 4), dtype=bool),
+                "metadata": {
+                    "device_resolved": "mps",
+                    "allow_mps_fallback": False,
+                    "pytorch_enable_mps_fallback": None,
+                    "mps_test_cfg": {"applied": True},
+                    "mps_built": True,
+                    "mps_available": True,
+                },
+                "launcher": "env_python",
+                "command": ["python", "infer_mps.py"],
+            },
+        )()
+
+    monkeypatch.setattr("src.services.processing.run_bandon_inference", fake_run_bandon_inference)
+    empty_fc = {"type": "FeatureCollection", "features": []}
+    monkeypatch.setattr(
+        "src.services.processing.vectorize_change_regions",
+        lambda *args, **kwargs: (pd.DataFrame(columns=["area_m2"]), empty_fc),
+    )
+    monkeypatch.setattr(
+        "src.services.processing.merge_close_change_regions",
+        lambda *args, **kwargs: (pd.DataFrame(columns=["area_m2"]), empty_fc),
+    )
+    monkeypatch.setattr("src.services.processing.save_cached_response", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.services.processing.request_result_dir", lambda *_args, **_kwargs: request_dir)
+    monkeypatch.setattr("src.services.processing.get_run_tmp_dir", lambda *_args, **_kwargs: run_tmp_dir)
+
+    response = run_detection(
+        request,
+        settings=settings,
+        model_backend="bandon_mps",
+    )
+
+    assert response.success is True
+    assert response.downloadable_zip_path is None
+    assert not (request_dir / "export_bundle.zip").exists()
+
+    manifest = json.loads((request_dir / "manifest.json").read_text(encoding="utf-8"))
+    timing_payload = json.loads((request_dir / "timing.json").read_text(encoding="utf-8"))
+    entries_by_name = {Path(item["path"]).name: item for item in manifest["artifacts"] if isinstance(item, dict)}
+    stage_names = {stage["name"] for stage in timing_payload["stages"]}
+
+    assert entries_by_name["t1_wayback_rgb.tif"]["artifact_type"] == "source"
+    assert entries_by_name["t1_wayback_rgb.tif"]["include_in_export"] is False
+    assert entries_by_name["t2_wayback_rgb.tif"]["artifact_type"] == "source"
+    assert entries_by_name["t2_wayback_rgb.tif"]["include_in_export"] is False
+    assert entries_by_name["t1_WB_2022_R03_z19_valid_mask.tif"]["include_in_export"] is False
+    assert entries_by_name["t2_WB_2026_R03_z19_valid_mask.tif"]["include_in_export"] is False
+    assert entries_by_name["bandon_input_t1.png"]["artifact_type"] == "temp"
+    assert entries_by_name["bandon_input_t1.png"]["include_in_export"] is False
+    assert entries_by_name["bandon_input_t2.png"]["artifact_type"] == "temp"
+    assert entries_by_name["bandon_input_t2.png"]["include_in_export"] is False
+    assert entries_by_name["run_metadata.json"]["artifact_type"] == "temp"
+    assert entries_by_name["timing.json"]["artifact_type"] == "metadata"
+    assert entries_by_name["timing.json"]["include_in_export"] is False
+    assert {
+        "backend_resolution",
+        "release_resolution.t1.total",
+        "release_resolution.t1.metadata_lookup",
+        "release_resolution.t1.zoom_attempt",
+        "release_resolution.t1.decision",
+        "release_resolution.t2.total",
+        "release_resolution.t2.metadata_lookup",
+        "release_resolution.t2.zoom_attempt",
+        "release_resolution.t2.decision",
+    }.issubset(stage_names)
 
 
 def test_run_detection_returns_download_error_on_connection_failure(tmp_path, monkeypatch) -> None:

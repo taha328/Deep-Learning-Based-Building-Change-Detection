@@ -5,12 +5,28 @@ from fastapi import APIRouter, Depends, Query, status
 from src.api.deps import get_app_settings
 from src.api.errors import raise_api_error
 from src.config import Settings
+from src.jobs.exceptions import CeleryEnqueueError, JobNotFoundError, JobsDisabledError, RedisUnavailableError
 from src.jobs.schemas import JobResponse, JobStartResponse
-from src.jobs.service import cancel_job, get_job_response, list_job_responses, start_detection_job, start_temporal_project_job
+from src.jobs.service import (
+    cancel_job,
+    get_job_response,
+    list_job_responses,
+    reconcile_stale_jobs,
+    start_detection_job,
+    start_temporal_project_job,
+)
 from src.schemas import RunRequest
 
 
 router = APIRouter()
+
+
+def _raise_job_service_error(exc: Exception) -> None:
+    if isinstance(exc, JobNotFoundError):
+        raise_api_error(status.HTTP_404_NOT_FOUND, exc.code, exc.message, exc.details)
+    if isinstance(exc, (JobsDisabledError, RedisUnavailableError, CeleryEnqueueError)):
+        raise_api_error(status.HTTP_503_SERVICE_UNAVAILABLE, exc.code, exc.message, exc.details)
+    raise exc
 
 
 @router.get("")
@@ -27,23 +43,34 @@ def list_jobs(
 def get_job(job_id: str, settings: Settings = Depends(get_app_settings)) -> JobResponse:
     try:
         return get_job_response(job_id, settings=settings)
-    except FileNotFoundError as exc:
-        raise_api_error(status.HTTP_404_NOT_FOUND, "not_found", str(exc))
+    except (JobNotFoundError, JobsDisabledError, RedisUnavailableError, CeleryEnqueueError) as exc:
+        _raise_job_service_error(exc)
 
 
 @router.post("/{job_id}/cancel")
 def cancel(job_id: str, settings: Settings = Depends(get_app_settings)) -> JobResponse:
     try:
         return cancel_job(job_id, settings=settings)
-    except FileNotFoundError as exc:
-        raise_api_error(status.HTTP_404_NOT_FOUND, "not_found", str(exc))
+    except (JobNotFoundError, JobsDisabledError, RedisUnavailableError, CeleryEnqueueError) as exc:
+        _raise_job_service_error(exc)
+
+
+@router.post("/admin/reconcile-stale")
+def reconcile_stale(settings: Settings = Depends(get_app_settings)) -> dict[str, int]:
+    return {"failed_jobs": reconcile_stale_jobs(settings)}
 
 
 @router.post("/detection")
 def start_detection(request: RunRequest, settings: Settings = Depends(get_app_settings)) -> JobStartResponse:
-    return start_detection_job(request, settings=settings)
+    try:
+        return start_detection_job(request, settings=settings)
+    except (JobNotFoundError, JobsDisabledError, RedisUnavailableError, CeleryEnqueueError) as exc:
+        _raise_job_service_error(exc)
 
 
 @router.post("/temporal-projects/{project_id}")
 def start_temporal_project(project_id: str, settings: Settings = Depends(get_app_settings)) -> JobStartResponse:
-    return start_temporal_project_job(project_id, settings=settings)
+    try:
+        return start_temporal_project_job(project_id, settings=settings)
+    except (JobNotFoundError, JobsDisabledError, RedisUnavailableError, CeleryEnqueueError) as exc:
+        _raise_job_service_error(exc)

@@ -29,6 +29,7 @@ import type {
   Sam3BackendMode,
 } from "@/api/contracts";
 import {
+  createTemporalProjectExportBundle,
   getCachedRunResponse,
   getTemporalProject,
   importTemporalOverride,
@@ -966,11 +967,12 @@ export function TemporalMosaicPanel({
   };
 
   const handleDownloadBundle = async () => {
-    if (!project?.download_bundle_path) {
+    if (!project?.project_id) {
       return;
     }
-    const fileName = project.download_bundle_path.split("/").pop() ?? `${project.project_id}.zip`;
-    await downloadFileFromUrl(buildBackendFileUrl(backendUrl, project.download_bundle_path), fileName);
+    const bundlePath = project.download_bundle_path ?? (await createTemporalProjectExportBundle(project.project_id));
+    const fileName = bundlePath.split("/").pop() ?? `${project.project_id}.zip`;
+    await downloadFileFromUrl(buildBackendFileUrl(backendUrl, bundlePath), fileName);
   };
 
   const handleImportOverride = async (geometry: Polygon) => {
@@ -1167,7 +1169,7 @@ export function TemporalMosaicPanel({
                     {saveProjectMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
                     {t("temporal.save_button")}
                   </Button>
-                  <Button variant="outline" className="border-sidebar-border bg-sidebar" onClick={() => void handleDownloadBundle()} disabled={!project?.download_bundle_path}>
+                  <Button variant="outline" className="border-sidebar-border bg-sidebar" onClick={() => void handleDownloadBundle()} disabled={!project?.project_id}>
                     <Download className="mr-2 h-4 w-4" />
                     {t("temporal.export_button")}
                   </Button>
@@ -1446,7 +1448,7 @@ export function TemporalMosaicPanel({
               description={t("temporal.downloads.description")}
               contentClassName="space-y-3"
             >
-                {!project?.download_bundle_path ? (
+                {!project?.project_id ? (
                   <div className="rounded-lg border border-dashed border-sidebar-border px-4 py-6 text-sm text-foreground">
                     {t("temporal.downloads.empty")}
                   </div>

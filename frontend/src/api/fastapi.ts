@@ -64,13 +64,13 @@ function isJobUnavailableError(error: unknown): boolean {
   );
 }
 
-function isTerminalJobStatus(status: JobResponse["status"] | "completed"): boolean {
-  return status === "complete" || status === "completed" || status === "failed" || status === "cancelled";
+function isTerminalJobStatus(status: JobResponse["status"]): boolean {
+  return status === "completed" || status === "failed" || status === "cancelled";
 }
 
 function jobToProgress(job: JobResponse): RunProgressState {
   const phase =
-    job.status === "complete"
+    job.status === "completed"
       ? "complete"
       : job.status === "failed" || job.status === "cancelled"
         ? "error"
@@ -83,13 +83,13 @@ function jobToProgress(job: JobResponse): RunProgressState {
       ? "Queued for execution."
       : job.status === "running"
         ? "Backend worker started processing your request."
-        : job.status === "complete"
+        : job.status === "completed"
           ? "Artifacts are ready."
           : job.error_message ?? "The backend reported a failure.");
 
   return {
     phase,
-    percent: Math.max(0, Math.min(100, job.progress ?? (job.status === "complete" ? 100 : phase === "queued" ? 0 : 5))),
+    percent: Math.max(0, Math.min(100, job.progress ?? (job.status === "completed" ? 100 : phase === "queued" ? 0 : 5))),
     stageLabel: job.stage ?? (phase === "complete" ? "Completed" : phase === "error" ? "Run failed" : phase === "queued" ? "Queued" : "Processing"),
     detail,
     queuePosition: null,
@@ -98,6 +98,36 @@ function jobToProgress(job: JobResponse): RunProgressState {
     rawEvent: job.status,
     updatedAt: Date.now(),
   };
+}
+
+function compactRawResult(job: JobResponse): Record<string, unknown> {
+  return job.raw_result ?? {};
+}
+
+function compactString(job: JobResponse, key: string): string | null {
+  const value = compactRawResult(job)[key];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+async function resolveDetectionJobResponse(job: JobResponse): Promise<RunResponse> {
+  const requestHash = compactString(job, "request_hash") ?? job.request_hash ?? job.result_run_id;
+  if (requestHash) {
+    return getCachedRunResponse(requestHash);
+  }
+  return runResponseSchema.parse(job.raw_result ?? null);
+}
+
+async function resolveTemporalJobResponse(job: JobResponse): Promise<TemporalProjectRunResponse> {
+  const projectId = compactString(job, "project_id") ?? job.project_id;
+  if (projectId) {
+    const project = await getTemporalProject(projectId);
+    return temporalProjectRunResponseSchema.parse({
+      success: job.status === "completed",
+      error_message: job.error_message ?? compactString(job, "error_message"),
+      project,
+    });
+  }
+  return temporalProjectRunResponseSchema.parse(job.raw_result ?? null);
 }
 
 async function getJob(jobId: string): Promise<JobResponse> {
@@ -258,7 +288,7 @@ export async function runDetection(
     onStatus(formatRunStatus(progress));
 
     const job = await pollJobUntilComplete(startResponse.job_id, onStatus, onProgress);
-    const response = runResponseSchema.parse(job.raw_result ?? null);
+    const response = await resolveDetectionJobResponse(job);
     if (response.success === false) {
       const message = response.error_message ?? job.error_message ?? "The backend reported an unsuccessful run.";
       const errorProgress = createErrorRunProgress(message);
@@ -303,6 +333,13 @@ export async function getTemporalProject(projectId: string): Promise<TemporalPro
 export async function getCachedRunResponse(requestHash: string): Promise<RunResponse> {
   const result = await apiFetch<unknown>(`/api/cache/runs/${encodeURIComponent(requestHash)}`);
   return runResponseSchema.parse(result);
+}
+
+export async function createRunExportBundle(runId: string): Promise<string> {
+  const result = await apiFetch<{ path: string }>(`/api/files/runs/${encodeURIComponent(runId)}/export-bundle`, {
+    method: "POST",
+  });
+  return result.path;
 }
 
 export async function listJobs(options?: { limit?: number; status?: string; jobKind?: string }): Promise<JobResponse[]> {
@@ -414,7 +451,7 @@ export async function runTemporalProject(
     onStatus?.(formatRunStatus(progress));
 
     const job = await pollJobUntilComplete(startResponse.job_id, onStatus, onProgress);
-    const response = temporalProjectRunResponseSchema.parse(job.raw_result ?? null);
+    const response = await resolveTemporalJobResponse(job);
     if (response.success === false) {
       const message = response.error_message ?? job.error_message ?? "The backend reported an unsuccessful temporal run.";
       const errorProgress = createErrorRunProgress(message);
@@ -458,4 +495,11 @@ export async function importTemporalOverride(
     throw new Error(response.error_message ?? "The backend reported an unsuccessful temporal override run.");
   }
   return response;
+}
+
+export async function createTemporalProjectExportBundle(projectId: string): Promise<string> {
+  const result = await apiFetch<{ path: string }>(`/api/temporal-projects/${encodeURIComponent(projectId)}/export-bundle`, {
+    method: "POST",
+  });
+  return result.path;
 }

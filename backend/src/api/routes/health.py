@@ -8,7 +8,6 @@ from src.api.deps import get_app_settings
 from src.api.errors import raise_api_error
 from src.config import Settings
 from src.db.session import session_scope
-from src.jobs.service import reconcile_stale_jobs
 
 
 router = APIRouter()
@@ -97,10 +96,6 @@ def jobs_health(settings: Settings = Depends(get_app_settings)) -> dict[str, obj
             "celery_job_stale_after_minutes": settings.celery_job_stale_after_minutes,
         }
 
-    try:
-        reconcile_stale_jobs(settings)
-    except Exception:  # noqa: BLE001
-        pass
     redis_state = redis_health(settings)
     return {
         "status": "ok",

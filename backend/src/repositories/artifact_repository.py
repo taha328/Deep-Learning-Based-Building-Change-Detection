@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from sqlalchemy import insert
 from sqlalchemy.orm import Session
 
 from src.db.models import ArtifactRecord, MilestoneRecord, ProjectRecord, RunRecord
@@ -46,8 +47,31 @@ def artifact_record_from_entry(
     )
 
 
+def artifact_mapping_from_entry(
+    entry: ArtifactEntry | TemporalArtifactEntry,
+    *,
+    project: ProjectRecord | None = None,
+    milestone: MilestoneRecord | None = None,
+    run: RunRecord | None = None,
+) -> dict[str, object]:
+    return {
+        "project_db_id": project.id if project else None,
+        "milestone_id": milestone.id if milestone else None,
+        "run_db_id": run.id if run else None,
+        "name": entry.name,
+        "path": entry.path,
+        "media_type": entry.media_type,
+        "description": entry.description,
+        "artifact_kind": _artifact_kind(entry.name, entry.media_type),
+        "size_bytes": _file_size(entry.path),
+    }
+
+
 def replace_run_artifacts(session: Session, run: RunRecord, artifacts: list[ArtifactEntry]) -> None:
     session.query(ArtifactRecord).filter(ArtifactRecord.run_db_id == run.id).delete()
-    for entry in artifacts:
-        session.add(artifact_record_from_entry(entry, project=run.project, run=run))
-
+    if not artifacts:
+        return
+    session.execute(
+        insert(ArtifactRecord),
+        [artifact_mapping_from_entry(entry, project=run.project, run=run) for entry in artifacts],
+    )

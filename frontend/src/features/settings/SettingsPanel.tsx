@@ -24,7 +24,7 @@ import type {
   TemporalProject,
   ValidationRequest,
 } from "@/api/contracts";
-import { getCachedRunResponse, getTemporalProject, listTemporalProjects, runDetection, validateRequest } from "@/api/client";
+import { createRunExportBundle, getCachedRunResponse, getTemporalProject, listTemporalProjects, runDetection, validateRequest } from "@/api/client";
 import { useAppStore } from "@/app/store";
 import { Button } from "@/components/ui/button";
 import {
@@ -766,11 +766,13 @@ export function SettingsPanel({
   const artifactCount = result?.artifacts.length ?? 0;
 
   const downloadBundle = async () => {
-    if (!result?.downloadable_zip_path) {
+    const runId = result?.summary?.request_hash;
+    if (!runId) {
       return;
     }
-    const name = result.downloadable_zip_path.split("/").pop() ?? "building-change-outputs.zip";
-    await downloadFileFromUrl(buildBackendFileUrl(backendUrl, result.downloadable_zip_path), name);
+    const bundlePath = result.downloadable_zip_path ?? (await createRunExportBundle(runId));
+    const name = bundlePath.split("/").pop() ?? "building-change-outputs.zip";
+    await downloadFileFromUrl(buildBackendFileUrl(backendUrl, bundlePath), name);
   };
 
   const downloadArtifact = async (path: string, name: string) => {
@@ -1397,7 +1399,7 @@ export function SettingsPanel({
 
                   <div className="space-y-3 rounded border border-sidebar-border bg-sidebar px-4 py-4">
                     <SectionTitle title={t("ui.downloads")} />
-                    {result.downloadable_zip_path ? (
+                    {result.summary?.request_hash ? (
                       <button
                         type="button"
                         onClick={() => {

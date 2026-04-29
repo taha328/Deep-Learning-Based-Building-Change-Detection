@@ -3,13 +3,14 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
+from sqlalchemy import insert
 from sqlalchemy.orm import Session
 
 from src.config import Settings
 from src.db.geometry import geojson_to_wkt_element, polygonal_geojson_to_geometry
 from src.db.models import ArtifactRecord, GeometryLayerRecord, MilestoneMetricRecord, MilestoneRecord, ProjectRecord
 from src.db.session import session_scope
-from src.repositories.artifact_repository import artifact_record_from_entry
+from src.repositories.artifact_repository import artifact_mapping_from_entry
 from src.schemas import TemporalMilestone, TemporalMilestoneMetrics, TemporalProject, TemporalProjectSummary
 from src.utils.geometry import geodesic_area_m2
 
@@ -99,29 +100,26 @@ def _metric_record(milestone_record: MilestoneRecord, metrics: TemporalMilestone
     )
 
 
-def _add_geometry_layer(
-    session: Session,
+def _geometry_layer_mapping(
     *,
     project: ProjectRecord,
     milestone: MilestoneRecord | None,
     layer_kind: str,
     geojson: dict[str, Any] | None,
     source: str | None = None,
-) -> None:
+) -> dict[str, Any] | None:
     if not geojson or layer_kind not in GEOMETRY_LAYER_KINDS:
-        return
-    session.add(
-        GeometryLayerRecord(
-            project_db_id=project.id,
-            milestone_id=milestone.id if milestone else None,
-            layer_kind=layer_kind,
-            geom=geojson_to_wkt_element(geojson),
-            geojson=geojson,
-            feature_count=_feature_count(geojson),
-            area_m2=_area_m2(geojson),
-            source=source,
-        )
-    )
+        return None
+    return {
+        "project_db_id": project.id,
+        "milestone_id": milestone.id if milestone else None,
+        "layer_kind": layer_kind,
+        "geom": geojson_to_wkt_element(geojson),
+        "geojson": geojson,
+        "feature_count": _feature_count(geojson),
+        "area_m2": _area_m2(geojson),
+        "source": source,
+    }
 
 
 def _milestone_geojson_layers(milestone: TemporalMilestone) -> list[tuple[str, dict[str, Any] | None]]:
@@ -176,7 +174,11 @@ def save_project(
     session.query(MilestoneRecord).filter(MilestoneRecord.project_db_id == record.id).delete()
     session.flush()
 
-    _add_geometry_layer(session, project=record, milestone=None, layer_kind="aoi", geojson=project.aoi_geojson, source="project")
+    artifact_mappings: list[dict[str, object]] = []
+    geometry_mappings: list[dict[str, Any]] = []
+    aoi_mapping = _geometry_layer_mapping(project=record, milestone=None, layer_kind="aoi", geojson=project.aoi_geojson, source="project")
+    if aoi_mapping is not None:
+        geometry_mappings.append(aoi_mapping)
 
     for milestone in project.milestones:
         milestone_record = MilestoneRecord(
@@ -196,29 +198,37 @@ def save_project(
             session.add(_metric_record(milestone_record, milestone.metrics))
 
         for entry in milestone.artifacts:
-            session.add(artifact_record_from_entry(entry, project=record, milestone=milestone_record))
+            artifact_mappings.append(artifact_mapping_from_entry(entry, project=record, milestone=milestone_record))
 
         for layer_kind, geojson in _milestone_geojson_layers(milestone):
-            _add_geometry_layer(
-                session,
+            layer_mapping = _geometry_layer_mapping(
                 project=record,
                 milestone=milestone_record,
                 layer_kind=layer_kind,
                 geojson=geojson,
                 source=milestone.source_mode,
             )
+            if layer_mapping is not None:
+                geometry_mappings.append(layer_mapping)
 
     if project.download_bundle_path:
-        session.add(
-            ArtifactRecord(
-                project_db_id=record.id,
-                name=f"{project.project_id}_temporal_project_bundle",
-                path=project.download_bundle_path,
-                media_type="application/zip",
-                description="Temporal project export bundle",
-                artifact_kind="bundle",
-            )
+        artifact_mappings.append(
+            {
+                "project_db_id": record.id,
+                "milestone_id": None,
+                "run_db_id": None,
+                "name": f"{project.project_id}_temporal_project_bundle",
+                "path": project.download_bundle_path,
+                "media_type": "application/zip",
+                "description": "Temporal project export bundle",
+                "artifact_kind": "bundle",
+                "size_bytes": None,
+            }
         )
+    if artifact_mappings:
+        session.execute(insert(ArtifactRecord), artifact_mappings)
+    if geometry_mappings:
+        session.execute(insert(GeometryLayerRecord), geometry_mappings)
     return project
 
 
@@ -249,4 +259,3 @@ def list_projects(
             continue
         summaries.append(_summary_from_project(TemporalProject.model_validate(record.raw_payload)))
     return summaries
-

@@ -17,6 +17,7 @@ from shapely.ops import unary_union
 
 from src.config import Settings
 from src.domain.cache import load_cached_response
+from src.domain.exports import create_export_bundle_from_manifest
 from src.domain.vectorize import build_temporal_growth_blocks, build_temporal_growth_envelope
 from src.execution_profiles import PipelineExecutionConfig, resolve_backend
 from src.schemas import (
@@ -528,57 +529,83 @@ def _refresh_project_bundle(project: TemporalProject, settings: Settings) -> Tem
     bundle_path = project_dir / "temporal_project_bundle.zip"
     manifest_path = project_dir / "project_manifest.json"
 
-    with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for milestone in project.milestones:
-            milestone_artifacts: list[TemporalArtifactEntry] = []
-            for name, description, payload in (
-                ("automated_additions.geojson", "Automated additions footprint", milestone.automated_additions_geojson),
-                ("automated_candidate_footprint.geojson", "Automated cumulative candidate footprint", milestone.automated_candidate_footprint_geojson),
-                ("automated_building_blocks.geojson", "Automated building-level blocks", milestone.automated_building_blocks_geojson),
-                ("manual_override.geojson", "Manual milestone override", milestone.manual_override_geojson),
-                ("additions.geojson", "Effective additions since previous milestone", milestone.additions_geojson),
-                ("effective_building_blocks.geojson", "Grouped blocks built from effective additions", milestone.effective_building_blocks_geojson),
-                ("effective_footprint.geojson", "Effective footprint at this milestone", milestone.effective_footprint_geojson),
-                ("cumulative_union.geojson", "Cumulative union up to this milestone", milestone.cumulative_union_geojson),
-                ("cumulative_convex_hull.geojson", "Convex hull of cumulative union up to this milestone", milestone.cumulative_convex_hull_geojson),
-                ("cumulative_growth_blocks.geojson", "Grouped blocks built from cumulative union", milestone.cumulative_growth_blocks_geojson),
-                ("cumulative_growth_envelope.geojson", "Smoothed cumulative growth envelope", milestone.cumulative_growth_envelope_geojson),
-            ):
-                artifact_path = _artifact_path_for_milestone(project_dir, milestone.release_identifier, name)
-                written_path = _write_geojson(artifact_path, payload)
-                if written_path:
-                    archive.write(artifact_path, arcname=f"milestones/{milestone.release_identifier}/{name}")
-                    milestone_artifacts.append(
-                        TemporalArtifactEntry(
-                            name=f"{milestone.release_identifier}_{name.replace('.geojson', '')}",
-                            path=written_path,
-                            media_type="application/geo+json",
-                            description=description,
-                        )
+    for milestone in project.milestones:
+        milestone_artifacts: list[TemporalArtifactEntry] = []
+        for name, description, payload in (
+            ("automated_additions.geojson", "Automated additions footprint", milestone.automated_additions_geojson),
+            ("automated_candidate_footprint.geojson", "Automated cumulative candidate footprint", milestone.automated_candidate_footprint_geojson),
+            ("automated_building_blocks.geojson", "Automated building-level blocks", milestone.automated_building_blocks_geojson),
+            ("manual_override.geojson", "Manual milestone override", milestone.manual_override_geojson),
+            ("additions.geojson", "Effective additions since previous milestone", milestone.additions_geojson),
+            ("effective_building_blocks.geojson", "Grouped blocks built from effective additions", milestone.effective_building_blocks_geojson),
+            ("effective_footprint.geojson", "Effective footprint at this milestone", milestone.effective_footprint_geojson),
+            ("cumulative_union.geojson", "Cumulative union up to this milestone", milestone.cumulative_union_geojson),
+            ("cumulative_convex_hull.geojson", "Convex hull of cumulative union up to this milestone", milestone.cumulative_convex_hull_geojson),
+            ("cumulative_growth_blocks.geojson", "Grouped blocks built from cumulative union", milestone.cumulative_growth_blocks_geojson),
+            ("cumulative_growth_envelope.geojson", "Smoothed cumulative growth envelope", milestone.cumulative_growth_envelope_geojson),
+        ):
+            artifact_path = _artifact_path_for_milestone(project_dir, milestone.release_identifier, name)
+            written_path = _write_geojson(artifact_path, payload)
+            if written_path:
+                milestone_artifacts.append(
+                    TemporalArtifactEntry(
+                        name=f"{milestone.release_identifier}_{name.replace('.geojson', '')}",
+                        path=written_path,
+                        media_type="application/geo+json",
+                        description=description,
                     )
+                )
 
+        if milestone.pair_request_hash:
+            pair_dir = settings.request_cache_dir / milestone.pair_request_hash
+            pair_bundle = pair_dir / "export_bundle.zip"
+            if pair_bundle.exists():
+                milestone_artifacts.append(
+                    TemporalArtifactEntry(
+                        name=f"{milestone.release_identifier}_pair_export_bundle",
+                        path=str(pair_bundle),
+                        media_type="application/zip",
+                        description="Underlying pairwise run export bundle",
+                    )
+                )
+
+        milestone.artifacts = milestone_artifacts
+
+    manifest_payload = project.model_dump(mode="json")
+    manifest_path.write_text(json.dumps(manifest_payload, indent=2))
+    project.download_bundle_path = str(bundle_path) if bundle_path.exists() else None
+    return project
+
+
+def create_temporal_project_bundle(project_id: str, *, settings: Settings, force: bool = False) -> Path:
+    project = _load_project(settings, project_id)
+    project = _refresh_project_bundle(project, settings)
+    project_dir = _resolve_project_dir(settings, project.project_id, project.project_dir)
+    bundle_path = project_dir / "temporal_project_bundle.zip"
+    if bundle_path.exists() and not force:
+        return bundle_path
+
+    manifest_path = project_dir / "project_manifest.json"
+    with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
+        for milestone in project.milestones:
+            for artifact in milestone.artifacts:
+                artifact_path = Path(artifact.path)
+                if artifact_path.exists():
+                    archive.write(
+                        artifact_path,
+                        arcname=f"milestones/{milestone.release_identifier}/{artifact_path.name}",
+                    )
             if milestone.pair_request_hash:
                 pair_dir = settings.request_cache_dir / milestone.pair_request_hash
-                pair_bundle = pair_dir / "export_bundle.zip"
-                if pair_bundle.exists():
-                    archive.write(pair_bundle, arcname=f"milestones/{milestone.release_identifier}/pair_export_bundle.zip")
-                    milestone_artifacts.append(
-                        TemporalArtifactEntry(
-                            name=f"{milestone.release_identifier}_pair_export_bundle",
-                            path=str(pair_bundle),
-                            media_type="application/zip",
-                            description="Underlying pairwise run export bundle",
-                        )
-                    )
+                pair_bundle = create_export_bundle_from_manifest(pair_dir)
+                archive.write(pair_bundle, arcname=f"milestones/{milestone.release_identifier}/pair_export_bundle.zip")
 
-            milestone.artifacts = milestone_artifacts
-
-        manifest_payload = project.model_dump(mode="json")
-        manifest_path.write_text(json.dumps(manifest_payload, indent=2))
-        archive.write(manifest_path, arcname="project_manifest.json")
+        if manifest_path.exists():
+            archive.write(manifest_path, arcname="project_manifest.json")
 
     project.download_bundle_path = str(bundle_path)
-    return project
+    _save_project(project, settings)
+    return bundle_path
 
 
 def _load_project(settings: Settings, project_id: str) -> TemporalProject:

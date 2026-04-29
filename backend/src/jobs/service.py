@@ -3,14 +3,13 @@ from __future__ import annotations
 from typing import Any
 
 import redis
-from fastapi import status
 from sqlalchemy.orm import Session
 
-from src.api.errors import raise_api_error
 from src.config import Settings
 from src.db.models import JobRecord, ProjectRecord
 from src.db.session import session_scope
 from src.jobs.celery_app import celery_app
+from src.jobs.exceptions import CeleryEnqueueError, JobNotFoundError, JobsDisabledError, RedisUnavailableError
 from src.jobs.schemas import JobResponse, JobStartResponse
 from src.repositories.job_repository import (
     create_job,
@@ -20,6 +19,7 @@ from src.repositories.job_repository import (
     mark_job_enqueued,
     mark_job_failed,
     mark_stale_jobs_failed,
+    normalize_job_status,
 )
 from src.schemas import RunRequest
 
@@ -34,9 +34,7 @@ def _redis_client(settings: Settings) -> redis.Redis:
 
 def assert_jobs_enabled(settings: Settings) -> None:
     if not settings.jobs_enabled:
-        raise_api_error(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            "jobs_disabled",
+        raise JobsDisabledError(
             "Async jobs are disabled by configuration.",
             details={"jobs_enabled": settings.jobs_enabled},
         )
@@ -47,9 +45,7 @@ def assert_redis_available(settings: Settings) -> None:
     try:
         _redis_client(settings).ping()
     except Exception as exc:  # noqa: BLE001
-        raise_api_error(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            "redis_unavailable",
+        raise RedisUnavailableError(
             "Redis is unavailable. Start Redis before using async jobs.",
             details={"broker_url": _broker_url(settings), "error": str(exc)},
         )
@@ -71,7 +67,7 @@ def _job_response(job: JobRecord) -> JobResponse:
             "job_id": job.job_id,
             "celery_task_id": job.celery_task_id,
             "job_kind": job.job_kind,
-            "status": job.status,
+            "status": normalize_job_status(job.status),
             "project_id": job.project_id,
             "request_hash": job.request_hash,
             "progress": job.progress,
@@ -93,16 +89,13 @@ def _job_response(job: JobRecord) -> JobResponse:
 
 def start_temporal_project_job(project_id: str, *, settings: Settings) -> JobStartResponse:
     assert_redis_available(settings)
-    reconcile_stale_jobs(settings)
     enqueue_error: Exception | None = None
     job_id: str | None = None
     celery_task_id: str | None = None
     with session_scope(settings) as session:
         project = session.query(ProjectRecord).filter(ProjectRecord.project_id == project_id).one_or_none()
         if project is None:
-            raise_api_error(
-                status.HTTP_404_NOT_FOUND,
-                "not_found",
+            raise JobNotFoundError(
                 f"Unknown temporal project: {project_id}",
                 details={"project_id": project_id},
             )
@@ -129,9 +122,7 @@ def start_temporal_project_job(project_id: str, *, settings: Settings) -> JobSta
             mark_job_enqueued(job_id=job.job_id, celery_task_id=async_result.id, session=session)
 
     if enqueue_error is not None:
-        raise_api_error(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            "celery_unavailable",
+        raise CeleryEnqueueError(
             "Could not enqueue async job. Ensure Redis and Celery worker are running.",
             details={"error": str(enqueue_error), "queue": settings.celery_task_default_queue},
         )
@@ -142,7 +133,6 @@ def start_temporal_project_job(project_id: str, *, settings: Settings) -> JobSta
 
 def start_detection_job(request: RunRequest, *, settings: Settings) -> JobStartResponse:
     assert_redis_available(settings)
-    reconcile_stale_jobs(settings)
     enqueue_error: Exception | None = None
     job_id: str | None = None
     celery_task_id: str | None = None
@@ -169,9 +159,7 @@ def start_detection_job(request: RunRequest, *, settings: Settings) -> JobStartR
             mark_job_enqueued(job_id=job.job_id, celery_task_id=async_result.id, session=session)
 
     if enqueue_error is not None:
-        raise_api_error(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            "celery_unavailable",
+        raise CeleryEnqueueError(
             "Could not enqueue async job. Ensure Redis and Celery worker are running.",
             details={"error": str(enqueue_error), "queue": settings.celery_task_default_queue},
         )
@@ -181,8 +169,10 @@ def start_detection_job(request: RunRequest, *, settings: Settings) -> JobStartR
 
 
 def get_job_response(job_id: str, *, settings: Settings) -> JobResponse:
-    reconcile_stale_jobs(settings)
-    return _job_response(get_job(job_id, settings=settings))
+    try:
+        return _job_response(get_job(job_id, settings=settings))
+    except FileNotFoundError as exc:
+        raise JobNotFoundError(str(exc), details={"job_id": job_id}) from exc
 
 
 def list_job_responses(
@@ -192,17 +182,19 @@ def list_job_responses(
     status: str | None = None,
     job_kind: str | None = None,
 ) -> list[JobResponse]:
-    reconcile_stale_jobs(settings)
     return [_job_response(job) for job in list_jobs(settings=settings, limit=limit, status=status, job_kind=job_kind)]
 
 
 def cancel_job(job_id: str, *, settings: Settings) -> JobResponse:
-    reconcile_stale_jobs(settings)
-    with session_scope(settings) as session:
-        job = mark_job_cancel_requested(job_id=job_id, session=session)
-        if job.celery_task_id:
-            celery_app.control.revoke(job.celery_task_id, terminate=True, signal="SIGTERM")
-        return _job_response(job)
+    try:
+        with session_scope(settings) as session:
+            job = mark_job_cancel_requested(job_id=job_id, session=session)
+            if job.celery_task_id:
+                # Revoke prevents queued tasks from starting; active tasks stop cooperatively at phase checks.
+                celery_app.control.revoke(job.celery_task_id, terminate=False, signal="SIGTERM")
+            return _job_response(job)
+    except FileNotFoundError as exc:
+        raise JobNotFoundError(str(exc), details={"job_id": job_id}) from exc
 
 
 def mark_job_execution_failed(job_id: str, message: str, *, settings: Settings, error_code: str = "runtime_error") -> None:

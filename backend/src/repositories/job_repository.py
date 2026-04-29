@@ -13,13 +13,21 @@ from src.db.models import JobRecord, ProjectRecord
 from src.db.session import session_scope
 
 
-JobStatus = Literal["queued", "running", "complete", "failed", "cancel_requested", "cancelled"]
+JobStatus = Literal["queued", "running", "completed", "failed", "cancel_requested", "cancelled"]
+LEGACY_COMPLETED_JOB_STATUS = "complete"
+COMPLETED_JOB_STATUS = "completed"
 STALE_JOB_STATUSES = ("queued", "running")
-TERMINAL_JOB_STATUSES = ("complete", "failed", "cancelled")
+TERMINAL_JOB_STATUSES = (COMPLETED_JOB_STATUS, LEGACY_COMPLETED_JOB_STATUS, "failed", "cancelled")
 
 
 def utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+def normalize_job_status(status: str | None) -> str | None:
+    if status == LEGACY_COMPLETED_JOB_STATUS:
+        return COMPLETED_JOB_STATUS
+    return status
 
 
 def create_job(
@@ -169,7 +177,7 @@ def mark_job_completed(
             )
 
     record = _get_job(session, job_id)
-    record.status = "complete"
+    record.status = COMPLETED_JOB_STATUS
     record.progress = 100
     record.stage = "completed"
     record.message = "Artifacts are ready."
@@ -287,7 +295,11 @@ def list_jobs(
 
     query = session.query(JobRecord)
     if status:
-        query = query.filter(JobRecord.status == status)
+        normalized_status = normalize_job_status(status)
+        if normalized_status == COMPLETED_JOB_STATUS:
+            query = query.filter(JobRecord.status.in_((COMPLETED_JOB_STATUS, LEGACY_COMPLETED_JOB_STATUS)))
+        else:
+            query = query.filter(JobRecord.status == normalized_status)
     if job_kind:
         query = query.filter(JobRecord.job_kind == job_kind)
     return query.order_by(JobRecord.created_at.desc()).limit(limit).all()

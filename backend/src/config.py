@@ -40,6 +40,12 @@ class Settings(BaseModel):
     metadata_grid_size: int = 5
     wayback_metadata_workers: int = 10
     wayback_tilemap_preflight_enabled: bool = True
+    wayback_metadata_cache_enabled: bool = True
+    wayback_metadata_cache_ttl_seconds: int = 604800
+    wayback_metadata_cache_dir: Path | None = None
+    wayback_tile_preflight_cache_enabled: bool = True
+    wayback_tile_preflight_cache_ttl_seconds: int = 604800
+    wayback_tile_preflight_cache_dir: Path | None = None
     patch_size: int = 1024
     stride: int = 768
     scene_segmentation_concurrency: int = 2
@@ -110,6 +116,8 @@ class Settings(BaseModel):
     celery_worker_prefetch_multiplier: int = 1
     celery_job_stale_after_minutes: int = 60
     jobs_enabled: bool = True
+    keep_intermediate_artifacts: bool = False
+    materialize_source_imagery_in_requests: bool = False
     cors_allowed_origins: tuple[str, ...] = (
         "http://localhost:5173",
         "http://localhost:5174",
@@ -140,6 +148,10 @@ class Settings(BaseModel):
     allowed_file_roots: tuple[Path, ...] = ()
 
     def model_post_init(self, __context: object) -> None:
+        if self.wayback_metadata_cache_dir is None:
+            self.wayback_metadata_cache_dir = self.runtime_cache_dir / "wayback_metadata_cache"
+        if self.wayback_tile_preflight_cache_dir is None:
+            self.wayback_tile_preflight_cache_dir = self.runtime_cache_dir / "wayback_tile_preflight_cache"
         self.ensure_runtime_cache_dirs()
         if not self.allowed_file_roots:
             self.allowed_file_roots = (self.request_cache_dir, self.temporal_projects_dir)
@@ -153,6 +165,9 @@ class Settings(BaseModel):
         self.request_cache_dir.mkdir(parents=True, exist_ok=True)
         self.temporal_projects_dir.mkdir(parents=True, exist_ok=True)
         self.wayback_mosaic_cache_dir.mkdir(parents=True, exist_ok=True)
+        self.wayback_metadata_cache_dir.mkdir(parents=True, exist_ok=True)
+        self.wayback_tile_preflight_cache_dir.mkdir(parents=True, exist_ok=True)
+        self.tmp_cache_dir.mkdir(parents=True, exist_ok=True)
 
     @property
     def request_cache_dir(self) -> Path:
@@ -165,6 +180,10 @@ class Settings(BaseModel):
     @property
     def wayback_mosaic_cache_dir(self) -> Path:
         return self.runtime_cache_dir / "wayback_mosaics"
+
+    @property
+    def tmp_cache_dir(self) -> Path:
+        return self.runtime_cache_dir / "tmp"
 
     def get_mode_limits(self, mode: ModeName) -> ModeLimits:
         return self.preview_limits if mode == "fast_preview" else self.full_limits
@@ -185,6 +204,14 @@ def _bool_env(name: str, default: bool) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _bool_env_any(names: tuple[str, ...], default: bool) -> bool:
+    for name in names:
+        value = os.getenv(name)
+        if value is not None:
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+    return default
 
 
 def _tuple_float_env(name: str, default: tuple[float, ...]) -> tuple[float, ...]:
@@ -253,6 +280,37 @@ def get_settings() -> Settings:
         wayback_tilemap_preflight_enabled=_bool_env(
             "APP_WAYBACK_TILEMAP_PREFLIGHT_ENABLED",
             base.wayback_tilemap_preflight_enabled,
+        ),
+        wayback_metadata_cache_enabled=_bool_env_any(
+            ("WAYBACK_METADATA_CACHE_ENABLED", "APP_WAYBACK_METADATA_CACHE_ENABLED"),
+            base.wayback_metadata_cache_enabled,
+        ),
+        wayback_metadata_cache_ttl_seconds=_int_env(
+            "WAYBACK_METADATA_CACHE_TTL_SECONDS",
+            base.wayback_metadata_cache_ttl_seconds,
+        ),
+        wayback_metadata_cache_dir=(
+            Path(cache_dir_env)
+            if (cache_dir_env := _optional_str_env("WAYBACK_METADATA_CACHE_DIR", "APP_WAYBACK_METADATA_CACHE_DIR"))
+            else None
+        ),
+        wayback_tile_preflight_cache_enabled=_bool_env_any(
+            ("WAYBACK_TILE_PREFLIGHT_CACHE_ENABLED", "APP_WAYBACK_TILE_PREFLIGHT_CACHE_ENABLED"),
+            base.wayback_tile_preflight_cache_enabled,
+        ),
+        wayback_tile_preflight_cache_ttl_seconds=_int_env(
+            "WAYBACK_TILE_PREFLIGHT_CACHE_TTL_SECONDS",
+            base.wayback_tile_preflight_cache_ttl_seconds,
+        ),
+        wayback_tile_preflight_cache_dir=(
+            Path(cache_dir_env)
+            if (
+                cache_dir_env := _optional_str_env(
+                    "WAYBACK_TILE_PREFLIGHT_CACHE_DIR",
+                    "APP_WAYBACK_TILE_PREFLIGHT_CACHE_DIR",
+                )
+            )
+            else None
         ),
         patch_size=_int_env("APP_PATCH_SIZE", base.patch_size),
         stride=_int_env("APP_STRIDE", base.stride),
@@ -409,6 +467,14 @@ def get_settings() -> Settings:
             base.celery_job_stale_after_minutes,
         ),
         jobs_enabled=_bool_env("JOBS_ENABLED", base.jobs_enabled),
+        keep_intermediate_artifacts=_bool_env(
+            "KEEP_INTERMEDIATE_ARTIFACTS",
+            base.keep_intermediate_artifacts,
+        ),
+        materialize_source_imagery_in_requests=_bool_env(
+            "MATERIALIZE_SOURCE_IMAGERY_IN_REQUESTS",
+            base.materialize_source_imagery_in_requests,
+        ),
         cors_allowed_origins=_tuple_str_env("CORS_ALLOWED_ORIGINS", base.cors_allowed_origins),
         cors_allow_origin_regex=os.getenv("CORS_ALLOW_ORIGIN_REGEX", base.cors_allow_origin_regex),
         preview_limits=ModeLimits(

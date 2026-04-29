@@ -6,16 +6,17 @@ from types import SimpleNamespace
 import uuid
 
 import pytest
-from fastapi import HTTPException
 
 from src.api.routes.health import jobs_health, redis_health
 from src.config import Settings
 from src.db.models import JobRecord, ProjectRecord
 from src.jobs import tasks as job_tasks
 from src.jobs import service as jobs_service
+from src.jobs.exceptions import JobsDisabledError
 from src.jobs.service import cancel_job, start_detection_job, start_temporal_project_job
+from src.repositories import job_repository
 from src.repositories.job_repository import mark_job_completed
-from src.schemas import RunRequest
+from src.schemas import ArtifactEntry, DiagnosticMetadata, RunRequest, RunResponse, SummaryStats
 
 
 class _FakeQuery:
@@ -171,7 +172,7 @@ def test_cancel_job_marks_request_and_revokes(monkeypatch, tmp_path) -> None:
 
     assert response.cancel_requested is True
     assert revoked["task_id"] == "task-1"
-    assert revoked["terminate"] is True
+    assert revoked["terminate"] is False
     assert revoked["signal"] == "SIGTERM"
 
 
@@ -200,9 +201,37 @@ def test_mark_job_completed_clears_previous_error_fields(tmp_path) -> None:
         session=session,  # type: ignore[arg-type]
     )
 
-    assert record.status == "complete"
+    assert record.status == "completed"
     assert record.error_code is None
     assert record.error_message is None
+
+
+def test_get_job_response_normalizes_legacy_complete_without_stale_reconcile(monkeypatch, tmp_path) -> None:
+    session = _FakeJobSession(
+        job=JobRecord(
+            job_id="job-legacy-complete",
+            job_kind="detection",
+            status="complete",
+            progress=100,
+            stage="completed",
+            cancel_requested=False,
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+    )
+    settings = Settings(runtime_cache_dir=tmp_path)
+
+    monkeypatch.setattr(jobs_service, "session_scope", lambda *_args, **_kwargs: _job_session_scope(session))
+    monkeypatch.setattr(job_repository, "session_scope", lambda *_args, **_kwargs: _job_session_scope(session))
+    monkeypatch.setattr(
+        jobs_service,
+        "reconcile_stale_jobs",
+        lambda *_args, **_kwargs: pytest.fail("read endpoints must not reconcile stale jobs"),
+    )
+
+    response = jobs_service.get_job_response("job-legacy-complete", settings=settings)
+
+    assert response.status == "completed"
 
 
 def test_worker_skips_terminal_job_before_running(monkeypatch, tmp_path) -> None:
@@ -231,6 +260,51 @@ def test_worker_skips_terminal_job_before_running(monkeypatch, tmp_path) -> None
     assert session.job.started_at is None
 
 
+def test_compact_detection_result_omits_heavy_geojson() -> None:
+    response = RunResponse(
+        success=True,
+        summary=SummaryStats(
+            request_hash="hash-1",
+            mode="fast_preview",
+            model_backend="bandon_mps",
+            estimated_area_m2=100.0,
+            tile_count_t1=1,
+            tile_count_t2=1,
+            total_new_buildings=2,
+            total_building_blocks=1,
+            total_new_building_area_m2=50.0,
+            total_building_block_area_m2=75.0,
+        ),
+        change_polygons_geojson={"type": "FeatureCollection", "features": [{"large": True}]},
+        buffer_layers_geojson={"buffer_10m": {"type": "FeatureCollection", "features": [{"large": True}]}},
+        artifacts=[
+            ArtifactEntry(
+                name="change_polygons",
+                path="/tmp/change.geojson",
+                media_type="application/geo+json",
+                description="Change polygons",
+            )
+        ],
+        diagnostics=DiagnosticMetadata(cache_hit=False, stage_seconds={"inference": 1.2}),
+    )
+
+    compact = job_tasks._compact_detection_result(response, result_run_id="run-1", stage_timings={"total": 2.0})
+
+    assert compact["success"] is True
+    assert compact["request_hash"] == "hash-1"
+    assert compact["result_run_id"] == "run-1"
+    assert "change_polygons_geojson" not in compact
+    assert "buffer_layers_geojson" not in compact
+    assert compact["artifacts"] == [
+        {
+            "name": "change_polygons",
+            "path": "/tmp/change.geojson",
+            "media_type": "application/geo+json",
+            "description": "Change polygons",
+        }
+    ]
+
+
 def test_start_detection_job_raises_when_jobs_disabled(monkeypatch, tmp_path) -> None:
     session = _FakeJobSession()
     settings = Settings(runtime_cache_dir=tmp_path, jobs_enabled=False, redis_url="redis://localhost:6379/0")
@@ -238,8 +312,7 @@ def test_start_detection_job_raises_when_jobs_disabled(monkeypatch, tmp_path) ->
     monkeypatch.setattr(jobs_service, "session_scope", lambda *_args, **_kwargs: _job_session_scope(session))
     monkeypatch.setattr(jobs_service, "assert_redis_available", jobs_service.assert_redis_available)
 
-    with pytest.raises(HTTPException) as exc_info:
+    with pytest.raises(JobsDisabledError) as exc_info:
         start_detection_job(_sample_request(), settings=settings)
 
-    assert exc_info.value.status_code == 503
-    assert exc_info.value.detail["code"] == "jobs_disabled"
+    assert exc_info.value.code == "jobs_disabled"

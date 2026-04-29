@@ -145,7 +145,10 @@ export const runResponseSchema = z.object({
   diagnostics: diagnosticsSchema.nullable().optional(),
 });
 
-export const jobStatusSchema = z.enum(["queued", "running", "complete", "failed", "cancel_requested", "cancelled"]);
+export const jobStatusSchema = z.preprocess(
+  (value) => (value === "complete" ? "completed" : value),
+  z.enum(["queued", "running", "completed", "failed", "cancel_requested", "cancelled"]),
+);
 
 export const jobStartResponseSchema = z.object({
   job_id: z.string(),

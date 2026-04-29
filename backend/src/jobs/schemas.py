@@ -3,10 +3,14 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
 
-JobStatus = Literal["queued", "running", "complete", "failed", "cancel_requested", "cancelled"]
+JobStatus = Literal["queued", "running", "completed", "failed", "cancel_requested", "cancelled"]
+
+
+def _normalize_status(value: object) -> object:
+    return "completed" if value == "complete" else value
 
 
 class JobStartResponse(BaseModel):
@@ -16,6 +20,11 @@ class JobStartResponse(BaseModel):
     celery_task_id: str | None = None
     job_kind: str
     status: JobStatus
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def normalize_status(cls, value: object) -> object:
+        return _normalize_status(value)
 
 
 class JobResponse(BaseModel):
@@ -40,3 +49,8 @@ class JobResponse(BaseModel):
     updated_at: datetime
     started_at: datetime | None = None
     completed_at: datetime | None = None
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def normalize_status(cls, value: object) -> object:
+        return _normalize_status(value)

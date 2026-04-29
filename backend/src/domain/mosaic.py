@@ -56,6 +56,9 @@ class MosaicResult:
     png_path: Path
     geotiff_path: Path
     valid_mask_path: Path
+    shared_cache_dir: Path = Path(".")
+    cache_key: str = ""
+    materialized_in_request_dir: bool = False
 
 
 @dataclass(frozen=True)
@@ -157,6 +160,29 @@ def _materialize_cached_mosaic(
     for source_path, target_path in ((cache_tif_path, tif_path), (cache_valid_mask_path, valid_mask_path)):
         _materialize_cached_file(source_path, target_path)
     return cache_png_path, tif_path, valid_mask_path
+
+
+def _resolved_mosaic_paths(
+    *,
+    cache_dir: Path,
+    out_dir: Path,
+    label: str,
+    release: WaybackRelease,
+    zoom: int,
+    materialize_in_request_dir: bool,
+) -> tuple[Path, Path, Path, bool]:
+    if materialize_in_request_dir:
+        png_path, tif_path, valid_mask_path = _materialize_cached_mosaic(
+            cache_dir,
+            out_dir,
+            label=label,
+            release=release,
+            zoom=zoom,
+        )
+        return png_path, tif_path, valid_mask_path, True
+
+    cache_png_path, cache_tif_path, cache_valid_mask_path = _cache_mosaic_paths(cache_dir)
+    return cache_png_path, cache_tif_path, cache_valid_mask_path, False
 
 
 def _cache_lock_dir(cache_dir: Path) -> Path:
@@ -541,12 +567,13 @@ def download_wayback_mosaic(
             cached_metadata,
             requested_available_tiles=available_tiles,
         ):
-            png_path, tif_path, valid_mask_path = _materialize_cached_mosaic(
-                cache_dir,
-                out_dir,
+            png_path, tif_path, valid_mask_path, materialized = _resolved_mosaic_paths(
+                cache_dir=cache_dir,
+                out_dir=out_dir,
                 label=label,
                 release=release,
                 zoom=resolved_zoom,
+                materialize_in_request_dir=settings.materialize_source_imagery_in_requests,
             )
             return MosaicResult(
                 identifier=release.identifier,
@@ -560,6 +587,9 @@ def download_wayback_mosaic(
                 png_path=png_path,
                 geotiff_path=tif_path,
                 valid_mask_path=valid_mask_path,
+                shared_cache_dir=cache_dir,
+                cache_key=cache_key,
+                materialized_in_request_dir=materialized,
             )
         if cache_dir.exists():
             shutil.rmtree(cache_dir, ignore_errors=True)
@@ -662,13 +692,14 @@ def download_wayback_mosaic(
             )
         finally:
             shutil.rmtree(staging_dir, ignore_errors=True)
-        png_path, tif_path, valid_mask_path = _materialize_cached_mosaic(
-                cache_dir,
-                out_dir,
-                label=label,
-                release=release,
-                zoom=resolved_zoom,
-            )
+        png_path, tif_path, valid_mask_path, materialized = _resolved_mosaic_paths(
+            cache_dir=cache_dir,
+            out_dir=out_dir,
+            label=label,
+            release=release,
+            zoom=resolved_zoom,
+            materialize_in_request_dir=settings.materialize_source_imagery_in_requests,
+        )
 
     return MosaicResult(
         identifier=release.identifier,
@@ -682,6 +713,9 @@ def download_wayback_mosaic(
         png_path=png_path,
         geotiff_path=tif_path,
         valid_mask_path=valid_mask_path,
+        shared_cache_dir=cache_dir,
+        cache_key=cache_key,
+        materialized_in_request_dir=materialized,
     )
 
 

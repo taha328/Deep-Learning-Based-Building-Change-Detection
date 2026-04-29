@@ -267,6 +267,63 @@ def test_download_wayback_mosaic_reuses_shared_cache_for_compatible_requests(tmp
         assert bool(second_mask.read(1)[:, 256:].any()) is False
 
 
+def test_download_wayback_mosaic_materialization_can_be_disabled(tmp_path, monkeypatch) -> None:
+    settings = Settings(
+        runtime_cache_dir=tmp_path / "runtime",
+        tile_matrix_set="default028mm",
+        zoom=19,
+        download_workers=2,
+        materialize_source_imagery_in_requests=False,
+    )
+    release = _wayback_release()
+    monkeypatch.setattr("src.domain.mosaic.tile_range_for_bbox", lambda bbox, zoom: (0, 0, 0, 0))
+    monkeypatch.setattr("src.domain.mosaic._download_tile", lambda url, timeout_sec: _tile_bytes((255, 0, 0)))
+
+    request_dir = tmp_path / "request_no_materialize"
+    result = download_wayback_mosaic(
+        release,
+        {"west": 0, "south": 0, "east": 1, "north": 1},
+        settings=settings,
+        out_dir=request_dir,
+        label="t1",
+        max_tiles=1,
+    )
+
+    assert result.materialized_in_request_dir is False
+    assert settings.wayback_mosaic_cache_dir in result.geotiff_path.parents
+    assert not (request_dir / "t1_WB_2026_R03_z19.tif").exists()
+    assert not (request_dir / "t1_WB_2026_R03_z19_valid_mask.tif").exists()
+
+
+def test_download_wayback_mosaic_materialization_can_be_enabled(tmp_path, monkeypatch) -> None:
+    settings = Settings(
+        runtime_cache_dir=tmp_path / "runtime",
+        tile_matrix_set="default028mm",
+        zoom=19,
+        download_workers=2,
+        materialize_source_imagery_in_requests=True,
+    )
+    release = _wayback_release()
+    monkeypatch.setattr("src.domain.mosaic.tile_range_for_bbox", lambda bbox, zoom: (0, 0, 0, 0))
+    monkeypatch.setattr("src.domain.mosaic._download_tile", lambda url, timeout_sec: _tile_bytes((255, 0, 0)))
+
+    request_dir = tmp_path / "request_materialize"
+    result = download_wayback_mosaic(
+        release,
+        {"west": 0, "south": 0, "east": 1, "north": 1},
+        settings=settings,
+        out_dir=request_dir,
+        label="t1",
+        max_tiles=1,
+    )
+
+    assert result.materialized_in_request_dir is True
+    assert result.geotiff_path == request_dir / "t1_WB_2026_R03_z19.tif"
+    assert result.valid_mask_path == request_dir / "t1_WB_2026_R03_z19_valid_mask.tif"
+    assert result.geotiff_path.exists()
+    assert result.valid_mask_path.exists()
+
+
 def test_wayback_mosaic_cache_key_changes_for_distinct_imagery_inputs() -> None:
     release = _wayback_release()
     base = _wayback_mosaic_cache_key(

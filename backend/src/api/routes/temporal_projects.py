@@ -15,6 +15,7 @@ from src.core_api import (
     save_temporal_project_api,
     validate_temporal_project_api,
 )
+from src.services.temporal_projects import create_temporal_project_bundle
 from src.schemas import (
     TemporalOverrideRequest,
     TemporalProject,
@@ -104,3 +105,12 @@ def import_override(
         override_geojson=body.override_geojson,
     )
     return import_temporal_override_api(request, settings=settings)
+
+
+@router.post("/{project_id}/export-bundle")
+def export_bundle(project_id: str, settings=Depends(get_app_settings)) -> dict[str, str]:
+    try:
+        bundle_path = create_temporal_project_bundle(project_id, settings=settings)
+    except FileNotFoundError as exc:
+        raise_api_error(status.HTTP_404_NOT_FOUND, "not_found", str(exc))
+    return {"path": str(bundle_path)}
