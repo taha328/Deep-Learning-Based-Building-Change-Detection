@@ -188,9 +188,9 @@ Common environment variables:
 - `CORS_ALLOWED_ORIGINS`
 - `CORS_ALLOW_ORIGIN_REGEX`
 
-## macOS / AROSICS Note
+## macOS / GDAL Note
 
-The local co-registration path uses [AROSICS](https://danschef.git-pages.gfz-potsdam.de/arosics/doc/) and needs GDAL Python bindings that match the installed GDAL library.
+Raster alignment uses reprojection-only alignment through Rasterio/GDAL, so the installed GDAL library and Python bindings still need to match.
 
 If dependency installation fails with a GDAL mismatch, verify:
 

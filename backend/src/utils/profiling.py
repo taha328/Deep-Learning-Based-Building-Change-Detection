@@ -15,7 +15,7 @@ class StageTimings:
     stage_name_map: dict[str, str] = field(default_factory=dict)
 
     @contextmanager
-    def track(self, name: str) -> Iterator[None]:
+    def track(self, name: str, **metadata: object) -> Iterator[None]:
         start = time.perf_counter()
         mapped_name = self.stage_name_map.get(name, name)
         if self.recorder is None:
@@ -26,7 +26,7 @@ class StageTimings:
             return
 
         try:
-            with self.recorder.stage(mapped_name):
+            with self.recorder.stage(mapped_name, **metadata):
                 yield
         finally:
             self.values[name] = round(time.perf_counter() - start, 4)

@@ -130,11 +130,11 @@ def test_download_wayback_mosaic_tolerates_partial_missing_tiles(tmp_path, monke
     assert result.missing_tile_count == 1
 
     monkeypatch.setattr(
-        "src.domain.mosaic.coregister_t1_to_t2_with_arosics",
+        "src.domain.mosaic.coregister_t1_to_t2_reprojection_only",
         lambda **kwargs: CoregistrationResult(
             corrected_t1_path=result.geotiff_path,
             corrected_t1_valid_mask_path=result.valid_mask_path,
-            diagnostics=CoregistrationDiagnostics(method="reprojection_only", used_arosics=False),
+            diagnostics=CoregistrationDiagnostics(method="reprojection_only"),
         ),
     )
     alignment = align_mosaic_pair(result, result, settings=settings, out_dir=tmp_path)
@@ -739,7 +739,7 @@ def test_derive_new_building_products_respects_valid_comparison_mask() -> None:
     assert np.array_equal(products["new_building_mask"], expected)
 
 
-def test_align_mosaic_pair_uses_coregistered_t1_outputs(tmp_path, monkeypatch) -> None:
+def test_align_mosaic_pair_uses_reprojection_only_corrected_paths(tmp_path, monkeypatch) -> None:
     settings = Settings()
     t2 = np.zeros((6, 6, 3), dtype=np.uint8)
     t2[2:5, 2:5] = 255
@@ -775,16 +775,14 @@ def test_align_mosaic_pair_uses_coregistered_t1_outputs(tmp_path, monkeypatch) -
     )
 
     monkeypatch.setattr(
-        "src.domain.mosaic.coregister_t1_to_t2_with_arosics",
+        "src.domain.mosaic.coregister_t1_to_t2_reprojection_only",
         lambda **kwargs: CoregistrationResult(
             corrected_t1_path=t1_corrected_path,
             corrected_t1_valid_mask_path=t1_corrected_mask_path,
             diagnostics=CoregistrationDiagnostics(
-                method="arosics_local",
-                used_arosics=True,
+                method="reprojection_only",
                 corrected_t1_path=str(t1_corrected_path),
                 corrected_t1_valid_mask_path=str(t1_corrected_mask_path),
-                tie_point_count=12,
             ),
         ),
     )
@@ -793,12 +791,11 @@ def test_align_mosaic_pair_uses_coregistered_t1_outputs(tmp_path, monkeypatch) -
 
     assert np.array_equal(alignment.t1_rgb, t1_corrected)
     assert np.array_equal(alignment.t2_rgb, t2)
-    assert alignment.diagnostics["used_arosics"] is True
-    assert alignment.diagnostics["method"] == "arosics_local"
+    assert alignment.diagnostics["method"] == "reprojection_only"
 
 
-def test_coregistration_reduces_shift_false_positives(tmp_path, monkeypatch) -> None:
-    settings = Settings(arosics_enabled=True)
+def test_reprojection_only_alignment_does_not_create_debug_masks(tmp_path) -> None:
+    settings = Settings()
     t2 = np.zeros((7, 7, 3), dtype=np.uint8)
     t2[2:5, 2:5] = 255
     t1_shifted = np.zeros((7, 7, 3), dtype=np.uint8)
@@ -807,12 +804,10 @@ def test_coregistration_reduces_shift_false_positives(tmp_path, monkeypatch) -> 
 
     t2_path = tmp_path / "t2_scene.tif"
     t1_shifted_path = tmp_path / "t1_scene_shifted.tif"
-    t1_corrected_path = tmp_path / "t1_scene_corrected.tif"
     t2_mask_path = tmp_path / "t2_scene_valid.tif"
     t1_mask_path = tmp_path / "t1_scene_valid.tif"
     _write_rgb_tif(t2_path, t2)
     _write_rgb_tif(t1_shifted_path, t1_shifted)
-    _write_rgb_tif(t1_corrected_path, t2)
     _write_mask_tif(t2_mask_path, valid_mask)
     _write_mask_tif(t1_mask_path, valid_mask)
 
@@ -829,49 +824,8 @@ def test_coregistration_reduces_shift_false_positives(tmp_path, monkeypatch) -> 
         valid_mask_path=t2_mask_path,
     )
 
-    monkeypatch.setattr(
-        "src.domain.mosaic.coregister_t1_to_t2_with_arosics",
-        lambda **kwargs: CoregistrationResult(
-            corrected_t1_path=t1_shifted_path,
-            corrected_t1_valid_mask_path=t1_mask_path,
-            diagnostics=CoregistrationDiagnostics(method="reprojection_fallback", used_arosics=False),
-        ),
-    )
-    baseline_alignment = align_mosaic_pair(t1_mosaic, t2_mosaic, settings=settings, out_dir=tmp_path)
-    baseline_t1_prob = baseline_alignment.t1_rgb[:, :, 0].astype(np.float32) / 255.0
-    baseline_t2_prob = baseline_alignment.t2_rgb[:, :, 0].astype(np.float32) / 255.0
-    baseline_products = derive_new_building_products(
-        np.clip(baseline_t2_prob - baseline_t1_prob, 0.0, 1.0),
-        baseline_t1_prob,
-        baseline_t2_prob,
-        change_threshold=0.5,
-        semantic_threshold=0.5,
-        min_new_building_pixels=1,
-        old_building_mask_dilation_pixels=0,
-        new_building_core_distance_pixels=0,
-    )
+    alignment = align_mosaic_pair(t1_mosaic, t2_mosaic, settings=settings, out_dir=tmp_path)
 
-    monkeypatch.setattr(
-        "src.domain.mosaic.coregister_t1_to_t2_with_arosics",
-        lambda **kwargs: CoregistrationResult(
-            corrected_t1_path=t1_corrected_path,
-            corrected_t1_valid_mask_path=t1_mask_path,
-            diagnostics=CoregistrationDiagnostics(method="arosics_local", used_arosics=True),
-        ),
-    )
-    corrected_alignment = align_mosaic_pair(t1_mosaic, t2_mosaic, settings=settings, out_dir=tmp_path)
-    corrected_t1_prob = corrected_alignment.t1_rgb[:, :, 0].astype(np.float32) / 255.0
-    corrected_t2_prob = corrected_alignment.t2_rgb[:, :, 0].astype(np.float32) / 255.0
-    corrected_products = derive_new_building_products(
-        np.clip(corrected_t2_prob - corrected_t1_prob, 0.0, 1.0),
-        corrected_t1_prob,
-        corrected_t2_prob,
-        change_threshold=0.5,
-        semantic_threshold=0.5,
-        min_new_building_pixels=1,
-        old_building_mask_dilation_pixels=0,
-        new_building_core_distance_pixels=0,
-    )
-
-    assert baseline_products["new_building_mask"].sum() > 0
-    assert corrected_products["new_building_mask"].sum() == 0
+    assert alignment.diagnostics["method"] == "reprojection_only"
+    assert not (tmp_path / "t1_invalid_mask_for_arosics.tif").exists()
+    assert not (tmp_path / "t2_invalid_mask_for_arosics.tif").exists()

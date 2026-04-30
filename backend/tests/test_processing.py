@@ -61,7 +61,6 @@ def _scene_result(
 def test_run_detection_populates_release_dates_in_summary(tmp_path, monkeypatch) -> None:
     settings = Settings(
         runtime_cache_dir=tmp_path,
-        arosics_enabled=False,
         wayback_tilemap_preflight_enabled=False,
     )
     releases = [
@@ -140,7 +139,7 @@ def test_run_detection_populates_release_dates_in_summary(tmp_path, monkeypatch)
             t2_rgb=rgb,
             t1_valid_mask=valid_mask.astype(bool),
             t2_valid_mask=valid_mask.astype(bool),
-            diagnostics={"method": "reprojection_only", "used_arosics": False, "warnings": []},
+            diagnostics={"method": "reprojection_only", "warnings": []},
         ),
     )
     monkeypatch.setattr("src.services.processing.resolve_min_new_building_pixels", lambda *args, **kwargs: 1)
@@ -295,7 +294,6 @@ def test_run_segmentation_uses_single_release_and_segmentation_semantics(tmp_pat
 def test_run_detection_reports_tile_availability_stage_before_download(tmp_path, monkeypatch) -> None:
     settings = Settings(
         runtime_cache_dir=tmp_path,
-        arosics_enabled=False,
         wayback_tilemap_preflight_enabled=True,
     )
     releases = [
@@ -370,7 +368,7 @@ def test_run_detection_reports_tile_availability_stage_before_download(tmp_path,
             t2_rgb=rgb,
             t1_valid_mask=valid_mask.astype(bool),
             t2_valid_mask=valid_mask.astype(bool),
-            diagnostics={"method": "reprojection_only", "used_arosics": False, "warnings": []},
+            diagnostics={"method": "reprojection_only", "warnings": []},
         ),
     )
     monkeypatch.setattr("src.services.processing.resolve_min_new_building_pixels", lambda *args, **kwargs: 1)
@@ -435,7 +433,6 @@ def test_run_detection_reports_tile_availability_stage_before_download(tmp_path,
 def test_run_detection_downgrades_older_release_zoom_when_high_zoom_has_no_safe_coverage(tmp_path, monkeypatch) -> None:
     settings = Settings(
         runtime_cache_dir=tmp_path,
-        arosics_enabled=False,
         wayback_tilemap_preflight_enabled=True,
         zoom=19,
         min_zoom=17,
@@ -533,7 +530,7 @@ def test_run_detection_downgrades_older_release_zoom_when_high_zoom_has_no_safe_
             t2_rgb=rgb,
             t1_valid_mask=valid_mask.astype(bool),
             t2_valid_mask=valid_mask.astype(bool),
-            diagnostics={"method": "reprojection_only", "used_arosics": False, "warnings": []},
+            diagnostics={"method": "reprojection_only", "warnings": []},
         ),
     )
     monkeypatch.setattr("src.services.processing.resolve_min_new_building_pixels", lambda *args, **kwargs: 1)
@@ -595,7 +592,6 @@ def test_run_detection_downgrades_older_release_zoom_when_high_zoom_has_no_safe_
 def test_run_detection_does_not_forward_scene_tile_caps_to_download(tmp_path, monkeypatch) -> None:
     settings = Settings(
         runtime_cache_dir=tmp_path,
-        arosics_enabled=False,
         wayback_tilemap_preflight_enabled=False,
     )
     releases = [
@@ -661,7 +657,7 @@ def test_run_detection_does_not_forward_scene_tile_caps_to_download(tmp_path, mo
             t2_rgb=rgb,
             t1_valid_mask=valid_mask.astype(bool),
             t2_valid_mask=valid_mask.astype(bool),
-            diagnostics={"method": "reprojection_only", "used_arosics": False, "warnings": []},
+            diagnostics={"method": "reprojection_only", "warnings": []},
         ),
     )
     monkeypatch.setattr("src.services.processing.resolve_min_new_building_pixels", lambda *args, **kwargs: 1)
@@ -719,7 +715,6 @@ def test_run_detection_does_not_forward_scene_tile_caps_to_download(tmp_path, mo
 def test_run_detection_supports_bandon_backend(tmp_path, monkeypatch) -> None:
     settings = Settings(
         runtime_cache_dir=tmp_path,
-        arosics_enabled=False,
         wayback_tilemap_preflight_enabled=False,
     )
     releases = [
@@ -782,7 +777,7 @@ def test_run_detection_supports_bandon_backend(tmp_path, monkeypatch) -> None:
             t2_rgb=rgb,
             t1_valid_mask=valid_mask.astype(bool),
             t2_valid_mask=valid_mask.astype(bool),
-            diagnostics={"method": "reprojection_only", "used_arosics": False, "warnings": []},
+            diagnostics={"method": "reprojection_only", "warnings": []},
         ),
     )
     monkeypatch.setattr("src.services.processing.resolve_min_new_building_pixels", lambda *args, **kwargs: 1)
@@ -839,7 +834,6 @@ def test_run_detection_supports_bandon_backend(tmp_path, monkeypatch) -> None:
 def test_run_detection_bandon_writes_manifest_and_nested_timing_without_auto_bundle(tmp_path, monkeypatch) -> None:
     settings = Settings(
         runtime_cache_dir=tmp_path,
-        arosics_enabled=False,
         wayback_tilemap_preflight_enabled=False,
     )
     releases = [
@@ -906,7 +900,7 @@ def test_run_detection_bandon_writes_manifest_and_nested_timing_without_auto_bun
             t2_rgb=rgb,
             t1_valid_mask=valid_mask.astype(bool),
             t2_valid_mask=valid_mask.astype(bool),
-            diagnostics={"method": "reprojection_only", "used_arosics": False, "warnings": []},
+            diagnostics={"method": "reprojection_only", "warnings": []},
         ),
     )
     monkeypatch.setattr("src.services.processing.resolve_min_new_building_pixels", lambda *args, **kwargs: 1)
@@ -990,7 +984,6 @@ def test_run_detection_bandon_writes_manifest_and_nested_timing_without_auto_bun
 def test_run_detection_returns_download_error_on_connection_failure(tmp_path, monkeypatch) -> None:
     settings = Settings(
         runtime_cache_dir=tmp_path,
-        arosics_enabled=False,
         wayback_tilemap_preflight_enabled=False,
     )
     releases = [
@@ -1047,7 +1040,6 @@ def test_run_detection_returns_download_error_on_connection_failure(tmp_path, mo
 def test_run_detection_bandon_preserves_valid_change_components_inside_scene(tmp_path, monkeypatch) -> None:
     settings = Settings(
         runtime_cache_dir=tmp_path,
-        arosics_enabled=False,
         wayback_tilemap_preflight_enabled=False,
     )
     releases = [
@@ -1120,7 +1112,7 @@ def test_run_detection_bandon_preserves_valid_change_components_inside_scene(tmp
             t2_rgb=rgb,
             t1_valid_mask=valid_mask.astype(bool),
             t2_valid_mask=valid_mask.astype(bool),
-            diagnostics={"method": "reprojection_only", "used_arosics": False, "warnings": []},
+            diagnostics={"method": "reprojection_only", "warnings": []},
         ),
     )
     monkeypatch.setattr("src.services.processing.resolve_min_new_building_pixels", lambda *args, **kwargs: 1)
@@ -1207,7 +1199,7 @@ def test_run_detection_bandon_preserves_valid_change_components_inside_scene(tmp
 
 
 def test_run_detection_returns_tilemap_unavailability_diagnostics(tmp_path, monkeypatch) -> None:
-    settings = Settings(runtime_cache_dir=tmp_path, arosics_enabled=False)
+    settings = Settings(runtime_cache_dir=tmp_path)
     releases = [
         WaybackRelease(
             identifier="WB_2022_R03",

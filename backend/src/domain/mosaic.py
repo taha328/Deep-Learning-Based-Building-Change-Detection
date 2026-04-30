@@ -20,7 +20,7 @@ import rasterio
 from rasterio.transform import from_bounds
 
 from src.config import Settings
-from src.domain.coregistration import CoregistrationDiagnostics, coregister_t1_to_t2_with_arosics
+from src.domain.coregistration import CoregistrationDiagnostics, coregister_t1_to_t2_reprojection_only
 from src.domain.tiling import tile_bounds_3857, tile_range_for_bbox
 from src.domain.wayback import WaybackRelease
 from src.utils.raster import align_rgb_to_reference, align_single_band_mask_to_reference, read_rgb
@@ -738,7 +738,7 @@ def align_mosaic_pair(
 ) -> AlignmentResult:
     t2_rgb = read_rgb(t2_mosaic.geotiff_path)
     t2_valid_mask = read_rgb(t2_mosaic.valid_mask_path)[:, :, 0] > 0
-    coreg_result = coregister_t1_to_t2_with_arosics(
+    coreg_result = coregister_t1_to_t2_reprojection_only(
         reference_image_path=t2_mosaic.geotiff_path,
         target_image_path=t1_mosaic.geotiff_path,
         reference_valid_mask_path=t2_mosaic.valid_mask_path,

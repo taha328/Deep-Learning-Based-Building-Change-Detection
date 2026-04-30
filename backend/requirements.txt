@@ -1,5 +1,4 @@
 albumentations==1.4.24
-arosics
 cartopy
 ever-beta>=0.5.0,<0.6
 gdal==3.12.1

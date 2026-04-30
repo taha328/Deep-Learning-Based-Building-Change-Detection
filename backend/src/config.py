@@ -49,18 +49,6 @@ class Settings(BaseModel):
     patch_size: int = 1024
     stride: int = 768
     scene_segmentation_concurrency: int = 2
-    arosics_enabled: bool = True
-    arosics_fallback_to_reprojection: bool = True
-    arosics_grid_res: int = 128
-    arosics_window_size: int = 256
-    arosics_max_shift: int = 10
-    arosics_min_reliability: int = 60
-    arosics_tieP_filter_level: int = 3
-    arosics_resamp_alg_calc: str = "cubic"
-    arosics_resamp_alg_deshift: str = "cubic"
-    arosics_align_grids: bool = True
-    arosics_match_gsd: bool = False
-    arosics_cpus: int = 2
     default_change_threshold: float = 0.50
     default_semantic_threshold: float = 0.50
     default_min_new_building_pixels: int = 50
@@ -318,39 +306,6 @@ def get_settings() -> Settings:
             "APP_SCENE_SEGMENTATION_CONCURRENCY",
             base.scene_segmentation_concurrency,
         ),
-        arosics_enabled=_bool_env("APP_AROSICS_ENABLED", base.arosics_enabled),
-        arosics_fallback_to_reprojection=_bool_env(
-            "APP_AROSICS_FALLBACK_TO_REPROJECTION",
-            base.arosics_fallback_to_reprojection,
-        ),
-        arosics_grid_res=_int_env("APP_AROSICS_GRID_RES", base.arosics_grid_res),
-        arosics_window_size=_int_env("APP_AROSICS_WINDOW_SIZE", base.arosics_window_size),
-        arosics_max_shift=_int_env("APP_AROSICS_MAX_SHIFT", base.arosics_max_shift),
-        arosics_min_reliability=_int_env(
-            "APP_AROSICS_MIN_RELIABILITY",
-            base.arosics_min_reliability,
-        ),
-        arosics_tieP_filter_level=_int_env(
-            "APP_AROSICS_TIEP_FILTER_LEVEL",
-            base.arosics_tieP_filter_level,
-        ),
-        arosics_resamp_alg_calc=os.getenv(
-            "APP_AROSICS_RESAMP_ALG_CALC",
-            base.arosics_resamp_alg_calc,
-        ),
-        arosics_resamp_alg_deshift=os.getenv(
-            "APP_AROSICS_RESAMP_ALG_DESHIFT",
-            base.arosics_resamp_alg_deshift,
-        ),
-        arosics_align_grids=_bool_env(
-            "APP_AROSICS_ALIGN_GRIDS",
-            base.arosics_align_grids,
-        ),
-        arosics_match_gsd=_bool_env(
-            "APP_AROSICS_MATCH_GSD",
-            base.arosics_match_gsd,
-        ),
-        arosics_cpus=_int_env("APP_AROSICS_CPUS", base.arosics_cpus),
         default_change_threshold=_float_env("APP_CHANGE_THRESHOLD", base.default_change_threshold),
         default_semantic_threshold=_float_env("APP_SEMANTIC_THRESHOLD", base.default_semantic_threshold),
         default_min_new_building_pixels=_int_env(

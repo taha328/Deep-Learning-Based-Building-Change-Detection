@@ -1573,7 +1573,7 @@ def run_detection(
 
         _report(progress, 0.35, "Aligning mosaics")
         try:
-            with timings.track("mosaic"):
+            with timings.track("mosaic", method="reprojection_only", arosics_enabled=False):
                 alignment_result = align_mosaic_pair(
                     scene_t1,
                     scene_t2,
