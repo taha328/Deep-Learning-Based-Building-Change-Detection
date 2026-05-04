@@ -18,6 +18,7 @@ from shapely.ops import unary_union
 from src.config import Settings
 from src.domain.cache import load_cached_response
 from src.domain.exports import create_export_bundle_from_manifest
+from src.domain.mapbox_current import MAPBOX_SOURCE_ID
 from src.domain.vectorize import build_temporal_growth_blocks, build_temporal_growth_envelope
 from src.execution_profiles import PipelineExecutionConfig, resolve_backend
 from src.schemas import (
@@ -46,6 +47,7 @@ PairRunner = Callable[[RunRequest], RunResponse]
 PROJECT_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{3,128}$")
 PROJECT_REGISTRY_FILENAME = "temporal_projects_registry.json"
 logger = logging.getLogger(__name__)
+MAPBOX_CURRENT_RELEASE_DATE = "current_basemap"
 
 
 @dataclass(frozen=True)
@@ -89,12 +91,47 @@ def _sort_temporal_milestones(project: TemporalProject) -> TemporalProject:
     return project
 
 
+def _is_mapbox_current_milestone(milestone: TemporalMilestone) -> bool:
+    return milestone.release_identifier == MAPBOX_SOURCE_ID
+
+
+def _mapbox_current_milestone() -> TemporalMilestone:
+    return TemporalMilestone(
+        release_identifier=MAPBOX_SOURCE_ID,
+        release_date=MAPBOX_CURRENT_RELEASE_DATE,
+        status="pending",
+        source_mode="automated",
+        warnings=["The latest milestone uses Mapbox Satellite current basemap imagery. Exact capture date is not guaranteed."],
+    )
+
+
+def _sync_latest_source_milestone(project: TemporalProject) -> TemporalProject:
+    mapbox_milestones = [milestone for milestone in project.milestones if _is_mapbox_current_milestone(milestone)]
+    wayback_milestones = [milestone for milestone in project.milestones if not _is_mapbox_current_milestone(milestone)]
+
+    if project.latest_source != "mapbox_current":
+        project.milestones = wayback_milestones
+        return project
+
+    if not wayback_milestones:
+        project.milestones = []
+        return project
+
+    mapbox_milestone = mapbox_milestones[-1] if mapbox_milestones else _mapbox_current_milestone()
+    mapbox_milestone.release_date = MAPBOX_CURRENT_RELEASE_DATE
+    project.milestones = [*wayback_milestones, mapbox_milestone]
+    return project
+
+
 def _populate_milestone_release_dates(project: TemporalProject, settings: Settings) -> TemporalProject:
     if project.milestones and all(milestone.release_date for milestone in project.milestones):
         return project
 
     releases_by_id = {release.identifier: release for release in list_releases(settings)}
     for milestone in project.milestones:
+        if _is_mapbox_current_milestone(milestone):
+            milestone.release_date = MAPBOX_CURRENT_RELEASE_DATE
+            continue
         if milestone.release_date:
             continue
         release = releases_by_id.get(milestone.release_identifier)
@@ -705,12 +742,14 @@ def _prepare_temporal_pair_request(
     settings: Settings,
     remote_patch_budget_enabled: bool,
     request_hash_context: dict[str, object] | None,
+    latest_source: str = "esri_wayback",
 ):
     validation_request = ValidationRequest(
         aoi_geojson=aoi_geojson,
         t1_release=previous_release_identifier,
         t2_release=milestone_release_identifier,
         mode="full_run",
+        latest_source=latest_source,  # type: ignore[arg-type]
     )
     validation_response, prepared = validate_request(
         validation_request,
@@ -733,10 +772,12 @@ def _plan_temporal_milestone_runs(
         return []
 
     releases = list_releases(settings)
+    latest_wayback_release = max(releases, key=lambda item: item.release_date) if releases else None
     plan: list[TemporalMilestonePlanEntry] = []
     previous_release_id: str | None = None
     previous_successful_release_id: str | None = None
 
+    last_index = len(project.milestones) - 1
     for index, milestone in enumerate(project.milestones):
         if index == 0:
             _normalize_baseline_milestone(milestone)
@@ -757,14 +798,21 @@ def _plan_temporal_milestone_runs(
 
         previous_identifier = previous_successful_release_id or previous_release_id
         assert previous_identifier is not None
+        is_mapbox_current = _is_mapbox_current_milestone(milestone)
+        milestone_release_identifier = (
+            latest_wayback_release.identifier
+            if is_mapbox_current and latest_wayback_release is not None
+            else milestone.release_identifier
+        )
         _, validation_response, prepared = _prepare_temporal_pair_request(
             aoi_geojson=project.aoi_geojson,
             previous_release_identifier=previous_identifier,
-            milestone_release_identifier=milestone.release_identifier,
+            milestone_release_identifier=milestone_release_identifier,
             releases=releases,
             settings=settings,
             remote_patch_budget_enabled=remote_patch_budget_enabled,
             request_hash_context=request_hash_context,
+            latest_source="mapbox_current" if is_mapbox_current and index == last_index else "esri_wayback",
         )
         expected_request_hash = prepared.request_hash if prepared is not None else None
         cached_response = (
@@ -1121,25 +1169,29 @@ def _timeline_requests(
 
     releases = list_releases(settings)
     releases_by_id = {release.identifier: release for release in releases}
+    latest_wayback_release = max(releases, key=lambda item: item.release_date) if releases else None
     seen: set[str] = set()
     previous_release_id: str | None = None
     previous_successful_release_id: str | None = None
     previous_release_date = None
 
+    last_index = len(project.milestones) - 1
     for index, milestone in enumerate(project.milestones):
-        release = releases_by_id.get(milestone.release_identifier)
+        is_mapbox_current = _is_mapbox_current_milestone(milestone)
+        release = latest_wayback_release if is_mapbox_current else releases_by_id.get(milestone.release_identifier)
         if release is None:
             blocking_errors.append(f"Unknown Wayback release: {milestone.release_identifier}")
             continue
 
-        milestone.release_date = str(release.release_date)
+        milestone.release_date = MAPBOX_CURRENT_RELEASE_DATE if is_mapbox_current else str(release.release_date)
         if milestone.release_identifier in seen:
             blocking_errors.append(f"Duplicate milestone release: {milestone.release_identifier}")
         seen.add(milestone.release_identifier)
 
-        if previous_release_date is not None and release.release_date <= previous_release_date:
+        if not is_mapbox_current and previous_release_date is not None and release.release_date <= previous_release_date:
             blocking_errors.append("Milestones must be in strictly chronological order.")
-        previous_release_date = release.release_date
+        if not is_mapbox_current:
+            previous_release_date = release.release_date
 
         if index == 0 and milestone.manual_override_geojson is None:
             warnings.append(
@@ -1155,8 +1207,9 @@ def _timeline_requests(
         validation_request = ValidationRequest(
             aoi_geojson=project.aoi_geojson,
             t1_release=pair_source_release_id,
-            t2_release=milestone.release_identifier,
+            t2_release=release.identifier,
             mode="full_run",
+            latest_source="mapbox_current" if is_mapbox_current and index == last_index else "esri_wayback",
         )
         validation_response, _ = validate_request(
             validation_request,
@@ -1235,6 +1288,7 @@ def get_temporal_project(project_id: str, settings: Settings) -> TemporalProject
 def save_temporal_project(project: TemporalProject, settings: Settings) -> TemporalProject:
     _safe_project_id(project.project_id)
     normalized = project.model_copy(deep=True)
+    normalized = _sync_latest_source_milestone(normalized)
     if not normalized.created_at:
         normalized.created_at = _utc_now_iso()
     if normalized.aoi_geojson is not None:
@@ -1256,6 +1310,7 @@ def validate_temporal_project(
     execution_config: PipelineExecutionConfig | None = None,
 ) -> TemporalProjectValidationResponse:
     normalized = project.model_copy(deep=True)
+    normalized = _sync_latest_source_milestone(normalized)
     normalized.execution_config = execution_config or resolve_temporal_project_execution_config(normalized, settings)
     normalized = _populate_milestone_release_dates(normalized, settings)
     if request_hash_context is None:
@@ -1498,20 +1553,28 @@ def run_temporal_project(
     )
 
     releases = list_releases(settings)
+    latest_wayback_release = max(releases, key=lambda item: item.release_date) if releases else None
     for index in range(dirty_start, len(project.milestones)):
         milestone = project.milestones[index]
         milestone.warnings = []
         milestone.error_message = None
 
         previous_release_identifier = previous_successful_release_identifier or project.milestones[index - 1].release_identifier
+        is_mapbox_current = _is_mapbox_current_milestone(milestone)
+        milestone_release_identifier = (
+            latest_wayback_release.identifier
+            if is_mapbox_current and latest_wayback_release is not None
+            else milestone.release_identifier
+        )
         run_request, validation_response, prepared = _prepare_temporal_pair_request(
             aoi_geojson=project.aoi_geojson,
             previous_release_identifier=previous_release_identifier,
-            milestone_release_identifier=milestone.release_identifier,
+            milestone_release_identifier=milestone_release_identifier,
             releases=releases,
             settings=settings,
             remote_patch_budget_enabled=remote_patch_budget_enabled,
             request_hash_context=request_hash_context,
+            latest_source="mapbox_current" if is_mapbox_current and index == len(project.milestones) - 1 else "esri_wayback",
         )
         if prepared is None or validation_response.blocking_errors:
             milestone.status = "error"
@@ -1526,6 +1589,7 @@ def run_temporal_project(
                 t1_release=run_request.t1_release,
                 t2_release=run_request.t2_release,
                 mode=run_request.mode,
+                latest_source=run_request.latest_source,
             )
         )
         if response is None or not response.success:

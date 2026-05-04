@@ -537,6 +537,11 @@ export const translations = {
     "temporal.no_milestones": "Aucun jalon sélectionné pour l'instant.",
     "temporal.filter_releases": "Filtrer les archives par date ou identifiant",
     "temporal.selected_timeline": "Chronologie sélectionnée",
+    "temporal.latest_source_label": "Source du jalon le plus récent",
+    "temporal.latest_source_esri": "Version Esri Wayback sélectionnée",
+    "temporal.latest_source_mapbox": "Fond satellite Mapbox actuel",
+    "temporal.latest_source_mapbox_warning":
+      "La date de capture exacte n'est pas garantie. Cette comparaison utilise Esri Wayback historique et le fond satellite Mapbox actuel.",
     "temporal.available_releases": "Archives disponibles",
     "temporal.extend_and_rerun": "Étendre et relancer",
     "temporal.extend_and_rerun_description": "Ajoutez d'autres jalons ici, puis validez ou relancez le même projet temporel sans revenir à l'aperçu.",
@@ -1221,6 +1226,11 @@ export const translations = {
     "temporal.no_milestones": "No milestones selected yet.",
     "temporal.filter_releases": "Filter releases by date or identifier",
     "temporal.selected_timeline": "Selected timeline",
+    "temporal.latest_source_label": "Latest milestone source",
+    "temporal.latest_source_esri": "Selected Esri Wayback release",
+    "temporal.latest_source_mapbox": "Current Mapbox Satellite basemap",
+    "temporal.latest_source_mapbox_warning":
+      "Exact capture date is not guaranteed. This compares Esri historical imagery with current Mapbox Satellite basemap imagery.",
     "temporal.available_releases": "Available releases",
     "temporal.extend_and_rerun": "Extend and rerun",
     "temporal.extend_and_rerun_description": "Add more milestones here, then validate or rerun the same temporal project without going back to Overview.",

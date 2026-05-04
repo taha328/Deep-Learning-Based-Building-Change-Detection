@@ -46,6 +46,15 @@ class Settings(BaseModel):
     wayback_tile_preflight_cache_enabled: bool = True
     wayback_tile_preflight_cache_ttl_seconds: int = 604800
     wayback_tile_preflight_cache_dir: Path | None = None
+    mapbox_access_token: str | None = None
+    mapbox_satellite_tileset: str = "mapbox.satellite"
+    mapbox_current_imagery_enabled: bool = False
+    mapbox_current_imagery_cache_dir: Path | None = None
+    mapbox_current_imagery_format: str = "jpg90"
+    mapbox_current_imagery_max_zoom: int = 19
+    mapbox_current_imagery_default_zoom: int = 19
+    mapbox_current_imagery_timeout_seconds: int = 30
+    mapbox_current_imagery_max_tiles: int = 256
     patch_size: int = 1024
     stride: int = 768
     scene_segmentation_concurrency: int = 2
@@ -140,6 +149,8 @@ class Settings(BaseModel):
             self.wayback_metadata_cache_dir = self.runtime_cache_dir / "wayback_metadata_cache"
         if self.wayback_tile_preflight_cache_dir is None:
             self.wayback_tile_preflight_cache_dir = self.runtime_cache_dir / "wayback_tile_preflight_cache"
+        if self.mapbox_current_imagery_cache_dir is None:
+            self.mapbox_current_imagery_cache_dir = self.runtime_cache_dir / "mapbox_mosaics"
         self.ensure_runtime_cache_dirs()
         if not self.allowed_file_roots:
             self.allowed_file_roots = (self.request_cache_dir, self.temporal_projects_dir)
@@ -155,6 +166,7 @@ class Settings(BaseModel):
         self.wayback_mosaic_cache_dir.mkdir(parents=True, exist_ok=True)
         self.wayback_metadata_cache_dir.mkdir(parents=True, exist_ok=True)
         self.wayback_tile_preflight_cache_dir.mkdir(parents=True, exist_ok=True)
+        self.mapbox_current_imagery_cache_dir.mkdir(parents=True, exist_ok=True)
         self.tmp_cache_dir.mkdir(parents=True, exist_ok=True)
 
     @property
@@ -224,6 +236,27 @@ def _optional_str_env(*names: str) -> str | None:
     return None
 
 
+def _load_env_file(path: Path, protected_keys: set[str]) -> None:
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key or key in protected_keys:
+            continue
+        os.environ[key] = value.strip().strip('"').strip("'")
+
+
+def _load_backend_env_files() -> None:
+    protected_keys = set(os.environ)
+    backend_root = Path(__file__).resolve().parents[1]
+    _load_env_file(backend_root / ".env", protected_keys)
+    _load_env_file(backend_root / ".env.local", protected_keys)
+
+
 def _dedupe_strs(values: tuple[str, ...]) -> tuple[str, ...]:
     seen: set[str] = set()
     ordered: list[str] = []
@@ -236,6 +269,7 @@ def _dedupe_strs(values: tuple[str, ...]) -> tuple[str, ...]:
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
+    _load_backend_env_files()
     base = Settings()
     primary_remote_space = os.getenv("APP_REMOTE_SEGMENTATION_SPACE", base.remote_segmentation_space)
     configured_remote_spaces = _tuple_str_env(
@@ -299,6 +333,37 @@ def get_settings() -> Settings:
                 )
             )
             else None
+        ),
+        mapbox_access_token=_optional_str_env("MAPBOX_ACCESS_TOKEN"),
+        mapbox_satellite_tileset=os.getenv("MAPBOX_SATELLITE_TILESET", base.mapbox_satellite_tileset),
+        mapbox_current_imagery_enabled=_bool_env(
+            "MAPBOX_CURRENT_IMAGERY_ENABLED",
+            base.mapbox_current_imagery_enabled,
+        ),
+        mapbox_current_imagery_cache_dir=(
+            Path(cache_dir_env)
+            if (cache_dir_env := _optional_str_env("MAPBOX_CURRENT_IMAGERY_CACHE_DIR"))
+            else None
+        ),
+        mapbox_current_imagery_format=os.getenv(
+            "MAPBOX_CURRENT_IMAGERY_FORMAT",
+            base.mapbox_current_imagery_format,
+        ),
+        mapbox_current_imagery_max_zoom=_int_env(
+            "MAPBOX_CURRENT_IMAGERY_MAX_ZOOM",
+            base.mapbox_current_imagery_max_zoom,
+        ),
+        mapbox_current_imagery_default_zoom=_int_env(
+            "MAPBOX_CURRENT_IMAGERY_DEFAULT_ZOOM",
+            base.mapbox_current_imagery_default_zoom,
+        ),
+        mapbox_current_imagery_timeout_seconds=_int_env(
+            "MAPBOX_CURRENT_IMAGERY_TIMEOUT_SECONDS",
+            base.mapbox_current_imagery_timeout_seconds,
+        ),
+        mapbox_current_imagery_max_tiles=_int_env(
+            "MAPBOX_CURRENT_IMAGERY_MAX_TILES",
+            base.mapbox_current_imagery_max_tiles,
         ),
         patch_size=_int_env("APP_PATCH_SIZE", base.patch_size),
         stride=_int_env("APP_STRIDE", base.stride),

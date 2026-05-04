@@ -133,6 +133,7 @@ def register_artifact(
     run_id: str | None = None,
     cache_key: str | None = None,
     resolved_path: Path | str | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     path_obj = Path(path)
     if resolved_path is None:
@@ -155,6 +156,8 @@ def register_artifact(
         entry["storage"] = storage
     if cache_key:
         entry["cache_key"] = cache_key
+    if metadata:
+        entry["metadata"] = metadata
     if resolved_obj.exists() and resolved_obj.is_file():
         entry["size_bytes"] = resolved_obj.stat().st_size
     return entry
@@ -250,6 +253,7 @@ def build_manifest(run_id: str, request_dir: Path, artifacts: list[dict[str, Any
             request_dir=request_dir,
             run_id=run_id,
             cache_key=payload.get("cache_key") if isinstance(payload.get("cache_key"), str) else None,
+            metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else None,
         )
 
     for artifact in artifacts:

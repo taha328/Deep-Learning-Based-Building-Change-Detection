@@ -18,6 +18,7 @@ class PreparedRequest:
     tile_count_per_scene: int
     t1_release: WaybackRelease
     t2_release: WaybackRelease
+    latest_source: str
     mode_limits: ModeLimits
     request_hash: str
 
@@ -109,10 +110,22 @@ def validate_request(
 
     t1_release = _find_release(releases, request.t1_release)
     t2_release = _find_release(releases, request.t2_release)
-    if t1_release.identifier == t2_release.identifier:
+    latest_release = max(releases, key=lambda item: item.release_date)
+    uses_mapbox_current = request.latest_source == "mapbox_current"
+    if not uses_mapbox_current and t1_release.identifier == t2_release.identifier:
         blocking_errors.append("t1_release and t2_release must be different.")
-    if t1_release.release_date >= t2_release.release_date:
+    if not uses_mapbox_current and t1_release.release_date >= t2_release.release_date:
         blocking_errors.append("t1_release must be chronologically earlier than t2_release.")
+    if uses_mapbox_current:
+        if t2_release.identifier != latest_release.identifier:
+            blocking_errors.append("Mapbox current imagery can only be used for the newest/latest milestone.")
+        if not settings.mapbox_current_imagery_enabled:
+            blocking_errors.append("Mapbox current imagery is not enabled.")
+        if settings.mapbox_current_imagery_enabled and not settings.mapbox_access_token:
+            blocking_errors.append("Mapbox current imagery is enabled but MAPBOX_ACCESS_TOKEN is not configured.")
+        warnings.append(
+            "The latest milestone uses Mapbox Satellite current basemap imagery. Exact capture date is not guaranteed."
+        )
 
     area_m2 = geodesic_area_m2(geometry)
     bbox = bounds_dict(geometry)
@@ -183,6 +196,7 @@ def validate_request(
         "aoi_geojson": normalized,
         "t1_release": t1_release.identifier,
         "t2_release": t2_release.identifier,
+        "latest_source": request.latest_source,
         "mode": request.mode,
         "change_threshold": request.change_threshold or settings.default_change_threshold,
         "semantic_threshold": request.semantic_threshold or settings.default_semantic_threshold,
@@ -209,6 +223,7 @@ def validate_request(
         tile_count_per_scene=tile_count,
         t1_release=t1_release,
         t2_release=t2_release,
+        latest_source=request.latest_source,
         mode_limits=mode_limits,
         request_hash=build_request_hash(hash_payload),
     )

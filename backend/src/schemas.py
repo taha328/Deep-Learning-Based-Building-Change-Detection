@@ -9,6 +9,7 @@ from src.execution_profiles import PipelineExecutionConfig
 ModeName = Literal["fast_preview", "full_run"]
 ModelBackendName = Literal["sam3", "bandon_mps"]
 Sam3BackendMode = Literal["public_zerogpu", "local", "huggingface_gpu"]
+LatestImagerySource = Literal["esri_wayback", "mapbox_current"]
 
 
 class GeoJSONGeometry(BaseModel):
@@ -68,6 +69,7 @@ class ValidationRequest(BaseModel):
     buffer_distances_m: list[float] | None = None
     keep_disjoint_buffer_parts_separate: bool = True
     road_constraint_layer_path: str | None = None
+    latest_source: LatestImagerySource = "esri_wayback"
 
     @field_validator("buffer_distances_m")
     @classmethod
@@ -293,6 +295,7 @@ class TemporalProject(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     validation_blocking_errors: list[str] = Field(default_factory=list)
     download_bundle_path: str | None = None
+    latest_source: LatestImagerySource = "esri_wayback"
 
 
 class TemporalProjectSummary(BaseModel):

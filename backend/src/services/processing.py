@@ -18,7 +18,9 @@ from src.domain.run_workspace import cleanup_run_tmp_dir, get_run_tmp_dir
 from src.domain.stage_timing import StageTimingRecorder
 from src.domain.bandon_runner import run_bandon_inference
 from src.domain.exports import export_bandon_outputs, export_run_outputs, export_segmentation_outputs, write_run_manifest
+from src.domain.imagery_providers import MapboxCurrentProvider
 from src.domain.inference import derive_new_building_products, run_single_scene_inference, run_tiled_inference
+from src.domain.mapbox_current import MAPBOX_ATTRIBUTION, MAPBOX_SOURCE_ID
 from src.domain.mosaic import MosaicResult, align_mosaic_pair, download_wayback_mosaic
 from src.domain.postprocess import remove_small_components, suppress_edge_hugging_components
 from src.domain.tiling import estimate_patch_count
@@ -147,12 +149,23 @@ def _source_manifest_entries_for_scenes(
 ) -> list[dict[str, object]]:
     entries: list[dict[str, object]] = []
     for scene in scenes:
+        source_label = "Mapbox" if scene.provider == "mapbox" else "Wayback"
+        metadata = {
+            "provider": scene.provider,
+            "source_type": scene.source_type,
+            "source_id": scene.source_id or scene.identifier,
+            "effective_date": scene.effective_date or scene.release_date,
+            "dominant_src_date": scene.dominant_src_date,
+            "capture_date_known": scene.capture_date_known,
+            "attribution_required": scene.provider == "mapbox",
+            "attribution": scene.attribution,
+        }
         entries.append(
             register_artifact(
                 path=scene.geotiff_path,
                 resolved_path=scene.geotiff_path,
                 artifact_type="source",
-                purpose=f"Wayback source raster for {scene.identifier}",
+                purpose=f"{source_label} source raster for {scene.identifier}",
                 format="tif",
                 keep_policy="cache",
                 include_in_export=False,
@@ -160,6 +173,7 @@ def _source_manifest_entries_for_scenes(
                 request_dir=request_dir,
                 run_id=run_id,
                 cache_key=scene.cache_key,
+                metadata=metadata,
             )
         )
         entries.append(
@@ -167,7 +181,7 @@ def _source_manifest_entries_for_scenes(
                 path=scene.valid_mask_path,
                 resolved_path=scene.valid_mask_path,
                 artifact_type="source",
-                purpose=f"Wayback valid mask for {scene.identifier}",
+                purpose=f"{source_label} valid mask for {scene.identifier}",
                 format="tif",
                 keep_policy="cache",
                 include_in_export=False,
@@ -175,6 +189,7 @@ def _source_manifest_entries_for_scenes(
                 request_dir=request_dir,
                 run_id=run_id,
                 cache_key=scene.cache_key,
+                metadata=metadata,
             )
         )
     return entries
@@ -566,14 +581,20 @@ def _pair_summary_df(
     scene_t2_metadata: MetadataSummary,
     t1_tilemap: TileAvailabilitySummary | None = None,
     t2_tilemap: TileAvailabilitySummary | None = None,
+    t1_identifier: str | None = None,
+    t2_identifier: str | None = None,
+    t1_release_date: str | None = None,
+    t2_release_date: str | None = None,
 ) -> pd.DataFrame:
     return pd.DataFrame(
         [
             {
                 "label": "t1",
-                "identifier": prepared.t1_release.identifier,
+                "identifier": t1_identifier or prepared.t1_release.identifier,
                 "zoom": zoom_t1,
-                "release_date": str(prepared.t1_release.release_date),
+                "release_date": t1_release_date or str(prepared.t1_release.release_date),
+                "provider": "esri_wayback",
+                "source_type": "historical_release",
                 "dominant_src_date": scene_t1_metadata.dominant_src_date,
                 "dominant_src_res_m": scene_t1_metadata.dominant_src_res_m,
                 "capture_date_count": scene_t1_metadata.capture_date_count,
@@ -588,9 +609,11 @@ def _pair_summary_df(
             },
             {
                 "label": "t2",
-                "identifier": prepared.t2_release.identifier,
+                "identifier": t2_identifier or prepared.t2_release.identifier,
                 "zoom": zoom_t2,
-                "release_date": str(prepared.t2_release.release_date),
+                "release_date": t2_release_date or str(prepared.t2_release.release_date),
+                "provider": "mapbox" if (t2_identifier or prepared.t2_release.identifier) == MAPBOX_SOURCE_ID else "esri_wayback",
+                "source_type": "current_basemap" if (t2_identifier or prepared.t2_release.identifier) == MAPBOX_SOURCE_ID else "historical_release",
                 "dominant_src_date": scene_t2_metadata.dominant_src_date,
                 "dominant_src_res_m": scene_t2_metadata.dominant_src_res_m,
                 "capture_date_count": scene_t2_metadata.capture_date_count,
@@ -1397,10 +1420,10 @@ def run_detection(
             else None
         )
 
+        use_mapbox_t2 = prepared.latest_source == "mapbox_current"
         with timings.track("release_resolution"):
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                future_t1_resolution = executor.submit(
-                    _resolve_release_for_aoi,
+            if use_mapbox_t2:
+                resolved_t1 = _resolve_release_for_aoi(
                     settings,
                     release=prepared.t1_release,
                     aoi_bbox=aoi_bbox,
@@ -1409,18 +1432,48 @@ def run_detection(
                     stage_prefix="release_resolution.t1",
                     scene_role="t1",
                 )
-                future_t2_resolution = executor.submit(
-                    _resolve_release_for_aoi,
-                    settings,
+                resolved_t2 = ResolvedWaybackRelease(
                     release=prepared.t2_release,
-                    aoi_bbox=aoi_bbox,
-                    normalized_aoi=prepared.normalized_aoi,
-                    timing=t2_timing,
-                    stage_prefix="release_resolution.t2",
-                    scene_role="t2",
+                    zoom=min(settings.mapbox_current_imagery_default_zoom, settings.mapbox_current_imagery_max_zoom),
+                    metadata=MetadataSummary(dominant_src_date=None, dominant_src_res_m=None),
+                    tilemap=None,
                 )
-                resolved_t1 = future_t1_resolution.result()
-                resolved_t2 = future_t2_resolution.result()
+                _safe_add_timing_stage(
+                    t2_timing,
+                    "release_resolution.t2.total",
+                    duration_ms=0.0,
+                    metadata={
+                        "scene_role": "t2",
+                        "provider": "mapbox",
+                        "source_type": "current_basemap",
+                        "source_id": MAPBOX_SOURCE_ID,
+                        "capture_date_known": False,
+                    },
+                )
+            else:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    future_t1_resolution = executor.submit(
+                        _resolve_release_for_aoi,
+                        settings,
+                        release=prepared.t1_release,
+                        aoi_bbox=aoi_bbox,
+                        normalized_aoi=prepared.normalized_aoi,
+                        timing=t1_timing,
+                        stage_prefix="release_resolution.t1",
+                        scene_role="t1",
+                    )
+                    future_t2_resolution = executor.submit(
+                        _resolve_release_for_aoi,
+                        settings,
+                        release=prepared.t2_release,
+                        aoi_bbox=aoi_bbox,
+                        normalized_aoi=prepared.normalized_aoi,
+                        timing=t2_timing,
+                        stage_prefix="release_resolution.t2",
+                        scene_role="t2",
+                    )
+                    resolved_t1 = future_t1_resolution.result()
+                    resolved_t2 = future_t2_resolution.result()
 
         if parent_timing is not None and t1_timing is not None and t2_timing is not None:
             parent_timing.merge_child_timings(t1_timing)
@@ -1431,6 +1484,8 @@ def run_detection(
         tilemap_t1 = resolved_t1.tilemap
         tilemap_t2 = resolved_t2.tilemap
         for label, resolved in (("T1", resolved_t1), ("T2", resolved_t2)):
+            if label == "T2" and use_mapbox_t2:
+                continue
             if resolved.zoom < settings.zoom:
                 run_warnings.append(
                     f"{label} release {resolved.release.identifier} is being downloaded at z={resolved.zoom} because z={settings.zoom} has no safe AOI coverage."
@@ -1438,7 +1493,7 @@ def run_detection(
 
         for label, release_identifier, metadata, tilemap in (
             ("T1", prepared.t1_release.identifier, scene_t1_metadata, tilemap_t1),
-            ("T2", prepared.t2_release.identifier, scene_t2_metadata, tilemap_t2),
+            ("T2", MAPBOX_SOURCE_ID if use_mapbox_t2 else prepared.t2_release.identifier, scene_t2_metadata, tilemap_t2),
         ):
             if metadata.mixed_capture_dates:
                 run_warnings.append(
@@ -1465,12 +1520,16 @@ def run_detection(
                 scene_t2_metadata=scene_t2_metadata,
                 t1_tilemap=tilemap_t1,
                 t2_tilemap=tilemap_t2,
+                t2_identifier=MAPBOX_SOURCE_ID if use_mapbox_t2 else None,
+                t2_release_date="current_basemap" if use_mapbox_t2 else None,
             )
 
         for tilemap, release_identifier, metadata, resolved_zoom in (
             (tilemap_t1, prepared.t1_release.identifier, scene_t1_metadata, resolved_t1.zoom),
             (tilemap_t2, prepared.t2_release.identifier, scene_t2_metadata, resolved_t2.zoom),
         ):
+            if use_mapbox_t2 and release_identifier == prepared.t2_release.identifier:
+                continue
             if tilemap is not None and tilemap.preflight_complete and tilemap.available_count == 0:
                 return RunResponse(
                     success=False,
@@ -1499,7 +1558,7 @@ def run_detection(
                     ),
                 )
 
-        _report(progress, 0.18, "Downloading Wayback imagery")
+        _report(progress, 0.18, "Downloading imagery" if use_mapbox_t2 else "Downloading Wayback imagery")
         try:
             with timings.track("download"):
                 scene_t1 = download_wayback_mosaic(
@@ -1514,18 +1573,43 @@ def run_detection(
                     if tilemap_t1 is not None and tilemap_t1.preflight_complete
                     else None,
                 )
-                scene_t2 = download_wayback_mosaic(
-                    prepared.t2_release,
-                    aoi_bbox,
-                    settings=settings,
-                    zoom=resolved_t2.zoom,
-                    out_dir=result_dir,
-                    label="t2",
-                    max_tiles=None,
-                    available_tiles=tilemap_t2.available_tiles
-                    if tilemap_t2 is not None and tilemap_t2.preflight_complete
-                    else None,
-                )
+                if use_mapbox_t2:
+                    mapbox_start = time.perf_counter_ns()
+                    scene_t2 = MapboxCurrentProvider().download(aoi_bbox, settings=settings, zoom=resolved_t2.zoom)
+                    _safe_add_timing_stage(
+                        timing,
+                        "mapbox_imagery_download_or_load",
+                        duration_ms=_elapsed_ms(mapbox_start),
+                        metadata={
+                            "provider": "mapbox",
+                            "cache_hit": bool((scene_t2.metadata or {}).get("cache_hit")),
+                            "tile_count": scene_t2.tile_count,
+                            "zoom": scene_t2.zoom,
+                        },
+                    )
+                    run_warnings.append(
+                        "The latest milestone uses Mapbox Satellite current basemap imagery. Exact capture date is not guaranteed."
+                    )
+                    backend_diagnostics["latest_source"] = {
+                        "provider": "mapbox",
+                        "source_type": "current_basemap",
+                        "source_id": MAPBOX_SOURCE_ID,
+                        "capture_date_known": False,
+                        "attribution": MAPBOX_ATTRIBUTION,
+                    }
+                else:
+                    scene_t2 = download_wayback_mosaic(
+                        prepared.t2_release,
+                        aoi_bbox,
+                        settings=settings,
+                        zoom=resolved_t2.zoom,
+                        out_dir=result_dir,
+                        label="t2",
+                        max_tiles=None,
+                        available_tiles=tilemap_t2.available_tiles
+                        if tilemap_t2 is not None and tilemap_t2.preflight_complete
+                        else None,
+                    )
         except ValueError as exc:
             return RunResponse(
                 success=False,
@@ -1649,7 +1733,7 @@ def run_detection(
 
         vector_context = VectorizationContext(
             release_t1=prepared.t1_release.identifier,
-            release_t2=prepared.t2_release.identifier,
+            release_t2=MAPBOX_SOURCE_ID if use_mapbox_t2 else prepared.t2_release.identifier,
             src_date_t1=scene_t1_metadata.dominant_src_date,
             src_date_t2=scene_t2_metadata.dominant_src_date,
         )
@@ -1806,7 +1890,7 @@ def run_detection(
                     total_change_polygons=int(len(change_polygons_df)),
                     total_change_area_m2=round(total_change_area, 2),
                     release_date_t1=str(prepared.t1_release.release_date),
-                    release_date_t2=str(prepared.t2_release.release_date),
+                    release_date_t2="current_basemap" if use_mapbox_t2 else str(prepared.t2_release.release_date),
                     dominant_src_date_t1=scene_t1_metadata.dominant_src_date,
                     dominant_src_date_t2=scene_t2_metadata.dominant_src_date,
                     dominant_src_res_m_t1=scene_t1_metadata.dominant_src_res_m,
@@ -1838,7 +1922,7 @@ def run_detection(
                     warnings=run_warnings + alignment_warnings,
                     coverage={
                         "t1": _coverage_entry(prepared.t1_release.identifier, resolved_t1.zoom, scene_t1_metadata, tilemap_t1),
-                        "t2": _coverage_entry(prepared.t2_release.identifier, resolved_t2.zoom, scene_t2_metadata, tilemap_t2),
+                        "t2": _coverage_entry(MAPBOX_SOURCE_ID if use_mapbox_t2 else prepared.t2_release.identifier, resolved_t2.zoom, scene_t2_metadata, tilemap_t2),
                     },
                 ),
             )
@@ -1980,7 +2064,7 @@ def run_detection(
                 total_new_building_area_m2=round(total_new_building_area, 2),
                 total_building_block_area_m2=round(total_block_area, 2),
                 release_date_t1=str(prepared.t1_release.release_date),
-                release_date_t2=str(prepared.t2_release.release_date),
+                release_date_t2="current_basemap" if use_mapbox_t2 else str(prepared.t2_release.release_date),
                 dominant_src_date_t1=scene_t1_metadata.dominant_src_date,
                 dominant_src_date_t2=scene_t2_metadata.dominant_src_date,
                 dominant_src_res_m_t1=scene_t1_metadata.dominant_src_res_m,
@@ -2014,7 +2098,7 @@ def run_detection(
                 warnings=run_warnings + alignment_warnings,
                 coverage={
                     "t1": _coverage_entry(prepared.t1_release.identifier, resolved_t1.zoom, scene_t1_metadata, tilemap_t1),
-                    "t2": _coverage_entry(prepared.t2_release.identifier, resolved_t2.zoom, scene_t2_metadata, tilemap_t2),
+                    "t2": _coverage_entry(MAPBOX_SOURCE_ID if use_mapbox_t2 else prepared.t2_release.identifier, resolved_t2.zoom, scene_t2_metadata, tilemap_t2),
                 },
             ),
         )

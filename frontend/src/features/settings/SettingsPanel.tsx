@@ -418,6 +418,7 @@ function buildTemporalBootstrapProject(
     warnings: [],
     validation_blocking_errors: [],
     download_bundle_path: null,
+    latest_source: "esri_wayback",
   };
 }
 
@@ -627,6 +628,7 @@ export function SettingsPanel({
         warnings: [],
         validation_blocking_errors: [],
         download_bundle_path: null,
+        latest_source: "esri_wayback",
       };
       const savedProject = await saveTemporalProject(nextProject);
       setSelectedProjectId(savedProject.project_id);

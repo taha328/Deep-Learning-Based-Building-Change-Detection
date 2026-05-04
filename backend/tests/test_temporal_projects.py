@@ -374,6 +374,109 @@ def test_run_temporal_project_only_executes_appended_milestone(monkeypatch, tmp_
     assert second_run.project.milestones[2].pair_request_hash is not None
 
 
+def test_mapbox_latest_source_adds_synthetic_latest_milestone(monkeypatch, tmp_path) -> None:
+    settings = Settings(
+        runtime_cache_dir=tmp_path,
+        model_backend_default="bandon_mps",
+        mapbox_current_imagery_enabled=True,
+        mapbox_access_token="test-token",
+    )
+    releases = _sample_releases(settings)
+    monkeypatch.setattr("src.services.temporal_projects.list_releases", lambda _: releases)
+    project = save_temporal_project(
+        TemporalProject(
+            project_id="mapbox-latest",
+            name="Mapbox Latest",
+            aoi_geojson=_sample_project().aoi_geojson,
+            milestones=[
+                {"release_identifier": "WB_2025_R01"},
+                {"release_identifier": "WB_2026_R01"},
+            ],
+            latest_source="mapbox_current",
+            created_at="2026-04-20T00:00:00Z",
+            updated_at="2026-04-20T00:00:00Z",
+        ),
+        settings,
+    )
+
+    assert [milestone.release_identifier for milestone in project.milestones] == [
+        "WB_2025_R01",
+        "WB_2026_R01",
+        "mapbox.satellite",
+    ]
+    assert project.milestones[-1].release_date == "current_basemap"
+
+    validation = validate_temporal_project(
+        project,
+        settings=settings,
+        remote_patch_budget_enabled=False,
+        request_hash_context={"model_backend": "bandon_mps", "backend_mode": "bandon_mps"},
+        execution_config=_bandon_config(),
+    )
+
+    assert validation.valid is True
+    assert [estimate.to_release_identifier for estimate in validation.pair_estimates] == [
+        "WB_2026_R01",
+        "mapbox.satellite",
+    ]
+
+
+def test_mapbox_latest_source_runs_after_latest_wayback_milestone(monkeypatch, tmp_path) -> None:
+    settings = Settings(
+        runtime_cache_dir=tmp_path,
+        model_backend_default="bandon_mps",
+        mapbox_current_imagery_enabled=True,
+        mapbox_access_token="test-token",
+    )
+    releases = _sample_releases(settings)
+    monkeypatch.setattr("src.services.temporal_projects.list_releases", lambda _: releases)
+    project = save_temporal_project(
+        TemporalProject(
+            project_id="mapbox-run",
+            name="Mapbox Run",
+            aoi_geojson=_sample_project().aoi_geojson,
+            milestones=[
+                {"release_identifier": "WB_2025_R01"},
+                {"release_identifier": "WB_2026_R01"},
+            ],
+            latest_source="mapbox_current",
+            created_at="2026-04-20T00:00:00Z",
+            updated_at="2026-04-20T00:00:00Z",
+        ),
+        settings,
+    )
+    executed_pairs: list[tuple[str, str, str]] = []
+
+    def _pair_runner(request):
+        executed_pairs.append((request.t1_release, request.t2_release, request.latest_source))
+        response = _bandon_pair_response(
+            settings,
+            request,
+            releases=releases,
+            geojson=_feature_collection(
+                [[(-6.9998, 33.0002), (-6.9994, 33.0002), (-6.9994, 33.0006), (-6.9998, 33.0006)]]
+            ),
+        )
+        save_cached_response(settings, response.summary.request_hash, response)
+        return response
+
+    response = run_temporal_project(
+        project.project_id,
+        settings=settings,
+        pair_runner=_pair_runner,
+        execution_config=_bandon_config(),
+    )
+
+    assert response.success is True
+    assert executed_pairs == [
+        ("WB_2025_R01", "WB_2026_R01", "esri_wayback"),
+        ("WB_2026_R01", "WB_2026_R01", "mapbox_current"),
+    ]
+    assert response.project.milestones[-1].release_identifier == "mapbox.satellite"
+    assert response.project.milestones[-1].status == "complete"
+    assert response.project.milestones[-1].pair_request_hash is not None
+
+
 def test_run_temporal_project_reruns_only_dirty_prefix_boundary(monkeypatch, tmp_path) -> None:
     settings = Settings(runtime_cache_dir=tmp_path, model_backend_default="sam3")
     project = save_temporal_project(

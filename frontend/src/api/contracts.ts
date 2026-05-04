@@ -3,6 +3,7 @@ import { z } from "zod";
 export const modeSchema = z.enum(["fast_preview", "full_run"]);
 export const modelBackendSchema = z.enum(["sam3", "bandon_mps"]);
 export const sam3BackendModeSchema = z.enum(["public_zerogpu", "local", "huggingface_gpu"]);
+export const latestImagerySourceSchema = z.enum(["esri_wayback", "mapbox_current"]);
 
 export const releaseSchema = z.object({
   identifier: z.string(),
@@ -49,6 +50,7 @@ export const validationRequestSchema = z.object({
   buffer_distances_m: z.array(z.number()).optional(),
   keep_disjoint_buffer_parts_separate: z.boolean().optional(),
   road_constraint_layer_path: z.string().nullable().optional(),
+  latest_source: latestImagerySourceSchema.optional(),
 });
 
 export const validationResponseSchema = z.object({
@@ -242,6 +244,7 @@ export const temporalProjectSchema = z.object({
   warnings: z.array(z.string()).default([]),
   validation_blocking_errors: z.array(z.string()).default([]),
   download_bundle_path: z.string().nullable().optional(),
+  latest_source: latestImagerySourceSchema.default("esri_wayback"),
 });
 
 export const temporalProjectSummarySchema = z.object({
@@ -292,6 +295,7 @@ export const temporalProjectRunResponseSchema = z.object({
 export type ModeName = z.infer<typeof modeSchema>;
 export type ModelBackendName = z.infer<typeof modelBackendSchema>;
 export type Sam3BackendMode = z.infer<typeof sam3BackendModeSchema>;
+export type LatestImagerySource = z.infer<typeof latestImagerySourceSchema>;
 export type ReleaseMetadata = z.infer<typeof releaseSchema>;
 export type BackendAvailability = z.infer<typeof backendAvailabilitySchema>;
 export type PipelineExecutionConfig = z.infer<typeof pipelineExecutionConfigSchema>;

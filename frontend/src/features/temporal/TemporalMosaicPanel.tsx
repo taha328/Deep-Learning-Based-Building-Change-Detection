@@ -20,6 +20,7 @@ import {
 
 import type {
   BackendAvailability,
+  LatestImagerySource,
   ReleaseMetadata,
   PipelineExecutionConfig,
   TemporalMilestone,
@@ -71,6 +72,7 @@ import { WorkspaceShell } from "@/features/workspace/WorkspaceShell";
 import type { WorkflowSectionId } from "@/features/workspace/workflowSections";
 
 const DEFAULT_PROJECT_DIRECTORY = "/Users/tahaelouali/Desktop/Building_change_app/backend/runtime_cache";
+const MAPBOX_CURRENT_MILESTONE_ID = "mapbox.satellite";
 
 function resolveProjectDirectory(projectId: string, directory: string): string {
   const trimmedDirectory = directory.trim();
@@ -87,6 +89,9 @@ const EMPTY_FEATURE_COLLECTION: FeatureCollection = {
 };
 
 function formatReleaseDate(value: string | undefined | null, locale: string, fallback: string): string {
+  if (value === "current_basemap") {
+    return "Current basemap";
+  }
   if (!value) {
     return fallback;
   }
@@ -323,6 +328,7 @@ function emptyProject(aoi: Polygon | null, projectName: string, executionConfig:
     warnings: [],
     validation_blocking_errors: [],
     download_bundle_path: null,
+    latest_source: "esri_wayback",
   };
 }
 
@@ -350,6 +356,14 @@ function createMilestone(release: ReleaseMetadata): TemporalMilestone {
     metrics: null,
     artifacts: [],
   };
+}
+
+function isMapboxCurrentMilestone(milestone: TemporalMilestone): boolean {
+  return milestone.release_identifier === MAPBOX_CURRENT_MILESTONE_ID;
+}
+
+function formatMilestoneIdentifier(milestone: TemporalMilestone, t: (key: string) => string): string {
+  return isMapboxCurrentMilestone(milestone) ? t("temporal.latest_source_mapbox") : milestone.release_identifier;
 }
 
 function ensureFeatureCollection(value: Record<string, unknown> | null | undefined): FeatureCollection {
@@ -530,7 +544,7 @@ export function TemporalMosaicPanel({
       setValidation(null);
       setSelectedProjectId(hydratedProject.project_id);
       setSelectedMilestoneId(preferredMilestoneId(hydratedProject));
-      setSelectedReleaseIds(hydratedProject.milestones.map((item) => item.release_identifier));
+      setSelectedReleaseIds(hydratedProject.milestones.filter((item) => !isMapboxCurrentMilestone(item)).map((item) => item.release_identifier));
       setProgressMetricsVisible(true);
       onWorkflowModeChange("temporal");
       if (hydratedProject.aoi_geojson && hydratedProject.aoi_geojson.type === "Polygon") {
@@ -668,7 +682,7 @@ export function TemporalMosaicPanel({
     setValidation(null);
     setSelectedProjectId(temporalProjectBootstrap.project_id);
     setSelectedMilestoneId(preferredMilestoneId(temporalProjectBootstrap));
-    setSelectedReleaseIds(temporalProjectBootstrap.milestones.map((item) => item.release_identifier));
+    setSelectedReleaseIds(temporalProjectBootstrap.milestones.filter((item) => !isMapboxCurrentMilestone(item)).map((item) => item.release_identifier));
     setProgressMetricsVisible(true);
 
     if (temporalProjectBootstrap.aoi_geojson && temporalProjectBootstrap.aoi_geojson.type === "Polygon") {
@@ -819,7 +833,12 @@ export function TemporalMosaicPanel({
   );
 
   const selectedReleaseIds = useMemo(
-    () => new Set(project?.milestones.map((item) => item.release_identifier) ?? []),
+    () =>
+      new Set(
+        project?.milestones
+          .filter((item) => !isMapboxCurrentMilestone(item))
+          .map((item) => item.release_identifier) ?? [],
+      ),
     [project?.milestones],
   );
 
@@ -829,8 +848,21 @@ export function TemporalMosaicPanel({
     ...current,
     aoi_geojson: aoi,
     execution_config: buildExecutionConfig(settings.modelBackend, settings.sam3BackendMode),
+    latest_source: current.latest_source ?? "esri_wayback",
     updated_at: nowIso(),
   });
+
+  const handleLatestSourceChange = (latestSource: LatestImagerySource) => {
+    if (!project) {
+      return;
+    }
+    setProject({
+      ...project,
+      latest_source: latestSource,
+      updated_at: nowIso(),
+    });
+    setValidation(null);
+  };
 
   const persistProject = async (currentProject: TemporalProject) => {
     const normalizedProject = syncProjectWithCurrentAoi(currentProject);
@@ -900,8 +932,12 @@ export function TemporalMosaicPanel({
     }
     const nextMilestones = [...project.milestones, createMilestone(release)]
       .sort((left, right) => {
-        const leftDate = releasesById.get(left.release_identifier)?.release_date ?? left.release_date ?? "";
-        const rightDate = releasesById.get(right.release_identifier)?.release_date ?? right.release_date ?? "";
+        const leftDate = isMapboxCurrentMilestone(left)
+          ? "9999-12-31"
+          : releasesById.get(left.release_identifier)?.release_date ?? left.release_date ?? "";
+        const rightDate = isMapboxCurrentMilestone(right)
+          ? "9999-12-31"
+          : releasesById.get(right.release_identifier)?.release_date ?? right.release_date ?? "";
         return Date.parse(leftDate) - Date.parse(rightDate);
       });
     setProject({
@@ -909,7 +945,7 @@ export function TemporalMosaicPanel({
       milestones: nextMilestones,
       updated_at: nowIso(),
     });
-    setSelectedReleaseIds(nextMilestones.map((item) => item.release_identifier));
+    setSelectedReleaseIds(nextMilestones.filter((item) => !isMapboxCurrentMilestone(item)).map((item) => item.release_identifier));
     setSelectedMilestoneId(release.identifier);
     setValidation(null);
   };
@@ -924,7 +960,7 @@ export function TemporalMosaicPanel({
       milestones: nextMilestones,
       updated_at: nowIso(),
     });
-    setSelectedReleaseIds(nextMilestones.map((item) => item.release_identifier));
+    setSelectedReleaseIds(nextMilestones.filter((item) => !isMapboxCurrentMilestone(item)).map((item) => item.release_identifier));
     if (selectedMilestoneId === releaseIdentifier) {
       setSelectedMilestoneId(nextMilestones.at(-1)?.release_identifier ?? null);
     }
@@ -1192,6 +1228,7 @@ export function TemporalMosaicPanel({
                     <div className="space-y-2">
                       {project.milestones.map((milestone) => {
                         const isSelected = selectedMilestoneId === milestone.release_identifier;
+                        const isMapboxLatest = isMapboxCurrentMilestone(milestone);
                         return (
                           <div
                             key={milestone.release_identifier}
@@ -1210,20 +1247,22 @@ export function TemporalMosaicPanel({
                             >
                               <div className="min-w-0">
                                 <p className="truncate text-label font-medium text-foreground">{formatReleaseDate(milestone.release_date, locale, t("temporal.unknown_date"))}</p>
-                                <p className="truncate text-caption text-foreground">{milestone.release_identifier}</p>
+                                <p className="truncate text-caption text-foreground">{formatMilestoneIdentifier(milestone, t)}</p>
                               </div>
                               <span className={cn("rounded-full border px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.12em]", milestoneBadgeTone(milestone.status))}>
                                 {t(`temporal.milestone_status.${milestone.status}`)}
                               </span>
                             </button>
-                            <button
-                              type="button"
-                              onClick={() => handleRemoveMilestone(milestone.release_identifier)}
-                              className="border-l border-sidebar-border px-3 text-foreground transition hover:bg-surface hover:text-foreground"
-                              aria-label={`${t("button.remove")} ${milestone.release_identifier}`}
-                            >
-                              <Trash2 className="h-4 w-4" />
-                            </button>
+                            {isMapboxLatest ? null : (
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveMilestone(milestone.release_identifier)}
+                                className="border-l border-sidebar-border px-3 text-foreground transition hover:bg-surface hover:text-foreground"
+                                aria-label={`${t("button.remove")} ${milestone.release_identifier}`}
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </button>
+                            )}
                           </div>
                         );
                       })}
@@ -1233,6 +1272,25 @@ export function TemporalMosaicPanel({
                       {t("temporal.no_milestones")}
                     </div>
                   )}
+                </div>
+
+                <div className="space-y-2 rounded-lg border border-sidebar-border bg-sidebar px-4 py-3">
+                  <label className="label-xs" htmlFor="temporal-latest-source">
+                    {t("temporal.latest_source_label")}
+                  </label>
+                  <Select
+                    id="temporal-latest-source"
+                    value={project?.latest_source ?? "esri_wayback"}
+                    onChange={(event) => handleLatestSourceChange(event.target.value as LatestImagerySource)}
+                    disabled={!project || runBusy}
+                    className="border-sidebar-border bg-card text-card-foreground"
+                  >
+                    <option value="esri_wayback">{t("temporal.latest_source_esri")}</option>
+                    <option value="mapbox_current">{t("temporal.latest_source_mapbox")}</option>
+                  </Select>
+                  {project?.latest_source === "mapbox_current" ? (
+                    <p className="text-caption text-muted-foreground">{t("temporal.latest_source_mapbox_warning")}</p>
+                  ) : null}
                 </div>
 
                 <div className="flex min-h-[18rem] flex-1 flex-col gap-2">

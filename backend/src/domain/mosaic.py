@@ -59,6 +59,14 @@ class MosaicResult:
     shared_cache_dir: Path = Path(".")
     cache_key: str = ""
     materialized_in_request_dir: bool = False
+    provider: str = "esri_wayback"
+    source_type: str = "historical_release"
+    source_id: str | None = None
+    effective_date: str | None = None
+    dominant_src_date: str | None = None
+    capture_date_known: bool = True
+    attribution: str | None = None
+    metadata: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -590,6 +598,8 @@ def download_wayback_mosaic(
                 shared_cache_dir=cache_dir,
                 cache_key=cache_key,
                 materialized_in_request_dir=materialized,
+                source_id=release.identifier,
+                effective_date=str(release.release_date),
             )
         if cache_dir.exists():
             shutil.rmtree(cache_dir, ignore_errors=True)
@@ -716,6 +726,8 @@ def download_wayback_mosaic(
         shared_cache_dir=cache_dir,
         cache_key=cache_key,
         materialized_in_request_dir=materialized,
+        source_id=release.identifier,
+        effective_date=str(release.release_date),
     )
 
 
