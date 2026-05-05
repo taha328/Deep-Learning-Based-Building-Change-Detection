@@ -5,6 +5,8 @@ import {
   jobResponseSchema,
   jobStartResponseSchema,
   releasesResponseSchema,
+  referenceLayerPreflightSchema,
+  referenceLayerSchema,
   runResponseSchema,
   temporalProjectRunResponseSchema,
   temporalProjectSaveResponseSchema,
@@ -15,6 +17,10 @@ import {
   type JobResponse,
   type JobStartResponse,
   type BackendAvailability,
+  type ReferenceLayer,
+  type ReferenceLayerPreflight,
+  type ReferenceLayerScope,
+  type ReferenceLayerStrategy,
   type RunResponse,
   type TemporalProject,
   type TemporalProjectRunResponse,
@@ -495,6 +501,69 @@ export async function importTemporalOverride(
     throw new Error(response.error_message ?? "The backend reported an unsuccessful temporal override run.");
   }
   return response;
+}
+
+export async function listReferenceLayers(projectId: string): Promise<ReferenceLayer[]> {
+  const result = await apiFetch<unknown>(`/api/temporal-projects/${encodeURIComponent(projectId)}/reference-layers`);
+  return z.array(referenceLayerSchema).parse(result);
+}
+
+export async function preflightReferenceLayer(
+  projectId: string,
+  file: File,
+  scope: ReferenceLayerScope,
+): Promise<ReferenceLayerPreflight> {
+  const formData = new FormData();
+  formData.set("file", file);
+  formData.set("scope", scope);
+  const result = await apiFetch<unknown>(`/api/temporal-projects/${encodeURIComponent(projectId)}/reference-layers/preflight`, {
+    method: "POST",
+    body: formData,
+  });
+  return referenceLayerPreflightSchema.parse(result);
+}
+
+export async function importReferenceLayer(
+  projectId: string,
+  file: File,
+  name: string,
+  scope: ReferenceLayerScope,
+  renderingStrategy: ReferenceLayerStrategy,
+): Promise<ReferenceLayer> {
+  const formData = new FormData();
+  formData.set("file", file);
+  formData.set("name", name);
+  formData.set("scope", scope);
+  formData.set("rendering_strategy", renderingStrategy);
+  const result = await apiFetch<unknown>(`/api/temporal-projects/${encodeURIComponent(projectId)}/reference-layers`, {
+    method: "POST",
+    body: formData,
+  });
+  return referenceLayerSchema.parse(result);
+}
+
+export async function updateReferenceLayer(
+  projectId: string,
+  layerId: string,
+  patch: Partial<Pick<ReferenceLayer, "name" | "visible" | "opacity" | "style">>,
+): Promise<ReferenceLayer> {
+  const result = await apiFetch<unknown>(
+    `/api/temporal-projects/${encodeURIComponent(projectId)}/reference-layers/${encodeURIComponent(layerId)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    },
+  );
+  return referenceLayerSchema.parse(result);
+}
+
+export async function deleteReferenceLayer(projectId: string, layerId: string): Promise<void> {
+  await apiFetch<unknown>(
+    `/api/temporal-projects/${encodeURIComponent(projectId)}/reference-layers/${encodeURIComponent(layerId)}`,
+    {
+      method: "DELETE",
+    },
+  );
 }
 
 export async function createTemporalProjectExportBundle(projectId: string): Promise<string> {

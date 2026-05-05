@@ -39,6 +39,14 @@ class Settings(BaseModel):
     download_retry_backoff_max_sec: float = 8.0
     metadata_grid_size: int = 5
     wayback_metadata_workers: int = 10
+    wayback_releases_cache_enabled: bool = True
+    wayback_releases_cache_ttl_seconds: int = 86400
+    wayback_releases_stale_if_error_enabled: bool = True
+    wayback_releases_cache_path: Path | None = None
+    wayback_releases_connect_timeout_seconds: int = 10
+    wayback_releases_read_timeout_seconds: int = 30
+    wayback_releases_retries: int = 2
+    wayback_releases_retry_backoff_seconds: float = 1.0
     wayback_tilemap_preflight_enabled: bool = True
     wayback_metadata_cache_enabled: bool = True
     wayback_metadata_cache_ttl_seconds: int = 604800
@@ -115,6 +123,25 @@ class Settings(BaseModel):
     jobs_enabled: bool = True
     keep_intermediate_artifacts: bool = False
     materialize_source_imagery_in_requests: bool = False
+    temporal_imagery_prefetch_enabled: bool = False
+    temporal_imagery_prefetch_workers: int = 2
+    temporal_imagery_prefetch_max_pairs: int = 4
+    temporal_imagery_prefetch_timeout_seconds: int = 600
+    temporal_imagery_prefetch_reduce_provider_workers: bool = True
+    reference_layer_max_upload_bytes: int = 2_147_483_648
+    reference_layer_browser_geojson_max_bytes: int = 5_000_000
+    reference_layer_browser_geojson_max_features: int = 25_000
+    reference_layer_large_vector_input_threshold_bytes: int = 50_000_000
+    reference_layer_pmtiles_enabled: bool = True
+    reference_layer_pmtiles_max_upload_mb: int = 2048
+    reference_layer_pmtiles_min_full_layer_mb: int = 25
+    reference_layer_pmtiles_tippecanoe_bin: str = "tippecanoe"
+    reference_layer_pmtiles_cli_bin: str = "pmtiles"
+    reference_layer_pmtiles_max_zoom: int = 14
+    reference_layer_pmtiles_min_zoom: int = 0
+    reference_layer_pmtiles_default_layer_name: str = "reference_layer"
+    reference_layer_pmtiles_build_timeout_seconds: int = 900
+    reference_layer_pmtiles_keep_intermediate: bool = False
     cors_allowed_origins: tuple[str, ...] = (
         "http://localhost:5173",
         "http://localhost:5174",
@@ -147,10 +174,26 @@ class Settings(BaseModel):
     def model_post_init(self, __context: object) -> None:
         if self.wayback_metadata_cache_dir is None:
             self.wayback_metadata_cache_dir = self.runtime_cache_dir / "wayback_metadata_cache"
+        if self.wayback_releases_cache_path is None:
+            self.wayback_releases_cache_path = self.runtime_cache_dir / "wayback_releases" / "releases_cache.json"
         if self.wayback_tile_preflight_cache_dir is None:
             self.wayback_tile_preflight_cache_dir = self.runtime_cache_dir / "wayback_tile_preflight_cache"
         if self.mapbox_current_imagery_cache_dir is None:
             self.mapbox_current_imagery_cache_dir = self.runtime_cache_dir / "mapbox_mosaics"
+        if not 1 <= self.temporal_imagery_prefetch_workers <= 4:
+            raise ValueError("temporal_imagery_prefetch_workers must be between 1 and 4.")
+        if self.temporal_imagery_prefetch_max_pairs < 1:
+            raise ValueError("temporal_imagery_prefetch_max_pairs must be greater than or equal to 1.")
+        if self.temporal_imagery_prefetch_timeout_seconds < 30:
+            raise ValueError("temporal_imagery_prefetch_timeout_seconds must be greater than or equal to 30.")
+        if self.reference_layer_pmtiles_min_zoom < 0 or self.reference_layer_pmtiles_min_zoom > self.reference_layer_pmtiles_max_zoom:
+            raise ValueError("reference_layer_pmtiles_min_zoom must be between 0 and reference_layer_pmtiles_max_zoom.")
+        if self.reference_layer_pmtiles_max_zoom > 22:
+            raise ValueError("reference_layer_pmtiles_max_zoom must be less than or equal to 22.")
+        if self.reference_layer_pmtiles_build_timeout_seconds < 30:
+            raise ValueError("reference_layer_pmtiles_build_timeout_seconds must be greater than or equal to 30.")
+        if self.reference_layer_pmtiles_max_upload_mb < 1:
+            raise ValueError("reference_layer_pmtiles_max_upload_mb must be greater than 0.")
         self.ensure_runtime_cache_dirs()
         if not self.allowed_file_roots:
             self.allowed_file_roots = (self.request_cache_dir, self.temporal_projects_dir)
@@ -164,6 +207,7 @@ class Settings(BaseModel):
         self.request_cache_dir.mkdir(parents=True, exist_ok=True)
         self.temporal_projects_dir.mkdir(parents=True, exist_ok=True)
         self.wayback_mosaic_cache_dir.mkdir(parents=True, exist_ok=True)
+        self.wayback_releases_cache_path.parent.mkdir(parents=True, exist_ok=True)
         self.wayback_metadata_cache_dir.mkdir(parents=True, exist_ok=True)
         self.wayback_tile_preflight_cache_dir.mkdir(parents=True, exist_ok=True)
         self.mapbox_current_imagery_cache_dir.mkdir(parents=True, exist_ok=True)
@@ -299,6 +343,39 @@ def get_settings() -> Settings:
         ),
         metadata_grid_size=_int_env("APP_METADATA_GRID_SIZE", base.metadata_grid_size),
         wayback_metadata_workers=_int_env("APP_WAYBACK_METADATA_WORKERS", base.wayback_metadata_workers),
+        wayback_releases_cache_enabled=_bool_env_any(
+            ("WAYBACK_RELEASES_CACHE_ENABLED", "APP_WAYBACK_RELEASES_CACHE_ENABLED"),
+            base.wayback_releases_cache_enabled,
+        ),
+        wayback_releases_cache_ttl_seconds=_int_env(
+            "WAYBACK_RELEASES_CACHE_TTL_SECONDS",
+            base.wayback_releases_cache_ttl_seconds,
+        ),
+        wayback_releases_stale_if_error_enabled=_bool_env_any(
+            ("WAYBACK_RELEASES_STALE_IF_ERROR_ENABLED", "APP_WAYBACK_RELEASES_STALE_IF_ERROR_ENABLED"),
+            base.wayback_releases_stale_if_error_enabled,
+        ),
+        wayback_releases_cache_path=(
+            Path(cache_path_env)
+            if (cache_path_env := _optional_str_env("WAYBACK_RELEASES_CACHE_PATH", "APP_WAYBACK_RELEASES_CACHE_PATH"))
+            else None
+        ),
+        wayback_releases_connect_timeout_seconds=_int_env(
+            "WAYBACK_RELEASES_CONNECT_TIMEOUT_SECONDS",
+            base.wayback_releases_connect_timeout_seconds,
+        ),
+        wayback_releases_read_timeout_seconds=_int_env(
+            "WAYBACK_RELEASES_READ_TIMEOUT_SECONDS",
+            base.wayback_releases_read_timeout_seconds,
+        ),
+        wayback_releases_retries=_int_env(
+            "WAYBACK_RELEASES_RETRIES",
+            base.wayback_releases_retries,
+        ),
+        wayback_releases_retry_backoff_seconds=_float_env(
+            "WAYBACK_RELEASES_RETRY_BACKOFF_SECONDS",
+            base.wayback_releases_retry_backoff_seconds,
+        ),
         wayback_tilemap_preflight_enabled=_bool_env(
             "APP_WAYBACK_TILEMAP_PREFLIGHT_ENABLED",
             base.wayback_tilemap_preflight_enabled,
@@ -494,6 +571,82 @@ def get_settings() -> Settings:
         materialize_source_imagery_in_requests=_bool_env(
             "MATERIALIZE_SOURCE_IMAGERY_IN_REQUESTS",
             base.materialize_source_imagery_in_requests,
+        ),
+        temporal_imagery_prefetch_enabled=_bool_env(
+            "TEMPORAL_IMAGERY_PREFETCH_ENABLED",
+            base.temporal_imagery_prefetch_enabled,
+        ),
+        temporal_imagery_prefetch_workers=_int_env(
+            "TEMPORAL_IMAGERY_PREFETCH_WORKERS",
+            base.temporal_imagery_prefetch_workers,
+        ),
+        temporal_imagery_prefetch_max_pairs=_int_env(
+            "TEMPORAL_IMAGERY_PREFETCH_MAX_PAIRS",
+            base.temporal_imagery_prefetch_max_pairs,
+        ),
+        temporal_imagery_prefetch_timeout_seconds=_int_env(
+            "TEMPORAL_IMAGERY_PREFETCH_TIMEOUT_SECONDS",
+            base.temporal_imagery_prefetch_timeout_seconds,
+        ),
+        temporal_imagery_prefetch_reduce_provider_workers=_bool_env(
+            "TEMPORAL_IMAGERY_PREFETCH_REDUCE_PROVIDER_WORKERS",
+            base.temporal_imagery_prefetch_reduce_provider_workers,
+        ),
+        reference_layer_max_upload_bytes=_int_env(
+            "REFERENCE_LAYER_MAX_UPLOAD_BYTES",
+            base.reference_layer_max_upload_bytes,
+        ),
+        reference_layer_browser_geojson_max_bytes=_int_env(
+            "REFERENCE_LAYER_BROWSER_GEOJSON_MAX_BYTES",
+            base.reference_layer_browser_geojson_max_bytes,
+        ),
+        reference_layer_browser_geojson_max_features=_int_env(
+            "REFERENCE_LAYER_BROWSER_GEOJSON_MAX_FEATURES",
+            base.reference_layer_browser_geojson_max_features,
+        ),
+        reference_layer_large_vector_input_threshold_bytes=_int_env(
+            "REFERENCE_LAYER_LARGE_VECTOR_INPUT_THRESHOLD_BYTES",
+            base.reference_layer_large_vector_input_threshold_bytes,
+        ),
+        reference_layer_pmtiles_enabled=_bool_env(
+            "REFERENCE_LAYER_PMTILES_ENABLED",
+            base.reference_layer_pmtiles_enabled,
+        ),
+        reference_layer_pmtiles_max_upload_mb=_int_env(
+            "REFERENCE_LAYER_PMTILES_MAX_UPLOAD_MB",
+            base.reference_layer_pmtiles_max_upload_mb,
+        ),
+        reference_layer_pmtiles_min_full_layer_mb=_int_env(
+            "REFERENCE_LAYER_PMTILES_MIN_FULL_LAYER_MB",
+            base.reference_layer_pmtiles_min_full_layer_mb,
+        ),
+        reference_layer_pmtiles_tippecanoe_bin=os.getenv(
+            "REFERENCE_LAYER_PMTILES_TIPPECANOE_BIN",
+            base.reference_layer_pmtiles_tippecanoe_bin,
+        ),
+        reference_layer_pmtiles_cli_bin=os.getenv(
+            "REFERENCE_LAYER_PMTILES_CLI_BIN",
+            base.reference_layer_pmtiles_cli_bin,
+        ),
+        reference_layer_pmtiles_max_zoom=_int_env(
+            "REFERENCE_LAYER_PMTILES_MAX_ZOOM",
+            base.reference_layer_pmtiles_max_zoom,
+        ),
+        reference_layer_pmtiles_min_zoom=_int_env(
+            "REFERENCE_LAYER_PMTILES_MIN_ZOOM",
+            base.reference_layer_pmtiles_min_zoom,
+        ),
+        reference_layer_pmtiles_default_layer_name=os.getenv(
+            "REFERENCE_LAYER_PMTILES_DEFAULT_LAYER_NAME",
+            base.reference_layer_pmtiles_default_layer_name,
+        ),
+        reference_layer_pmtiles_build_timeout_seconds=_int_env(
+            "REFERENCE_LAYER_PMTILES_BUILD_TIMEOUT_SECONDS",
+            base.reference_layer_pmtiles_build_timeout_seconds,
+        ),
+        reference_layer_pmtiles_keep_intermediate=_bool_env(
+            "REFERENCE_LAYER_PMTILES_KEEP_INTERMEDIATE",
+            base.reference_layer_pmtiles_keep_intermediate,
         ),
         cors_allowed_origins=_tuple_str_env("CORS_ALLOWED_ORIGINS", base.cors_allowed_origins),
         cors_allow_origin_regex=os.getenv("CORS_ALLOW_ORIGIN_REGEX", base.cors_allow_origin_regex),

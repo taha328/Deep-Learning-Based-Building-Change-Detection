@@ -797,6 +797,7 @@ def test_run_detection_supports_bandon_backend(tmp_path, monkeypatch) -> None:
                     "mps_built": True,
                     "mps_available": True,
                 },
+                "child_timing": None,
                 "launcher": "env_python",
                 "command": ["python", "infer_mps.py"],
             },
@@ -921,6 +922,32 @@ def test_run_detection_bandon_writes_manifest_and_nested_timing_without_auto_bun
                     "mps_built": True,
                     "mps_available": True,
                 },
+                "child_timing": {
+                    "run_id": "bandon:request-artifacts",
+                    "stages": [
+                        {"name": "runner_startup", "duration_ms": 1.2, "status": "success", "metadata": {}},
+                        {
+                            "name": "model_load_or_reuse",
+                            "duration_ms": 10.0,
+                            "status": "success",
+                            "metadata": {"device": "mps", "model_parameter_devices": ["mps"]},
+                        },
+                        {"name": "preprocess", "duration_ms": 3.5, "status": "success", "metadata": {}},
+                        {
+                            "name": "forward",
+                            "duration_ms": 25.0,
+                            "status": "success",
+                            "metadata": {
+                                "device": "mps",
+                                "input_tensor_shapes": [[1, 6, 4, 4]],
+                                "input_tensor_devices_before_forward": ["mps"],
+                            },
+                        },
+                        {"name": "output_decode", "duration_ms": 1.1, "status": "success", "metadata": {}},
+                        {"name": "mask_or_raster_write", "duration_ms": 4.0, "status": "success", "metadata": {}},
+                        {"name": "cleanup", "duration_ms": 0.7, "status": "success", "metadata": {}},
+                    ],
+                },
                 "launcher": "env_python",
                 "command": ["python", "infer_mps.py"],
             },
@@ -978,7 +1005,19 @@ def test_run_detection_bandon_writes_manifest_and_nested_timing_without_auto_bun
         "release_resolution.t2.metadata_lookup",
         "release_resolution.t2.zoom_attempt",
         "release_resolution.t2.decision",
+        "inference",
+        "inference.bandon.input_write",
+        "inference.bandon.runner_startup",
+        "inference.bandon.model_load_or_reuse",
+        "inference.bandon.preprocess",
+        "inference.bandon.forward",
+        "inference.bandon.output_decode",
+        "inference.bandon.mask_or_raster_write",
+        "inference.bandon.cleanup",
     }.issubset(stage_names)
+    forward_stage = next(stage for stage in timing_payload["stages"] if stage["name"] == "inference.bandon.forward")
+    assert forward_stage["metadata"]["input_tensor_shapes"] == [[1, 6, 4, 4]]
+    assert forward_stage["metadata"]["input_tensor_devices_before_forward"] == ["mps"]
 
 
 def test_run_detection_returns_download_error_on_connection_failure(tmp_path, monkeypatch) -> None:
@@ -1132,6 +1171,7 @@ def test_run_detection_bandon_preserves_valid_change_components_inside_scene(tmp
                     "mps_built": True,
                     "mps_available": True,
                 },
+                "child_timing": None,
                 "launcher": "env_python",
                 "command": ["python", "infer_mps.py"],
             },

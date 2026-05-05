@@ -20,10 +20,11 @@ type ErrorDetail = {
 };
 
 export async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
+  const isFormDataBody = options?.body instanceof FormData;
   const response = await fetch(new URL(path, getFastApiBaseUrl()).toString(), {
     ...options,
     headers: {
-      "Content-Type": "application/json",
+      ...(isFormDataBody ? {} : { "Content-Type": "application/json" }),
       ...(options?.headers ?? {}),
     },
   });

@@ -1,6 +1,10 @@
-import type { FeatureCollection, Polygon } from "geojson";
+import bbox from "@turf/bbox";
+import turfBuffer from "@turf/buffer";
+import { featureCollection } from "@turf/helpers";
+import type { Feature, FeatureCollection, GeoJsonProperties, MultiPolygon, Polygon } from "geojson";
 import maplibregl, { type GeoJSONSource, type Map as MapLibreMap } from "maplibre-gl";
 import { Check, Layers3, Loader2, Maximize2, Minus, Plus, Search, X } from "lucide-react";
+import { Protocol } from "pmtiles";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { useAppStore } from "@/app/store";
@@ -9,7 +13,7 @@ import { Input } from "@/components/ui/input";
 import { createOpenStreetMapStyle, mapboxProvider } from "@/lib/basemap";
 import { buildBackendFileUrl } from "@/lib/backend-files";
 import { cn } from "@/lib/utils";
-import type { TemporalMapPresentation } from "@/features/temporal/types";
+import type { ReferenceLayerPresentation, TemporalMapPresentation } from "@/features/temporal/types";
 
 const EMPTY_FEATURE_COLLECTION: FeatureCollection = {
   type: "FeatureCollection",
@@ -21,6 +25,8 @@ const BUILDING_CHANGE_BUFFER_FILL_COLORS = {
   "15m": "#facc15",
   "20m": "#2563eb",
 } as const;
+
+const NON_CUMULATIVE_BUFFER_FILL_OPACITY = 1;
 
 type SearchResult = {
   id: string;
@@ -96,6 +102,20 @@ type LayerEntry = {
   description?: string;
 };
 
+type ReferenceLayerGeoJsonData = Record<string, FeatureCollection>;
+
+let pmtilesProtocolRegistered = false;
+let pmtilesProtocol: Protocol | null = null;
+
+function ensurePmtilesProtocol() {
+  if (pmtilesProtocolRegistered) {
+    return;
+  }
+  pmtilesProtocol = new Protocol();
+  maplibregl.addProtocol("pmtiles", pmtilesProtocol.tile);
+  pmtilesProtocolRegistered = true;
+}
+
 function polygonFeatureCollection(polygon: Polygon | null): FeatureCollection {
   if (!polygon) {
     return EMPTY_FEATURE_COLLECTION;
@@ -153,6 +173,155 @@ function ensureFeatureCollection(value: FeatureCollection | null | undefined): F
     return value;
   }
   return EMPTY_FEATURE_COLLECTION;
+}
+
+function isPolygonFeature(feature: Feature): feature is Feature<Polygon | MultiPolygon> {
+  return feature.geometry?.type === "Polygon" || feature.geometry?.type === "MultiPolygon";
+}
+
+function isDerivedTemporalGeometry(properties: GeoJsonProperties | null | undefined): boolean {
+  if (!properties) {
+    return false;
+  }
+
+  const kind = typeof properties.kind === "string" ? properties.kind.toLowerCase() : "";
+  const type = typeof properties.type === "string" ? properties.type.toLowerCase() : "";
+  const changeType = typeof properties.change_type === "string" ? properties.change_type.toLowerCase() : "";
+  const changeTypeCamel = typeof properties.changeType === "string" ? properties.changeType.toLowerCase() : "";
+
+  if (properties.manualReplacement === true || properties.manual_override === true || properties.manualOverride === true) {
+    return true;
+  }
+  if (properties.cumulative === true || properties.convex === true || properties.concave === true) {
+    return true;
+  }
+  if (properties.group === true || properties.grouped === true || properties.group_id != null || properties.block_id != null) {
+    return true;
+  }
+  return (
+    kind.includes("buffer") ||
+    kind.includes("block") ||
+    kind.includes("footprint") ||
+    kind.includes("union") ||
+    kind.includes("convex") ||
+    kind.includes("concave") ||
+    kind.includes("envelope") ||
+    kind.includes("manual") ||
+    kind.includes("override") ||
+    type.includes("buffer") ||
+    type.includes("union") ||
+    type.includes("convex") ||
+    type.includes("concave") ||
+    type.includes("manual") ||
+    changeType.includes("buffer") ||
+    changeTypeCamel.includes("buffer")
+  );
+}
+
+function isExplicitAddition(properties: GeoJsonProperties | null | undefined): boolean {
+  if (!properties) {
+    return false;
+  }
+  const changeType = typeof properties.change_type === "string" ? properties.change_type.toLowerCase() : "";
+  const changeTypeCamel = typeof properties.changeType === "string" ? properties.changeType.toLowerCase() : "";
+  const status = typeof properties.status === "string" ? properties.status.toLowerCase() : "";
+  const type = typeof properties.type === "string" ? properties.type.toLowerCase() : "";
+  const kind = typeof properties.kind === "string" ? properties.kind.toLowerCase() : "";
+  return (
+    changeType === "addition" ||
+    changeTypeCamel === "addition" ||
+    status === "added" ||
+    type === "addition" ||
+    kind === "addition"
+  );
+}
+
+function isExplicitNonAddition(properties: GeoJsonProperties | null | undefined): boolean {
+  if (!properties) {
+    return false;
+  }
+  const markers = [
+    typeof properties.change_type === "string" ? properties.change_type.toLowerCase() : "",
+    typeof properties.changeType === "string" ? properties.changeType.toLowerCase() : "",
+    typeof properties.status === "string" ? properties.status.toLowerCase() : "",
+    typeof properties.type === "string" ? properties.type.toLowerCase() : "",
+    typeof properties.kind === "string" ? properties.kind.toLowerCase() : "",
+  ].filter(Boolean);
+  return markers.length > 0 && markers.every((marker) => marker !== "addition" && marker !== "added");
+}
+
+function getRawAdditionFeatures(features: FeatureCollection["features"]): FeatureCollection["features"] {
+  return features.filter((feature) => {
+    if (!isPolygonFeature(feature)) {
+      return false;
+    }
+    const properties = feature.properties ?? {};
+    if (isDerivedTemporalGeometry(properties)) {
+      return false;
+    }
+    if (isExplicitAddition(properties)) {
+      return true;
+    }
+    if (isExplicitNonAddition(properties)) {
+      return false;
+    }
+    return true;
+  });
+}
+
+function buildRawAdditionFeatureCollection(source: FeatureCollection | null | undefined): FeatureCollection {
+  const normalized = ensureFeatureCollection(source);
+  return featureCollection(getRawAdditionFeatures(normalized.features)) as FeatureCollection;
+}
+
+function normalizeBufferedFeatureCollection(
+  value: Feature<Polygon | MultiPolygon> | FeatureCollection<Polygon | MultiPolygon> | undefined,
+): FeatureCollection {
+  if (!value) {
+    return EMPTY_FEATURE_COLLECTION;
+  }
+  if (value.type === "FeatureCollection") {
+    return value as FeatureCollection;
+  }
+  return featureCollection([value]) as FeatureCollection;
+}
+
+function buildNonCumulativeAdditionBuffer(
+  additions: FeatureCollection,
+  distanceMeters: 10 | 15 | 20,
+): FeatureCollection {
+  const rawAdditions = getRawAdditionFeatures(additions.features);
+  if (rawAdditions.length === 0) {
+    if (import.meta.env.DEV) {
+      console.debug("[temporal-buffer] empty raw additions", {
+        distanceMeters,
+        rawAdditionCount: 0,
+        bufferFeatureCount: 0,
+        rawAdditionBBox: null,
+        bufferBBox: null,
+        sampleRawAdditionProperties: [],
+      });
+    }
+    return EMPTY_FEATURE_COLLECTION;
+  }
+
+  const rawAdditionCollection = featureCollection(rawAdditions) as FeatureCollection<Polygon | MultiPolygon>;
+  const buffered = normalizeBufferedFeatureCollection(
+    turfBuffer(rawAdditionCollection, distanceMeters, { units: "meters" }),
+  );
+
+  if (import.meta.env.DEV) {
+    console.debug("[temporal-buffer] generated non-cumulative buffer", {
+      distanceMeters,
+      rawAdditionCount: rawAdditionCollection.features.length,
+      bufferFeatureCount: buffered.features.length,
+      rawAdditionBBox: bbox(rawAdditionCollection),
+      bufferBBox: buffered.features.length > 0 ? bbox(buffered) : null,
+      sampleRawAdditionProperties: rawAdditionCollection.features.slice(0, 3).map((feature) => feature.properties ?? {}),
+    });
+  }
+
+  return buffered;
 }
 
 function sourceData(map: maplibregl.Map, sourceId: string, data: FeatureCollection) {
@@ -318,6 +487,136 @@ function setLayerVisibility(map: MapLibreMap, layerId: string, visible: boolean)
   map.setLayoutProperty(layerId, "visibility", visible ? "visible" : "none");
 }
 
+function referenceSourceId(layerId: string) {
+  return `reference-layer-${layerId}`;
+}
+
+function syncReferenceLayers(map: MapLibreMap, layers: ReferenceLayerPresentation[], data: ReferenceLayerGeoJsonData) {
+  const activeSourceIds = new Set(layers.map((layer) => referenceSourceId(layer.layer_id)));
+  const styleLayers = map.getStyle()?.layers ?? [];
+  styleLayers
+    .filter((layer) => layer.id.startsWith("reference-layer-"))
+    .forEach((layer) => {
+      const sourceId = "source" in layer && typeof layer.source === "string" ? layer.source : "";
+      if (!activeSourceIds.has(sourceId) && map.getLayer(layer.id)) {
+        map.removeLayer(layer.id);
+      }
+    });
+  Object.keys((map.getStyle()?.sources ?? {}) as Record<string, unknown>)
+    .filter((sourceId) => sourceId.startsWith("reference-layer-") && !activeSourceIds.has(sourceId))
+    .forEach((sourceId) => {
+      if (map.getSource(sourceId)) {
+        map.removeSource(sourceId);
+      }
+    });
+
+  layers.forEach((layer) => {
+    if (layer.layer_kind !== "vector") {
+      return;
+    }
+    const sourceId = referenceSourceId(layer.layer_id);
+    const isGeojson = layer.storage_strategy === "geojson";
+    const isPmtiles = layer.storage_strategy === "pmtiles" && Boolean(layer.resolvedPmtilesUrl) && Boolean(layer.source_layer);
+    if (!isGeojson && !isPmtiles) {
+      return;
+    }
+
+    if (isGeojson) {
+      const sourceDataValue = data[layer.layer_id] ?? EMPTY_FEATURE_COLLECTION;
+      if (!map.getSource(sourceId)) {
+        map.addSource(sourceId, { type: "geojson", data: sourceDataValue });
+      } else {
+        sourceData(map, sourceId, sourceDataValue);
+      }
+    } else if (!map.getSource(sourceId)) {
+      map.addSource(sourceId, {
+        type: "vector",
+        url: `pmtiles://${layer.resolvedPmtilesUrl as string}`,
+      });
+    }
+
+    const visible = layer.visible ? "visible" : "none";
+    const opacity = Math.max(0, Math.min(1, layer.opacity));
+    const fillLayerId = `${sourceId}-fill`;
+    const lineLayerId = `${sourceId}-line`;
+    const circleLayerId = `${sourceId}-circle`;
+    const beforeLayer = map.getLayer("detected-polygons-fill") ? "detected-polygons-fill" : undefined;
+    const vectorSourceLayer = isPmtiles ? layer.source_layer ?? undefined : undefined;
+
+    if (!map.getLayer(fillLayerId)) {
+      map.addLayer(
+        {
+          id: fillLayerId,
+          type: "fill",
+          source: sourceId,
+          ...(vectorSourceLayer ? { "source-layer": vectorSourceLayer } : {}),
+          layout: { visibility: visible },
+          paint: {
+            "fill-color": layer.style.fill_color,
+            "fill-opacity": layer.style.fill_opacity * opacity,
+            "fill-outline-color": layer.style.outline_color,
+          },
+          filter: ["in", ["geometry-type"], ["literal", ["Polygon", "MultiPolygon"]]],
+        },
+        beforeLayer,
+      );
+    }
+    if (!map.getLayer(lineLayerId)) {
+      map.addLayer(
+        {
+          id: lineLayerId,
+          type: "line",
+          source: sourceId,
+          ...(vectorSourceLayer ? { "source-layer": vectorSourceLayer } : {}),
+          layout: { visibility: visible },
+          paint: {
+            "line-color": layer.style.color,
+            "line-opacity": opacity,
+            "line-width": layer.style.line_width,
+          },
+          filter: ["in", ["geometry-type"], ["literal", ["LineString", "MultiLineString", "Polygon", "MultiPolygon"]]],
+        },
+        beforeLayer,
+      );
+    }
+    if (!map.getLayer(circleLayerId)) {
+      map.addLayer(
+        {
+          id: circleLayerId,
+          type: "circle",
+          source: sourceId,
+          ...(vectorSourceLayer ? { "source-layer": vectorSourceLayer } : {}),
+          layout: { visibility: visible },
+          paint: {
+            "circle-color": layer.style.color,
+            "circle-opacity": opacity,
+            "circle-radius": layer.style.point_radius,
+          },
+          filter: ["in", ["geometry-type"], ["literal", ["Point", "MultiPoint"]]],
+        },
+        beforeLayer,
+      );
+    }
+
+    [fillLayerId, lineLayerId, circleLayerId].forEach((layerId) => setLayerVisibility(map, layerId, layer.visible));
+    if (map.getLayer(fillLayerId)) {
+      map.setPaintProperty(fillLayerId, "fill-color", layer.style.fill_color);
+      map.setPaintProperty(fillLayerId, "fill-opacity", layer.style.fill_opacity * opacity);
+      map.setPaintProperty(fillLayerId, "fill-outline-color", layer.style.outline_color);
+    }
+    if (map.getLayer(lineLayerId)) {
+      map.setPaintProperty(lineLayerId, "line-color", layer.style.color);
+      map.setPaintProperty(lineLayerId, "line-opacity", opacity);
+      map.setPaintProperty(lineLayerId, "line-width", layer.style.line_width);
+    }
+    if (map.getLayer(circleLayerId)) {
+      map.setPaintProperty(circleLayerId, "circle-color", layer.style.color);
+      map.setPaintProperty(circleLayerId, "circle-opacity", opacity);
+      map.setPaintProperty(circleLayerId, "circle-radius", layer.style.point_radius);
+    }
+  });
+}
+
 function ensureGeoJsonSource(map: MapLibreMap, sourceId: string) {
   if (map.getSource(sourceId)) {
     return;
@@ -475,7 +774,7 @@ function ensureOperationalLayers(map: MapLibreMap) {
   });
   ensureFillLayer(map, "buffer-10m-fill", "buffer-10m", {
     "fill-color": BUILDING_CHANGE_BUFFER_FILL_COLORS["10m"],
-    "fill-opacity": 1,
+    "fill-opacity": NON_CUMULATIVE_BUFFER_FILL_OPACITY,
     "fill-outline-color": "#16a34a",
   });
   ensureLineLayer(map, "buffer-10m-line", "buffer-10m", {
@@ -485,7 +784,7 @@ function ensureOperationalLayers(map: MapLibreMap) {
   });
   ensureFillLayer(map, "buffer-15m-fill", "buffer-15m", {
     "fill-color": BUILDING_CHANGE_BUFFER_FILL_COLORS["15m"],
-    "fill-opacity": 1,
+    "fill-opacity": NON_CUMULATIVE_BUFFER_FILL_OPACITY,
     "fill-outline-color": "#d97706",
   });
   ensureLineLayer(map, "buffer-15m-line", "buffer-15m", {
@@ -495,7 +794,7 @@ function ensureOperationalLayers(map: MapLibreMap) {
   });
   ensureFillLayer(map, "buffer-20m-fill", "buffer-20m", {
     "fill-color": BUILDING_CHANGE_BUFFER_FILL_COLORS["20m"],
-    "fill-opacity": 1,
+    "fill-opacity": NON_CUMULATIVE_BUFFER_FILL_OPACITY,
     "fill-outline-color": "#a855f7",
   });
   ensureLineLayer(map, "buffer-20m-line", "buffer-20m", {
@@ -503,6 +802,15 @@ function ensureOperationalLayers(map: MapLibreMap) {
     "line-width": 3.5,
     "line-dasharray": [6, 3],
   });
+  if (map.getLayer("temporal-additions-fill")) {
+    ["buffer-10m-fill", "buffer-10m-line", "buffer-15m-fill", "buffer-15m-line", "buffer-20m-fill", "buffer-20m-line"].forEach(
+      (layerId) => {
+        if (map.getLayer(layerId)) {
+          map.moveLayer(layerId, "temporal-additions-fill");
+        }
+      },
+    );
+  }
 }
 
 function syncMapPresentation(
@@ -517,6 +825,8 @@ function syncMapPresentation(
     temporalVectors: TemporalVectorSources;
     overlayBounds: [[number, number], [number, number], [number, number], [number, number]] | null;
     overlaySources: OverlaySources;
+    referenceLayers: ReferenceLayerPresentation[];
+    referenceLayerData: ReferenceLayerGeoJsonData;
     layerState: LayerToggleState;
   },
 ) {
@@ -548,6 +858,7 @@ function syncMapPresentation(
   sourceData(map, "temporal-cumulative-growth-blocks", params.temporalVectors.temporalCumulativeGrowthBlocks);
   sourceData(map, "temporal-cumulative-growth-envelope", params.temporalVectors.temporalCumulativeGrowthEnvelope);
   sourceData(map, "temporal-manual-override", params.temporalVectors.temporalManualOverride);
+  syncReferenceLayers(map, params.referenceLayers, params.referenceLayerData);
 
   syncImageOverlay(
     map,
@@ -821,6 +1132,7 @@ export function MapView({
   const [highlightedResultIndex, setHighlightedResultIndex] = useState(-1);
   const [drawingInstruction, setDrawingInstruction] = useState<string | null>(null);
   const [liveRectanglePreview, setLiveRectanglePreview] = useState<[number, number] | null>(null);
+  const [referenceLayerData, setReferenceLayerData] = useState<ReferenceLayerGeoJsonData>({});
   const latestPresentationRef = useRef<{
     aoi: Polygon | null;
     draftVertices: [number, number][];
@@ -831,12 +1143,15 @@ export function MapView({
     temporalVectors: TemporalVectorSources;
     overlayBounds: [[number, number], [number, number], [number, number], [number, number]] | null;
     overlaySources: OverlaySources;
+    referenceLayers: ReferenceLayerPresentation[];
+    referenceLayerData: ReferenceLayerGeoJsonData;
     layerState: LayerToggleState;
   } | null>(null);
 
   const aoi = useAppStore((state) => state.aoi);
   const draftVertices = useAppStore((state) => state.draftVertices);
   const mapFocusRequestId = useAppStore((state) => state.mapFocusRequestId);
+  const referenceLayerFocus = useAppStore((state) => state.referenceLayerFocus);
   const drawingMode = useAppStore((state) => state.drawingMode);
   const appendDraftVertex = useAppStore((state) => state.appendDraftVertex);
   const setDraftVertices = useAppStore((state) => state.setDraftVertices);
@@ -844,9 +1159,13 @@ export function MapView({
   const stopDrawing = useAppStore((state) => state.stopDrawing);
   const updateDraftVertex = useAppStore((state) => state.updateDraftVertex);
   const result = useAppStore((state) => state.result);
+  const temporalRawAdditions = useMemo(
+    () => buildRawAdditionFeatureCollection(temporalPresentation?.additions),
+    [temporalPresentation?.additions],
+  );
   const temporalVectors = useMemo<TemporalVectorSources>(
     () => ({
-      temporalAdditions: ensureFeatureCollection(temporalPresentation?.additions),
+      temporalAdditions: temporalRawAdditions,
       temporalCumulativeBuffer10m: ensureFeatureCollection(temporalPresentation?.cumulativeBuffer10m),
       temporalCumulativeBuffer15m: ensureFeatureCollection(temporalPresentation?.cumulativeBuffer15m),
       temporalCumulativeBuffer20m: ensureFeatureCollection(temporalPresentation?.cumulativeBuffer20m),
@@ -859,7 +1178,7 @@ export function MapView({
       temporalCumulativeGrowthEnvelope: ensureFeatureCollection(temporalPresentation?.cumulativeGrowthEnvelope),
       temporalManualOverride: ensureFeatureCollection(temporalPresentation?.manualOverride),
     }),
-    [temporalPresentation],
+    [temporalPresentation, temporalRawAdditions],
   );
   const selectedTemporalMilestoneReady =
     temporalPresentation?.selectedMilestoneStatus === "complete" ||
@@ -892,17 +1211,17 @@ export function MapView({
       buffer10m:
         workflowMode === "pairwise"
           ? bufferFeatureCollection(result?.buffer_layers_geojson, "10m")
-          : ensureFeatureCollection(temporalPresentation?.bufferLayers?.["10m"]),
+          : buildNonCumulativeAdditionBuffer(temporalRawAdditions, 10),
       buffer15m:
         workflowMode === "pairwise"
           ? bufferFeatureCollection(result?.buffer_layers_geojson, "15m")
-          : ensureFeatureCollection(temporalPresentation?.bufferLayers?.["15m"]),
+          : buildNonCumulativeAdditionBuffer(temporalRawAdditions, 15),
       buffer20m:
         workflowMode === "pairwise"
           ? bufferFeatureCollection(result?.buffer_layers_geojson, "20m")
-          : ensureFeatureCollection(temporalPresentation?.bufferLayers?.["20m"]),
+          : buildNonCumulativeAdditionBuffer(temporalRawAdditions, 20),
     }),
-    [result?.buffer_layers_geojson, temporalPresentation?.bufferLayers, workflowMode],
+    [result?.buffer_layers_geojson, temporalRawAdditions, workflowMode],
   );
   const overlayBounds = useMemo(() => {
     if (workflowMode === "pairwise" && hasValidRasterBounds(result?.preview_images?.raster_bounds_wgs84)) {
@@ -953,6 +1272,47 @@ export function MapView({
     temporalVectors.temporalCumulativeGrowthBlocks.features.length > 0 ||
     temporalVectors.temporalCumulativeGrowthEnvelope.features.length > 0 ||
     temporalVectors.temporalManualOverride.features.length > 0;
+
+  const referenceLayers = useMemo(
+    () => (workflowMode === "temporal" ? temporalPresentation?.referenceLayers ?? [] : []),
+    [temporalPresentation?.referenceLayers, workflowMode],
+  );
+
+  useEffect(() => {
+    if (referenceLayers.some((layer) => layer.storage_strategy === "pmtiles" && layer.resolvedPmtilesUrl)) {
+      ensurePmtilesProtocol();
+    }
+  }, [referenceLayers]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const layersToLoad = referenceLayers.filter(
+      (layer) => layer.storage_strategy === "geojson" && layer.resolvedDisplayUrl && !referenceLayerData[layer.layer_id],
+    );
+    if (!layersToLoad.length) {
+      return;
+    }
+    void Promise.all(
+      layersToLoad.map(async (layer) => {
+        const response = await fetch(layer.resolvedDisplayUrl as string);
+        if (!response.ok) {
+          throw new Error(`Reference layer ${layer.name} failed to load.`);
+        }
+        return [layer.layer_id, ensureFeatureCollection(await response.json())] as const;
+      }),
+    )
+      .then((entries) => {
+        if (!cancelled) {
+          setReferenceLayerData((current) => ({ ...current, ...Object.fromEntries(entries) }));
+        }
+      })
+      .catch(() => {
+        // The layer remains listed even if its display artifact is unavailable.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [referenceLayerData, referenceLayers]);
 
   useEffect(() => {
     setLayerState((current) => ({
@@ -1307,11 +1667,13 @@ export function MapView({
       temporalVectors,
       overlayBounds,
       overlaySources,
+      referenceLayers,
+      referenceLayerData,
       layerState,
     };
 
     syncMapPresentation(map, latestPresentationRef.current);
-  }, [aoi, draftVertices, detectedPolygons, buildingBlocks, bufferLayers, pairwiseBuffers, temporalVectors, mapError, overlayBounds, overlaySources, layerState]);
+  }, [aoi, draftVertices, detectedPolygons, buildingBlocks, bufferLayers, pairwiseBuffers, temporalVectors, mapError, overlayBounds, overlaySources, referenceLayers, referenceLayerData, layerState]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -1348,6 +1710,18 @@ export function MapView({
     }
     fitPolygon(map, aoi);
   }, [aoi, mapError, mapFocusRequestId]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    const bounds = referenceLayerFocus.bounds;
+    if (!map || !bounds || mapError) {
+      return;
+    }
+    map.fitBounds(new maplibregl.LngLatBounds([bounds[0], bounds[1]], [bounds[2], bounds[3]]), {
+      padding: 80,
+      duration: 600,
+    });
+  }, [referenceLayerFocus.requestId, mapError]);
 
   useEffect(() => {
     if (searchValue.trim().length < 3) {
@@ -1411,6 +1785,7 @@ export function MapView({
   const draftModeActive = drawingMode === "drawing" || drawingMode === "editing";
   const temporalReferenceImageryHasSource = Boolean(overlaySources.temporalReferenceImagery);
   const temporalRasterOverlayAvailable = hasTemporalMosaicLayerContext && temporalReferenceImageryHasSource;
+  const referenceLayerSectionEntries = referenceLayers.filter((layer) => layer.storage_strategy === "geojson");
   const imagerySectionEntries =
     hasPairwiseLayerContext
       ? ([
@@ -1553,7 +1928,7 @@ export function MapView({
         ] satisfies LayerEntry[])
       : ([] satisfies LayerEntry[]);
   const baseSectionEntries = ([{ key: "labels", label: t("download.reference_labels"), enabled: true }] satisfies LayerEntry[]);
-  const showLayerPanel = hasPairwiseLayerContext || hasTemporalMosaicLayerContext;
+  const showLayerPanel = hasPairwiseLayerContext || hasTemporalMosaicLayerContext || referenceLayers.length > 0;
   const renderLayerEntry = (entry: LayerEntry) => (
     <label
       key={entry.key}
@@ -1769,6 +2144,22 @@ export function MapView({
                         </div>
                       </details>
                     ) : null}
+                  </div>
+                ) : null}
+                {referenceLayerSectionEntries.length ? (
+                  <div>
+                    <p className="px-2 pb-1 label-xs-upper">
+                      {t("reference_layer.map_section")}
+                    </p>
+                    {referenceLayerSectionEntries.map((layer) => (
+                      <div key={layer.layer_id} className="rounded px-2 py-2 text-sm text-foreground">
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="min-w-0 truncate">{layer.name}</span>
+                          <span className="text-caption text-muted-foreground">{Math.round(layer.opacity * 100)}%</span>
+                        </div>
+                        <p className="mt-0.5 text-caption text-muted-foreground">{layer.geometry_type} / {layer.storage_strategy}</p>
+                      </div>
+                    ))}
                   </div>
                 ) : null}
                 <div>

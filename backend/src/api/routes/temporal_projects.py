@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request, status
+from fastapi import File, Form, UploadFile
 from pydantic import BaseModel, ConfigDict
 
 from src.api.deps import get_app_settings
@@ -16,7 +17,19 @@ from src.core_api import (
     validate_temporal_project_api,
 )
 from src.services.temporal_projects import create_temporal_project_bundle
+from src.services.reference_layers import (
+    ReferenceLayerError,
+    delete_reference_layer,
+    get_reference_layer,
+    import_reference_layer,
+    list_reference_layers,
+    preflight_reference_layer,
+    update_reference_layer,
+)
 from src.schemas import (
+    ReferenceLayer,
+    ReferenceLayerPatchRequest,
+    ReferenceLayerPreflightResponse,
     TemporalOverrideRequest,
     TemporalProject,
     TemporalProjectRunResponse,
@@ -105,6 +118,91 @@ def import_override(
         override_geojson=body.override_geojson,
     )
     return import_temporal_override_api(request, settings=settings)
+
+
+@router.get("/{project_id}/reference-layers")
+def list_project_reference_layers(project_id: str, settings=Depends(get_app_settings)) -> list[ReferenceLayer]:
+    try:
+        return list_reference_layers(project_id, settings)
+    except FileNotFoundError as exc:
+        raise_api_error(status.HTTP_404_NOT_FOUND, "not_found", str(exc))
+    except ReferenceLayerError as exc:
+        raise_api_error(exc.status_code, exc.code, exc.message, exc.details)
+
+
+@router.post("/{project_id}/reference-layers/preflight")
+async def preflight_project_reference_layer(
+    project_id: str,
+    file: UploadFile = File(...),
+    scope: str = Form("aoi_clipped"),
+    settings=Depends(get_app_settings),
+) -> ReferenceLayerPreflightResponse:
+    try:
+        return await preflight_reference_layer(project_id, file, settings=settings, scope=scope)
+    except FileNotFoundError as exc:
+        raise_api_error(status.HTTP_404_NOT_FOUND, "not_found", str(exc))
+    except ReferenceLayerError as exc:
+        raise_api_error(exc.status_code, exc.code, exc.message, exc.details)
+
+
+@router.post("/{project_id}/reference-layers")
+async def import_project_reference_layer(
+    project_id: str,
+    file: UploadFile = File(...),
+    name: str = Form(...),
+    scope: str = Form("aoi_clipped"),
+    rendering_strategy: str = Form("auto"),
+    settings=Depends(get_app_settings),
+) -> ReferenceLayer:
+    try:
+        return await import_reference_layer(
+            project_id,
+            file,
+            settings=settings,
+            name=name,
+            scope=scope,
+            rendering_strategy=rendering_strategy,
+        )
+    except FileNotFoundError as exc:
+        raise_api_error(status.HTTP_404_NOT_FOUND, "not_found", str(exc))
+    except ReferenceLayerError as exc:
+        raise_api_error(exc.status_code, exc.code, exc.message, exc.details)
+
+
+@router.get("/{project_id}/reference-layers/{layer_id}")
+def get_project_reference_layer(project_id: str, layer_id: str, settings=Depends(get_app_settings)) -> ReferenceLayer:
+    try:
+        return get_reference_layer(project_id, layer_id, settings)
+    except FileNotFoundError as exc:
+        raise_api_error(status.HTTP_404_NOT_FOUND, "not_found", str(exc))
+    except ReferenceLayerError as exc:
+        raise_api_error(exc.status_code, exc.code, exc.message, exc.details)
+
+
+@router.patch("/{project_id}/reference-layers/{layer_id}")
+def patch_project_reference_layer(
+    project_id: str,
+    layer_id: str,
+    body: ReferenceLayerPatchRequest,
+    settings=Depends(get_app_settings),
+) -> ReferenceLayer:
+    try:
+        return update_reference_layer(project_id, layer_id, body, settings)
+    except FileNotFoundError as exc:
+        raise_api_error(status.HTTP_404_NOT_FOUND, "not_found", str(exc))
+    except ReferenceLayerError as exc:
+        raise_api_error(exc.status_code, exc.code, exc.message, exc.details)
+
+
+@router.delete("/{project_id}/reference-layers/{layer_id}")
+def delete_project_reference_layer(project_id: str, layer_id: str, settings=Depends(get_app_settings)) -> dict[str, bool]:
+    try:
+        delete_reference_layer(project_id, layer_id, settings)
+        return {"deleted": True}
+    except FileNotFoundError as exc:
+        raise_api_error(status.HTTP_404_NOT_FOUND, "not_found", str(exc))
+    except ReferenceLayerError as exc:
+        raise_api_error(exc.status_code, exc.code, exc.message, exc.details)
 
 
 @router.post("/{project_id}/export-bundle")

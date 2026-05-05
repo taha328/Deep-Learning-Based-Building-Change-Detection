@@ -38,6 +38,7 @@ interface AppState {
   drawingMode: DrawingMode;
   drawingSubMode: DrawingSubMode;
   mapFocusRequestId: number;
+  referenceLayerFocus: { requestId: number; bounds: [number, number, number, number] | null };
   temporalProject: TemporalProject | null;
   temporalProjectBootstrap: TemporalProject | null;
   selectedReleaseIds: string[];
@@ -60,6 +61,7 @@ interface AppState {
   finishDrawing: () => void;
   setAoiFromImport: (polygon: GeoJSON.Polygon) => void;
   requestMapFocusToAoi: () => void;
+  requestMapFocusToReferenceLayer: (bounds: [number, number, number, number]) => void;
   setTemporalProject: (project: TemporalProjectUpdate) => void;
   setTemporalProjectBootstrap: (project: TemporalProject | null) => void;
   setSelectedReleaseIds: (releaseIds: string[]) => void;
@@ -109,6 +111,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   drawingMode: "idle",
   drawingSubMode: "polygon",
   mapFocusRequestId: 0,
+  referenceLayerFocus: { requestId: 0, bounds: null },
   temporalProject: null,
   temporalProjectBootstrap: null,
   selectedReleaseIds: [],
@@ -195,6 +198,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       runProgress: createIdleRunProgress(),
     }),
   requestMapFocusToAoi: () => set((state) => ({ mapFocusRequestId: state.mapFocusRequestId + 1 })),
+  requestMapFocusToReferenceLayer: (bounds) =>
+    set((state) => ({ referenceLayerFocus: { requestId: state.referenceLayerFocus.requestId + 1, bounds } })),
   setTemporalProject: (project) =>
     set((state) => ({
       temporalProject: typeof project === "function" ? project(state.temporalProject) : project,

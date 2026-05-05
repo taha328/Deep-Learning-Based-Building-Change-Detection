@@ -72,7 +72,6 @@ def _cancel_if_requested(job_id: str, settings: Settings) -> None:
 def _publish_progress(self: Any, job_id: str, progress: int, stage: str, message: str, settings: Settings) -> None:
     _cancel_if_requested(job_id, settings)
     update_progress(job_id, progress, stage, message, settings=settings)
-    self.update_state(state="PROGRESS", meta={"progress": progress, "stage": stage, "message": message})
 
 
 def _artifact_summaries(items: list[Any]) -> list[dict[str, Any]]:
@@ -175,7 +174,6 @@ def run_temporal_project_job(self, job_id: str, project_id: str, settings_payloa
 
         with session_scope(settings) as session:
             mark_job_running(job_id=job_id, stage="starting", progress=5, message="Backend worker started processing your request.", settings=settings, session=session)
-        self.update_state(state="PROGRESS", meta={"progress": 5, "stage": "starting", "message": "Backend worker started processing your request."})
         timer.mark("starting")
 
         _publish_progress(self, job_id, 12, "preflight", "Validating project state before the temporal run.", settings)
@@ -197,7 +195,6 @@ def run_temporal_project_job(self, job_id: str, project_id: str, settings_payloa
                     settings=settings,
                     session=session,
                 )
-            self.update_state(state="SUCCESS", meta={"progress": 100, "stage": "completed", "message": "Artifacts are ready."})
             return {"job_id": job_id, "status": "completed", "result_run_id": result_run_id, "project_id": response.project.project_id}
 
         with session_scope(settings) as session:
@@ -209,14 +206,11 @@ def run_temporal_project_job(self, job_id: str, project_id: str, settings_payloa
                 settings=settings,
                 session=session,
             )
-        self.update_state(state="FAILURE", meta={"progress": 100, "stage": "failed", "message": response.error_message or "Temporal project run failed."})
         return {"job_id": job_id, "status": "failed", "error_message": response.error_message}
     except JobCancelledError as exc:
-        self.update_state(state="REVOKED", meta={"progress": 100, "stage": "cancelled", "message": str(exc)})
         return {"job_id": job_id, "status": "cancelled"}
     except Exception as exc:  # noqa: BLE001
         mark_job_execution_failed(job_id, f"{type(exc).__name__}: {exc}", settings=settings)
-        self.update_state(state="FAILURE", meta={"progress": 100, "stage": "failed", "message": f"{type(exc).__name__}: {exc}"})
         raise
 
 
@@ -232,7 +226,6 @@ def run_detection_job(self, job_id: str, request_payload: dict[str, Any], settin
 
         with session_scope(settings) as session:
             mark_job_running(job_id=job_id, stage="starting", progress=5, message="Backend worker started processing your request.", settings=settings, session=session)
-        self.update_state(state="PROGRESS", meta={"progress": 5, "stage": "starting", "message": "Backend worker started processing your request."})
         timer.mark("starting")
 
         _publish_progress(self, job_id, 12, "preflight", "Validating request and preparing execution backend.", settings)
@@ -277,7 +270,6 @@ def run_detection_job(self, job_id: str, request_payload: dict[str, Any], settin
                     settings=settings,
                     session=session,
                 )
-            self.update_state(state="SUCCESS", meta={"progress": 100, "stage": "completed", "message": "Artifacts are ready."})
             return {"job_id": job_id, "status": "completed", "result_run_id": result_run_id}
 
         with session_scope(settings) as session:
@@ -289,12 +281,9 @@ def run_detection_job(self, job_id: str, request_payload: dict[str, Any], settin
                 settings=settings,
                 session=session,
             )
-        self.update_state(state="FAILURE", meta={"progress": 100, "stage": "failed", "message": response.error_message or "Detection run failed."})
         return {"job_id": job_id, "status": "failed", "error_message": response.error_message}
     except JobCancelledError as exc:
-        self.update_state(state="REVOKED", meta={"progress": 100, "stage": "cancelled", "message": str(exc)})
         return {"job_id": job_id, "status": "cancelled"}
     except Exception as exc:  # noqa: BLE001
         mark_job_execution_failed(job_id, f"{type(exc).__name__}: {exc}", settings=settings)
-        self.update_state(state="FAILURE", meta={"progress": 100, "stage": "failed", "message": f"{type(exc).__name__}: {exc}"})
         raise

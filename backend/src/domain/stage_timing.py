@@ -20,23 +20,21 @@ def _duration_ms(start_ns: int, end_ns: int) -> float:
     return round((end_ns - start_ns) / 1_000_000, 2)
 
 
+def sanitize_metadata_value(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {
+            str(key): sanitize_metadata_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [sanitize_metadata_value(item) for item in value]
+    return str(value)
+
+
 def _safe_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
-    safe: dict[str, Any] = {}
-    for key, value in metadata.items():
-        if value is None or isinstance(value, (str, int, float, bool)):
-            safe[key] = value
-        elif isinstance(value, (list, tuple)) and all(
-            item is None or isinstance(item, (str, int, float, bool)) for item in value
-        ):
-            safe[key] = list(value)
-        elif isinstance(value, dict) and all(
-            isinstance(item_key, str) and (item_value is None or isinstance(item_value, (str, int, float, bool)))
-            for item_key, item_value in value.items()
-        ):
-            safe[key] = dict(value)
-        else:
-            safe[key] = str(value)
-    return safe
+    return {key: sanitize_metadata_value(value) for key, value in metadata.items()}
 
 
 @dataclass

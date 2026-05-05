@@ -210,8 +210,8 @@ def test_validate_temporal_project_rejects_out_of_order_milestones(monkeypatch, 
 
 def test_run_temporal_project_builds_monotonic_cumulative_union(monkeypatch, tmp_path) -> None:
     settings = Settings(runtime_cache_dir=tmp_path)
-    project = save_temporal_project(_sample_project("monotonic-growth"), settings)
     monkeypatch.setattr("src.services.temporal_projects.list_releases", lambda _: _sample_releases(settings))
+    project = save_temporal_project(_sample_project("monotonic-growth"), settings)
 
     automated_layers = {
         "WB_2025_R01": _feature_collection(
@@ -263,9 +263,9 @@ def test_run_temporal_project_builds_monotonic_cumulative_union(monkeypatch, tmp
 
 def test_run_temporal_project_infers_legacy_bandon_execution_config_and_skips_reruns(monkeypatch, tmp_path) -> None:
     settings = Settings(runtime_cache_dir=tmp_path, model_backend_default="sam3")
-    project = save_temporal_project(_sample_project("legacy-bandon"), settings)
     releases = _sample_releases(settings)
     monkeypatch.setattr("src.services.temporal_projects.list_releases", lambda _: releases)
+    project = save_temporal_project(_sample_project("legacy-bandon"), settings)
 
     automated_layers = {
         "WB_2025_R01": _feature_collection(
@@ -315,6 +315,8 @@ def test_run_temporal_project_infers_legacy_bandon_execution_config_and_skips_re
 
 def test_run_temporal_project_only_executes_appended_milestone(monkeypatch, tmp_path) -> None:
     settings = Settings(runtime_cache_dir=tmp_path, model_backend_default="sam3")
+    releases = _sample_releases(settings)
+    monkeypatch.setattr("src.services.temporal_projects.list_releases", lambda _: releases)
     project = save_temporal_project(
         TemporalProject(
             project_id="append-only",
@@ -329,8 +331,6 @@ def test_run_temporal_project_only_executes_appended_milestone(monkeypatch, tmp_
         ),
         settings,
     )
-    releases = _sample_releases(settings)
-    monkeypatch.setattr("src.services.temporal_projects.list_releases", lambda _: releases)
 
     automated_layers = {
         "WB_2025_R01": _feature_collection(
@@ -479,6 +479,8 @@ def test_mapbox_latest_source_runs_after_latest_wayback_milestone(monkeypatch, t
 
 def test_run_temporal_project_reruns_only_dirty_prefix_boundary(monkeypatch, tmp_path) -> None:
     settings = Settings(runtime_cache_dir=tmp_path, model_backend_default="sam3")
+    releases = _sample_releases_with_2027(settings)
+    monkeypatch.setattr("src.services.temporal_projects.list_releases", lambda _: releases)
     project = save_temporal_project(
         TemporalProject(
             project_id="mid-sequence",
@@ -494,8 +496,6 @@ def test_run_temporal_project_reruns_only_dirty_prefix_boundary(monkeypatch, tmp
         ),
         settings,
     )
-    releases = _sample_releases_with_2027(settings)
-    monkeypatch.setattr("src.services.temporal_projects.list_releases", lambda _: releases)
 
     automated_layers = {
         "WB_2025_R01": _feature_collection(
@@ -735,8 +735,9 @@ def test_reference_imagery_hydration_falls_back_to_png_data_url_from_image_path(
     assert reference_imagery.image_png_data_url.startswith("data:image/png;base64,")
 
 
-def test_list_temporal_projects_deduplicates_saved_projects_and_hides_cached_pairwise_by_default(tmp_path) -> None:
+def test_list_temporal_projects_deduplicates_saved_projects_and_hides_cached_pairwise_by_default(monkeypatch, tmp_path) -> None:
     settings = Settings(runtime_cache_dir=tmp_path)
+    monkeypatch.setattr("src.services.temporal_projects.list_releases", lambda _: _sample_releases(settings))
     saved_project = save_temporal_project(_sample_project("temporal-listing"), settings)
 
     cached_response = RunResponse(
@@ -770,8 +771,9 @@ def test_list_temporal_projects_deduplicates_saved_projects_and_hides_cached_pai
     ]
 
 
-def test_save_temporal_project_avoids_overwriting_another_project_in_the_same_directory(tmp_path) -> None:
+def test_save_temporal_project_avoids_overwriting_another_project_in_the_same_directory(monkeypatch, tmp_path) -> None:
     settings = Settings(runtime_cache_dir=tmp_path)
+    monkeypatch.setattr("src.services.temporal_projects.list_releases", lambda _: _sample_releases(settings))
     shared_directory = str(tmp_path / "shared-project-dir")
 
     first_project = save_temporal_project(_sample_project("first-project"), settings)
@@ -893,8 +895,8 @@ def test_four_milestone_run_keeps_a_single_saved_temporal_project_entry(monkeypa
 
 def test_import_temporal_override_recomputes_downstream_milestones(monkeypatch, tmp_path) -> None:
     settings = Settings(runtime_cache_dir=tmp_path)
-    project = save_temporal_project(_sample_project("override-demo"), settings)
     monkeypatch.setattr("src.services.temporal_projects.list_releases", lambda _: _sample_releases(settings))
+    project = save_temporal_project(_sample_project("override-demo"), settings)
 
     automated_layers = {
         "WB_2025_R01": _feature_collection(

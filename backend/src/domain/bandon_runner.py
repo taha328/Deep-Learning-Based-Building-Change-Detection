@@ -62,6 +62,7 @@ class BandonRunResult:
     change_probability: np.ndarray
     change_mask: np.ndarray
     metadata: dict[str, Any]
+    child_timing: dict[str, Any] | None
     stdout: str
     stderr: str
     command: list[str]
@@ -346,6 +347,7 @@ def run_bandon_inference(
         raise RuntimeError(f"BANDON MTGCDNet did not write change_mask.png to {mask_path}")
 
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    child_timing = metadata.get("stage_timings") if isinstance(metadata.get("stage_timings"), dict) else None
     change_probability = np.load(probability_path).astype(np.float32)
     change_mask = np.asarray(Image.open(mask_path).convert("L"), dtype=np.uint8) > 0
 
@@ -366,6 +368,7 @@ def run_bandon_inference(
         change_probability=change_probability,
         change_mask=change_mask,
         metadata=metadata,
+        child_timing=child_timing,
         stdout=completed.stdout,
         stderr=completed.stderr,
         command=command,

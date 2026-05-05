@@ -16,6 +16,68 @@ export const releasesResponseSchema = z.object({
   releases: z.array(releaseSchema),
 });
 
+export const referenceLayerStyleSchema = z.object({
+  color: z.string(),
+  line_width: z.number(),
+  fill_color: z.string(),
+  fill_opacity: z.number(),
+  outline_color: z.string(),
+  point_radius: z.number(),
+});
+
+export const referenceLayerScopeSchema = z.enum(["aoi_clipped", "full_layer"]);
+export const referenceLayerStrategySchema = z.enum(["auto", "geojson", "pmtiles", "cog", "raster_tiles"]);
+
+export const referenceLayerSchema = z.object({
+  layer_id: z.string(),
+  project_id: z.string(),
+  name: z.string(),
+  original_filename: z.string(),
+  original_format: z.string(),
+  layer_kind: z.enum(["vector", "raster"]),
+  geometry_type: z.enum(["point", "line", "polygon", "mixed", "raster"]),
+  scope: referenceLayerScopeSchema,
+  storage_strategy: z.enum(["geojson", "gpkg", "postgis", "pmtiles", "mbtiles", "cog", "raster_tiles"]),
+  crs: z.string().nullable().optional(),
+  bounds_wgs84: z.array(z.number()).nullable().optional(),
+  feature_count: z.number().int().nullable().optional(),
+  file_size_bytes: z.number(),
+  source_path: z.string().nullable().optional(),
+  display_path: z.string().nullable().optional(),
+  display_url: z.string().nullable().optional(),
+  pmtiles_url: z.string().nullable().optional(),
+  tilejson_url: z.string().nullable().optional(),
+  tiles_url_template: z.string().nullable().optional(),
+  source_layer: z.string().nullable().optional(),
+  style: referenceLayerStyleSchema,
+  visible: z.boolean(),
+  opacity: z.number(),
+  created_at: z.string(),
+  updated_at: z.string(),
+  warnings: z.array(z.string()),
+});
+
+export const referenceLayerPreflightSchema = z.object({
+  original_filename: z.string(),
+  original_format: z.string(),
+  layer_kind: z.enum(["vector", "raster"]),
+  geometry_type: z.enum(["point", "line", "polygon", "mixed", "raster"]),
+  scope: referenceLayerScopeSchema,
+  storage_strategy: z.enum(["geojson", "gpkg", "postgis", "pmtiles", "mbtiles", "cog", "raster_tiles"]),
+  crs: z.string().nullable().optional(),
+  bounds_wgs84: z.array(z.number()).nullable().optional(),
+  feature_count: z.number().int().nullable().optional(),
+  file_size_bytes: z.number(),
+  tool_status: z.record(z.string()).default({}),
+  warnings: z.array(z.string()),
+  errors: z.array(z.string()),
+});
+
+export type ReferenceLayer = z.infer<typeof referenceLayerSchema>;
+export type ReferenceLayerPreflight = z.infer<typeof referenceLayerPreflightSchema>;
+export type ReferenceLayerScope = z.infer<typeof referenceLayerScopeSchema>;
+export type ReferenceLayerStrategy = z.infer<typeof referenceLayerStrategySchema>;
+
 export const backendAvailabilitySchema = z.object({
   mode: z.enum(["public_zerogpu", "local", "huggingface_gpu", "bandon_mps"]),
   label: z.string(),

@@ -82,6 +82,17 @@ def test_run_bandon_inference_builds_command_and_parses_outputs(tmp_path, monkey
                 "mps_built": True,
                 "mps_available": True,
                 "mps_test_cfg": {"applied": False},
+                "stage_timings": {
+                    "run_id": "bandon:outputs",
+                    "stages": [
+                        {
+                            "name": "forward",
+                            "duration_ms": 12.5,
+                            "status": "success",
+                            "metadata": {"device": "mps"},
+                        }
+                    ],
+                },
             }
         ),
         encoding="utf-8",
@@ -106,6 +117,8 @@ def test_run_bandon_inference_builds_command_and_parses_outputs(tmp_path, monkey
     assert "mps" in captured[0]
     assert result.change_probability.shape == (4, 4)
     assert result.change_mask.dtype == bool
+    assert result.child_timing is not None
+    assert result.child_timing["stages"][0]["name"] == "forward"
 
 
 def test_run_bandon_inference_raises_on_failure(tmp_path, monkeypatch) -> None:

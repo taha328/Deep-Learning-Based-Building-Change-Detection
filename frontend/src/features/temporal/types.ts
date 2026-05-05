@@ -1,4 +1,10 @@
 import type { FeatureCollection } from "geojson";
+import type { ReferenceLayer } from "@/api/contracts";
+
+export interface ReferenceLayerPresentation extends ReferenceLayer {
+  resolvedDisplayUrl: string | null;
+  resolvedPmtilesUrl: string | null;
+}
 
 export interface TemporalMapPresentation {
   selectedReleaseIdentifier: string | null;
@@ -19,4 +25,5 @@ export interface TemporalMapPresentation {
   cumulativeGrowthBlocks: FeatureCollection;
   cumulativeGrowthEnvelope: FeatureCollection;
   manualOverride: FeatureCollection;
+  referenceLayers: ReferenceLayerPresentation[];
 }

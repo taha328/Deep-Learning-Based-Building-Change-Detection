@@ -21,6 +21,9 @@ import {
 import type {
   BackendAvailability,
   LatestImagerySource,
+  ReferenceLayer,
+  ReferenceLayerScope,
+  ReferenceLayerStrategy,
   ReleaseMetadata,
   PipelineExecutionConfig,
   TemporalMilestone,
@@ -31,12 +34,17 @@ import type {
 } from "@/api/contracts";
 import {
   createTemporalProjectExportBundle,
+  deleteReferenceLayer,
   getCachedRunResponse,
   getTemporalProject,
+  importReferenceLayer,
   importTemporalOverride,
+  listReferenceLayers,
   listTemporalProjects,
+  preflightReferenceLayer,
   runTemporalProject,
   saveTemporalProject,
+  updateReferenceLayer,
   validateTemporalProject,
 } from "@/api/client";
 import { useAppStore } from "@/app/store";
@@ -64,6 +72,7 @@ import { AOIImportModal } from "@/features/aoi/AOIImportModal";
 import { RunProgressPanel } from "@/features/results/RunProgressPanel";
 import { GeometryImportModal } from "@/features/temporal/GeometryImportModal";
 import { MilestoneMetricCards } from "@/features/temporal/MilestoneMetricCards";
+import { ReferenceLayerImportModal } from "@/features/temporal/ReferenceLayerImportModal";
 import type { TemporalMapPresentation } from "@/features/temporal/types";
 import { SharedAoiSection } from "@/features/workspace/SharedAoiSection";
 import { WorkflowParametersPanel } from "@/features/workspace/WorkflowParametersPanel";
@@ -471,6 +480,7 @@ export function TemporalMosaicPanel({
   const [activePanel, setActivePanel] = useState<WorkflowSectionId>("overview");
   const [aoiImportModalOpen, setAoiImportModalOpen] = useState(false);
   const [overrideModalOpen, setOverrideModalOpen] = useState(false);
+  const [referenceLayerModalOpen, setReferenceLayerModalOpen] = useState(false);
   const [createProjectOpen, setCreateProjectOpen] = useState(false);
   const [createProjectName, setCreateProjectName] = useState("");
   const [createProjectDirectory, setCreateProjectDirectory] = useState(DEFAULT_PROJECT_DIRECTORY);
@@ -490,6 +500,7 @@ export function TemporalMosaicPanel({
   const setAoiFromImport = useAppStore((state) => state.setAoiFromImport);
   const clearAoi = useAppStore((state) => state.clearAoi);
   const requestMapFocusToAoi = useAppStore((state) => state.requestMapFocusToAoi);
+  const requestMapFocusToReferenceLayer = useAppStore((state) => state.requestMapFocusToReferenceLayer);
   const project = useAppStore((state) => state.temporalProject);
   const setProject = useAppStore((state) => state.setTemporalProject);
   const settings = useAppStore((state) => state.settings);
@@ -512,6 +523,12 @@ export function TemporalMosaicPanel({
   const projectsQuery = useQuery({
     queryKey: ["temporal-projects", "saved-only"],
     queryFn: () => listTemporalProjects(),
+  });
+
+  const referenceLayersQuery = useQuery({
+    queryKey: ["reference-layers", project?.project_id],
+    queryFn: () => listReferenceLayers(project?.project_id ?? ""),
+    enabled: Boolean(project?.project_id),
   });
 
   type LoadProjectRequest = {
@@ -642,6 +659,52 @@ export function TemporalMosaicPanel({
     },
   });
 
+  const importReferenceLayerMutation = useMutation({
+    mutationFn: ({
+      file,
+      name,
+      scope,
+      strategy,
+    }: {
+      file: File;
+      name: string;
+      scope: ReferenceLayerScope;
+      strategy: ReferenceLayerStrategy;
+    }) => {
+      if (!project?.project_id) {
+        throw new Error(t("reference_layer.no_project"));
+      }
+      return importReferenceLayer(project.project_id, file, name, scope, strategy);
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["reference-layers", project?.project_id] });
+    },
+  });
+
+  const updateReferenceLayerMutation = useMutation({
+    mutationFn: ({ layer, patch }: { layer: ReferenceLayer; patch: Partial<Pick<ReferenceLayer, "visible" | "opacity">> }) => {
+      if (!project?.project_id) {
+        throw new Error(t("reference_layer.no_project"));
+      }
+      return updateReferenceLayer(project.project_id, layer.layer_id, patch);
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["reference-layers", project?.project_id] });
+    },
+  });
+
+  const deleteReferenceLayerMutation = useMutation({
+    mutationFn: (layer: ReferenceLayer) => {
+      if (!project?.project_id) {
+        throw new Error(t("reference_layer.no_project"));
+      }
+      return deleteReferenceLayer(project.project_id, layer.layer_id);
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["reference-layers", project?.project_id] });
+    },
+  });
+
   useEffect(() => {
     if (workflowMode !== "temporal") {
       return;
@@ -721,6 +784,17 @@ export function TemporalMosaicPanel({
   const selectedMilestone = useMemo(
     () => project?.milestones.find((item) => item.release_identifier === selectedMilestoneId) ?? null,
     [project, selectedMilestoneId],
+  );
+
+  const referenceLayers = referenceLayersQuery.data ?? [];
+  const referenceLayerPresentation = useMemo(
+    () =>
+      referenceLayers.map((layer) => ({
+        ...layer,
+        resolvedDisplayUrl: layer.display_url ? new URL(layer.display_url, backendUrl).toString() : null,
+        resolvedPmtilesUrl: layer.pmtiles_url ? new URL(layer.pmtiles_url, backendUrl).toString() : null,
+      })),
+    [backendUrl, referenceLayers],
   );
 
   useEffect(() => {
@@ -824,8 +898,9 @@ export function TemporalMosaicPanel({
       cumulativeGrowthBlocks: ensureFeatureCollection(selectedMilestone.cumulative_growth_blocks_geojson),
       cumulativeGrowthEnvelope: ensureFeatureCollection(selectedMilestone.cumulative_growth_envelope_geojson),
       manualOverride: ensureFeatureCollection(selectedMilestone.manual_override_geojson),
+      referenceLayers: referenceLayerPresentation,
     });
-  }, [backendUrl, project, selectedMilestone, onMapPresentationChange]);
+  }, [backendUrl, project, selectedMilestone, onMapPresentationChange, referenceLayerPresentation]);
 
   const releasesById = useMemo(
     () => new Map(releases.map((release) => [release.identifier, release])),
@@ -1486,13 +1561,89 @@ export function TemporalMosaicPanel({
                       <Button
                         variant="outline"
                         className="h-11 w-full border-sidebar-border bg-sidebar justify-start px-4 sm:justify-center"
-                        disabled={!selectedMilestone.artifacts.length}
-                        onClick={() => setSelectedMilestoneId(selectedMilestone.release_identifier)}
+                        disabled={!project}
+                        onClick={() => setReferenceLayerModalOpen(true)}
                       >
                         <Layers3 className="mr-2 h-4 w-4" />
-                        {t("temporal.map_ready")}
+                        {t("reference_layer.add")}
                       </Button>
                     </div>
+
+                    {referenceLayers.length ? (
+                      <Card className="border-sidebar-border bg-sidebar shadow-panel">
+                        <CardContent className="space-y-3 p-4">
+                          <div>
+                            <p className="text-sm font-medium text-foreground">{t("reference_layer.layers")}</p>
+                            <p className="text-caption text-muted-foreground">{t("reference_layer.layers_help")}</p>
+                          </div>
+                          <div className="space-y-3">
+                            {referenceLayers.map((layer) => (
+                              <div key={layer.layer_id} className="rounded-lg border border-sidebar-border bg-card px-3 py-3">
+                                <div className="flex items-start justify-between gap-3">
+                                  <div className="min-w-0">
+                                    <p className="truncate text-sm font-medium text-foreground">{layer.name}</p>
+                                    <p className="text-caption text-muted-foreground">{layer.geometry_type} / {layer.storage_strategy}</p>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    className="text-muted-foreground transition hover:text-destructive"
+                                    onClick={() => deleteReferenceLayerMutation.mutate(layer)}
+                                    aria-label={t("common.delete")}
+                                  >
+                                    <Trash2 className="h-4 w-4" />
+                                  </button>
+                                </div>
+                                <div className="mt-3 flex items-center gap-3">
+                                  <label className="flex items-center gap-2 text-caption text-foreground">
+                                    <input
+                                      type="checkbox"
+                                      checked={layer.visible}
+                                      onChange={(event) =>
+                                        updateReferenceLayerMutation.mutate({ layer, patch: { visible: event.target.checked } })
+                                      }
+                                      className="h-4 w-4 rounded border-border accent-primary"
+                                    />
+                                    {t("reference_layer.visible")}
+                                  </label>
+                                  <label className="flex min-w-0 flex-1 items-center gap-2 text-caption text-muted-foreground">
+                                    {t("reference_layer.opacity")}
+                                    <span className="w-10 text-right text-foreground">{Math.round(layer.opacity * 100)}%</span>
+                                    <input
+                                      type="range"
+                                      min={0}
+                                      max={1}
+                                      step={0.05}
+                                      value={layer.opacity}
+                                      onChange={(event) =>
+                                        updateReferenceLayerMutation.mutate({ layer, patch: { opacity: Number(event.target.value) } })
+                                      }
+                                      className="min-w-0 flex-1"
+                                    />
+                                  </label>
+                                  {Array.isArray(layer.bounds_wgs84) && layer.bounds_wgs84.length >= 4 ? (
+                                    <Button
+                                      type="button"
+                                      variant="outline"
+                                      className="h-8 border-sidebar-border bg-sidebar"
+                                      onClick={() => requestMapFocusToReferenceLayer(layer.bounds_wgs84 as [number, number, number, number])}
+                                    >
+                                      {t("reference_layer.zoom")}
+                                    </Button>
+                                  ) : null}
+                                </div>
+                                {layer.warnings.length ? (
+                                  <div className="mt-3 space-y-1 text-caption text-amber-700 dark:text-amber-300">
+                                    {layer.warnings.map((warning) => (
+                                      <p key={warning}>{warning}</p>
+                                    ))}
+                                  </div>
+                                ) : null}
+                              </div>
+                            ))}
+                          </div>
+                        </CardContent>
+                      </Card>
+                    ) : null}
                   </>
                 ) : null}
             </WorkflowSectionCard>
@@ -1520,7 +1671,7 @@ export function TemporalMosaicPanel({
           </div>
         ) : null}
 
-        {(projectsQuery.error || loadProjectMutation.error || saveProjectMutation.error || validateProjectMutation.error || runProjectMutation.error || importOverrideMutation.error) ? (
+        {(projectsQuery.error || loadProjectMutation.error || saveProjectMutation.error || validateProjectMutation.error || runProjectMutation.error || importOverrideMutation.error || importReferenceLayerMutation.error || updateReferenceLayerMutation.error || deleteReferenceLayerMutation.error) ? (
           <div className="p-5 pt-0">
             <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive-foreground">
               <div className="flex items-start gap-2">
@@ -1532,7 +1683,10 @@ export function TemporalMosaicPanel({
                       saveProjectMutation.error ??
                       validateProjectMutation.error ??
                       runProjectMutation.error ??
-                      importOverrideMutation.error,
+                      importOverrideMutation.error ??
+                      importReferenceLayerMutation.error ??
+                      updateReferenceLayerMutation.error ??
+                      deleteReferenceLayerMutation.error,
                     t("common.unexpected_error"),
                   )}
                 </div>
@@ -1548,6 +1702,25 @@ export function TemporalMosaicPanel({
         title={selectedMilestone ? `${t("temporal.manual_override_for")} ${formatReleaseDate(selectedMilestone.release_date, locale, t("temporal.unknown_date"))}` : t("temporal.import_manual_override")}
         description={t("temporal.import_manual_override_description")}
         onImport={handleImportOverride}
+      />
+      <ReferenceLayerImportModal
+        open={referenceLayerModalOpen}
+        projectId={project?.project_id ?? null}
+        onOpenChange={setReferenceLayerModalOpen}
+        onPreflight={(file, scope) => {
+          if (!project?.project_id) {
+            throw new Error(t("reference_layer.no_project"));
+          }
+          return preflightReferenceLayer(project.project_id, file, scope);
+        }}
+        onImport={(file, name, scope, strategy) =>
+          importReferenceLayerMutation.mutateAsync({
+            file,
+            name,
+            scope,
+            strategy,
+          })
+        }
       />
     </>
   );

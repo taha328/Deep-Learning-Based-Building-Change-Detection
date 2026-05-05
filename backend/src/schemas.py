@@ -10,6 +10,10 @@ ModeName = Literal["fast_preview", "full_run"]
 ModelBackendName = Literal["sam3", "bandon_mps"]
 Sam3BackendMode = Literal["public_zerogpu", "local", "huggingface_gpu"]
 LatestImagerySource = Literal["esri_wayback", "mapbox_current"]
+ReferenceLayerKind = Literal["vector", "raster"]
+ReferenceGeometryType = Literal["point", "line", "polygon", "mixed", "raster"]
+ReferenceLayerScope = Literal["aoi_clipped", "full_layer"]
+ReferenceLayerStorageStrategy = Literal["geojson", "gpkg", "postgis", "pmtiles", "mbtiles", "cog", "raster_tiles"]
 
 
 class GeoJSONGeometry(BaseModel):
@@ -47,6 +51,78 @@ class ReleaseListResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     releases: list[ReleaseMetadata]
+    source_status: Literal["live", "stale", "stale_memory"] = "live"
+    warnings: list[dict[str, Any]] = Field(default_factory=list)
+    fetched_at: str | None = None
+
+
+class ReferenceLayerStyle(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    color: str = "#0ea5e9"
+    line_width: float = 2.0
+    fill_color: str = "#0ea5e9"
+    fill_opacity: float = 0.25
+    outline_color: str = "#0369a1"
+    point_radius: float = 5.0
+
+
+class ReferenceLayer(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    layer_id: str
+    project_id: str
+    name: str
+    original_filename: str
+    original_format: str
+    layer_kind: ReferenceLayerKind
+    geometry_type: ReferenceGeometryType
+    scope: ReferenceLayerScope
+    storage_strategy: ReferenceLayerStorageStrategy
+    crs: str | None = None
+    bounds_wgs84: list[float] | None = None
+    feature_count: int | None = None
+    file_size_bytes: int
+    source_path: str | None = None
+    display_path: str | None = None
+    display_url: str | None = None
+    pmtiles_url: str | None = None
+    tilejson_url: str | None = None
+    tiles_url_template: str | None = None
+    source_layer: str | None = None
+    style: ReferenceLayerStyle = Field(default_factory=ReferenceLayerStyle)
+    visible: bool = True
+    opacity: float = 0.85
+    created_at: str
+    updated_at: str
+    warnings: list[str] = Field(default_factory=list)
+
+
+class ReferenceLayerPreflightResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    original_filename: str
+    original_format: str
+    layer_kind: ReferenceLayerKind
+    geometry_type: ReferenceGeometryType
+    scope: ReferenceLayerScope
+    storage_strategy: ReferenceLayerStorageStrategy
+    crs: str | None = None
+    bounds_wgs84: list[float] | None = None
+    feature_count: int | None = None
+    file_size_bytes: int
+    tool_status: dict[str, str] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+
+
+class ReferenceLayerPatchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = None
+    visible: bool | None = None
+    opacity: float | None = None
+    style: ReferenceLayerStyle | None = None
 
 
 class ValidationRequest(BaseModel):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
 import csv
 import base64
 from dataclasses import dataclass
@@ -8,6 +9,9 @@ import json
 import logging
 from pathlib import Path
 import re
+import shutil
+import tempfile
+import time
 import zipfile
 from typing import Any, Callable
 
@@ -18,7 +22,9 @@ from shapely.ops import unary_union
 from src.config import Settings
 from src.domain.cache import load_cached_response
 from src.domain.exports import create_export_bundle_from_manifest
+from src.domain.imagery_providers import EsriWaybackProvider, MapboxCurrentProvider
 from src.domain.mapbox_current import MAPBOX_SOURCE_ID
+from src.domain.stage_timing import StageTimingRecorder
 from src.domain.vectorize import build_temporal_growth_blocks, build_temporal_growth_envelope
 from src.execution_profiles import PipelineExecutionConfig, resolve_backend
 from src.schemas import (
@@ -36,9 +42,10 @@ from src.schemas import (
     TemporalProjectValidationResponse,
     ValidationRequest,
 )
+from src.services.processing import ResolvedWaybackRelease, _resolve_release_for_aoi
 from src.services.releases import list_releases
 from src.services.validation import validate_request
-from src.utils.geometry import geodesic_area_m2, normalized_aoi_geojson, parse_aoi_geometry
+from src.utils.geometry import bounds_dict, geodesic_area_m2, normalized_aoi_geojson, parse_aoi_geometry
 
 
 PairRunner = Callable[[RunRequest], RunResponse]
@@ -59,6 +66,32 @@ class TemporalMilestonePlanEntry:
     cached_response: RunResponse | None
     reusable: bool
     blocking_errors: list[str]
+
+
+@dataclass(frozen=True)
+class TemporalImageryPrefetchPlan:
+    pair_index: int
+    request_hash: str
+    t1_provider: str
+    t2_provider: str
+    t1_release_identifier: str
+    t2_release_identifier: str
+    latest_source: str
+    aoi_geojson: dict[str, Any]
+    t2_effective_release_identifier: str
+
+
+@dataclass(frozen=True)
+class TemporalImageryPrefetchResult:
+    pair_index: int
+    request_hash: str
+    t1_provider: str
+    t2_provider: str
+    status: str
+    cache_hit_or_warmed: bool
+    duration_ms: float
+    metadata: dict[str, Any]
+    warning: str | None = None
 
 
 def _utc_now_iso() -> str:
@@ -759,6 +792,263 @@ def _prepare_temporal_pair_request(
         request_hash_context=request_hash_context,
     )
     return validation_request, validation_response, prepared
+
+
+def _build_temporal_imagery_prefetch_plan(
+    project: TemporalProject,
+    pair_plan: list[TemporalMilestonePlanEntry],
+    *,
+    settings: Settings,
+) -> list[TemporalImageryPrefetchPlan]:
+    if project.aoi_geojson is None:
+        return []
+
+    releases = list_releases(settings)
+    latest_wayback_release = max(releases, key=lambda item: item.release_date) if releases else None
+    prefetch_plans: list[TemporalImageryPrefetchPlan] = []
+    for entry in pair_plan:
+        if entry.index == 0 or entry.reusable or entry.blocking_errors or entry.expected_request_hash is None:
+            continue
+        milestone = project.milestones[entry.index]
+        is_mapbox_current = _is_mapbox_current_milestone(milestone)
+        if is_mapbox_current and latest_wayback_release is None:
+            continue
+        prefetch_plans.append(
+            TemporalImageryPrefetchPlan(
+                pair_index=entry.index,
+                request_hash=entry.expected_request_hash,
+                t1_provider="esri_wayback",
+                t2_provider="mapbox" if is_mapbox_current else "esri_wayback",
+                t1_release_identifier=entry.previous_release_identifier or milestone.release_identifier,
+                t2_release_identifier=milestone.release_identifier,
+                latest_source="mapbox_current" if is_mapbox_current else "esri_wayback",
+                aoi_geojson=project.aoi_geojson,
+                t2_effective_release_identifier=latest_wayback_release.identifier if is_mapbox_current else milestone.release_identifier,
+            )
+        )
+        if len(prefetch_plans) >= settings.temporal_imagery_prefetch_max_pairs:
+            break
+    return prefetch_plans
+
+
+def _prefetch_provider_worker_settings(settings: Settings) -> Settings:
+    provider_workers = settings.download_workers
+    if settings.temporal_imagery_prefetch_reduce_provider_workers:
+        provider_workers = max(1, settings.download_workers // settings.temporal_imagery_prefetch_workers)
+    return settings.model_copy(
+        update={
+            "download_workers": provider_workers,
+            "materialize_source_imagery_in_requests": False,
+        }
+    )
+
+
+def _prefetch_pair_imagery(
+    plan: TemporalImageryPrefetchPlan,
+    *,
+    settings: Settings,
+    releases_by_id: dict[str, Any],
+) -> TemporalImageryPrefetchResult:
+    started_ns = time.perf_counter_ns()
+    derived_settings = _prefetch_provider_worker_settings(settings)
+    geometry = parse_aoi_geometry(plan.aoi_geojson)
+    aoi_bbox = bounds_dict(geometry)
+    metadata: dict[str, Any] = {
+        "pair_index": plan.pair_index,
+        "request_hash": plan.request_hash,
+        "t1_provider": plan.t1_provider,
+        "t2_provider": plan.t2_provider,
+        "provider_download_workers": derived_settings.download_workers,
+    }
+    temp_dir_path = Path(
+        tempfile.mkdtemp(
+            prefix=f"temporal-prefetch-{plan.request_hash}-",
+            dir=str(settings.tmp_cache_dir),
+        )
+    )
+    try:
+        t1_release = releases_by_id[plan.t1_release_identifier]
+        resolved_t1 = _resolve_release_for_aoi(
+            derived_settings,
+            release=t1_release,
+            aoi_bbox=aoi_bbox,
+            normalized_aoi=plan.aoi_geojson,
+            scene_role="prefetch_t1",
+            stage_prefix="temporal_prefetch.t1",
+        )
+        scene_t1 = EsriWaybackProvider().download(
+            t1_release,
+            aoi_bbox,
+            settings=derived_settings,
+            zoom=resolved_t1.zoom,
+            out_dir=temp_dir_path,
+            label="prefetch_t1",
+            available_tiles=resolved_t1.tilemap.available_tiles if resolved_t1.tilemap is not None and resolved_t1.tilemap.preflight_complete else None,
+        )
+        metadata["t1_cache_key"] = scene_t1.cache_key
+        metadata["t1_zoom"] = resolved_t1.zoom
+
+        if plan.t2_provider == "mapbox":
+            scene_t2 = MapboxCurrentProvider().download(
+                aoi_bbox,
+                settings=derived_settings,
+                zoom=min(derived_settings.mapbox_current_imagery_default_zoom, derived_settings.mapbox_current_imagery_max_zoom),
+            )
+            metadata.update(
+                {
+                    "t2_cache_key": scene_t2.cache_key,
+                    "t2_zoom": scene_t2.zoom,
+                    "t2_source_id": scene_t2.source_id,
+                    "t2_cache_hit": bool((scene_t2.metadata or {}).get("cache_hit")),
+                }
+            )
+        else:
+            t2_release = releases_by_id[plan.t2_effective_release_identifier]
+            resolved_t2 = _resolve_release_for_aoi(
+                derived_settings,
+                release=t2_release,
+                aoi_bbox=aoi_bbox,
+                normalized_aoi=plan.aoi_geojson,
+                scene_role="prefetch_t2",
+                stage_prefix="temporal_prefetch.t2",
+            )
+            scene_t2 = EsriWaybackProvider().download(
+                t2_release,
+                aoi_bbox,
+                settings=derived_settings,
+                zoom=resolved_t2.zoom,
+                out_dir=temp_dir_path,
+                label="prefetch_t2",
+                available_tiles=resolved_t2.tilemap.available_tiles if resolved_t2.tilemap is not None and resolved_t2.tilemap.preflight_complete else None,
+            )
+            metadata["t2_cache_key"] = scene_t2.cache_key
+            metadata["t2_zoom"] = resolved_t2.zoom
+
+        return TemporalImageryPrefetchResult(
+            pair_index=plan.pair_index,
+            request_hash=plan.request_hash,
+            t1_provider=plan.t1_provider,
+            t2_provider=plan.t2_provider,
+            status="success",
+            cache_hit_or_warmed=True,
+            duration_ms=round((time.perf_counter_ns() - started_ns) / 1_000_000, 2),
+            metadata=metadata,
+        )
+    except Exception as exc:  # noqa: BLE001
+        metadata["exception_class"] = type(exc).__name__
+        return TemporalImageryPrefetchResult(
+            pair_index=plan.pair_index,
+            request_hash=plan.request_hash,
+            t1_provider=plan.t1_provider,
+            t2_provider=plan.t2_provider,
+            status="failed",
+            cache_hit_or_warmed=False,
+            duration_ms=round((time.perf_counter_ns() - started_ns) / 1_000_000, 2),
+            metadata=metadata,
+            warning=str(exc),
+        )
+    finally:
+        shutil.rmtree(temp_dir_path, ignore_errors=True)
+
+
+def _run_temporal_imagery_prefetch(
+    project: TemporalProject,
+    *,
+    settings: Settings,
+    pair_plan: list[TemporalMilestonePlanEntry],
+    timing: StageTimingRecorder | None = None,
+) -> list[TemporalImageryPrefetchResult]:
+    if not settings.temporal_imagery_prefetch_enabled:
+        return []
+
+    prefetch_plans = _build_temporal_imagery_prefetch_plan(project, pair_plan, settings=settings)
+    if not prefetch_plans:
+        return []
+
+    releases_by_id = {release.identifier: release for release in list_releases(settings)}
+    results: list[TemporalImageryPrefetchResult] = []
+    worker_count = min(settings.temporal_imagery_prefetch_workers, len(prefetch_plans))
+    total_started_ns = time.perf_counter_ns()
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        future_map = {
+            executor.submit(_prefetch_pair_imagery, plan, settings=settings, releases_by_id=releases_by_id): plan
+            for plan in prefetch_plans
+        }
+        try:
+            for future in as_completed(future_map, timeout=settings.temporal_imagery_prefetch_timeout_seconds):
+                result = future.result()
+                results.append(result)
+                if timing is not None:
+                    timing.add_stage(
+                        f"temporal_imagery_prefetch.pair_{result.pair_index}",
+                        duration_ms=result.duration_ms,
+                        status="failed" if result.status == "failed" else "success",
+                        metadata={
+                            "pair_index": result.pair_index,
+                            "request_hash": result.request_hash,
+                            "t1_provider": result.t1_provider,
+                            "t2_provider": result.t2_provider,
+                            "status": result.status,
+                            "cache_hit_or_warmed": result.cache_hit_or_warmed,
+                            **result.metadata,
+                        },
+                        error_type=result.metadata.get("exception_class") if result.status == "failed" else None,
+                    )
+        except FuturesTimeoutError:
+            for future, plan in future_map.items():
+                if future.done():
+                    continue
+                future.cancel()
+                timeout_result = TemporalImageryPrefetchResult(
+                    pair_index=plan.pair_index,
+                    request_hash=plan.request_hash,
+                    t1_provider=plan.t1_provider,
+                    t2_provider=plan.t2_provider,
+                    status="failed",
+                    cache_hit_or_warmed=False,
+                    duration_ms=round((time.perf_counter_ns() - total_started_ns) / 1_000_000, 2),
+                    metadata={"exception_class": "TimeoutError"},
+                    warning="Temporal imagery prefetch timed out.",
+                )
+                results.append(timeout_result)
+                if timing is not None:
+                    timing.add_stage(
+                        f"temporal_imagery_prefetch.pair_{plan.pair_index}",
+                        duration_ms=timeout_result.duration_ms,
+                        status="failed",
+                        metadata={
+                            "pair_index": plan.pair_index,
+                            "request_hash": plan.request_hash,
+                            "t1_provider": plan.t1_provider,
+                            "t2_provider": plan.t2_provider,
+                            "status": "failed",
+                            "cache_hit_or_warmed": False,
+                        },
+                        error_type="TimeoutError",
+                    )
+        finally:
+            if timing is not None:
+                timing.add_stage(
+                    "temporal_imagery_prefetch_total",
+                    duration_ms=round((time.perf_counter_ns() - total_started_ns) / 1_000_000, 2),
+                    metadata={
+                        "pair_count": len(prefetch_plans),
+                        "worker_count": worker_count,
+                        "success_count": sum(1 for item in results if item.status == "success"),
+                        "failure_count": sum(1 for item in results if item.status == "failed"),
+                    },
+                )
+    return sorted(results, key=lambda item: item.pair_index)
+
+
+def _write_temporal_project_timing_safely(timing: StageTimingRecorder, project: TemporalProject) -> None:
+    project_dir = _normalize_project_dir(project.project_dir)
+    if project_dir is None:
+        return
+    try:
+        timing.write_timing_report(project_dir / "timing.json")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to write temporal project timing report for %s: %s", project.project_id, exc)
 
 
 def _plan_temporal_milestone_runs(
@@ -1494,6 +1784,15 @@ def run_temporal_project(
     execution_config: PipelineExecutionConfig | None = None,
 ) -> TemporalProjectRunResponse:
     project = _load_project(settings, project_id)
+    timing = StageTimingRecorder(
+        run_id=project.project_id,
+        pipeline_kind="temporal_project",
+        project_id=project.project_id,
+        metadata={
+            "milestone_count": len(project.milestones),
+            "latest_source": project.latest_source,
+        },
+    )
     resolved_execution_config = execution_config or resolve_temporal_project_execution_config(project, settings)
     if request_hash_context is None:
         backend = resolve_backend(resolved_execution_config, settings=settings)
@@ -1510,6 +1809,7 @@ def run_temporal_project(
     project = validation.project
     if not validation.valid:
         _save_project(project, settings)
+        _write_temporal_project_timing_safely(timing, project)
         return TemporalProjectRunResponse(
             success=False,
             error_message="; ".join(validation.blocking_errors) or "Temporal project validation failed.",
@@ -1530,6 +1830,22 @@ def run_temporal_project(
         remote_patch_budget_enabled=remote_patch_budget_enabled,
         request_hash_context=request_hash_context,
     )
+    prefetch_results = _run_temporal_imagery_prefetch(
+        project,
+        settings=settings,
+        pair_plan=plan,
+        timing=timing,
+    )
+    prefetch_warnings = [item.warning for item in prefetch_results if item.warning]
+    if prefetch_warnings:
+        project.warnings = [
+            *project.warnings,
+            *[
+                f"Temporal imagery prefetch failed for pair {item.pair_index}: {item.warning}"
+                for item in prefetch_results
+                if item.warning
+            ],
+        ]
     dirty_start = next(
         (
             entry.index
@@ -1543,6 +1859,7 @@ def run_temporal_project(
         project.updated_at = _utc_now_iso()
         project = _refresh_project_bundle(project, settings)
         _save_project(project, settings)
+        _write_temporal_project_timing_safely(timing, project)
         return TemporalProjectRunResponse(success=True, project=project)
 
     previous_successful_release_identifier = project.milestones[dirty_start - 1].release_identifier if dirty_start > 0 else None
@@ -1612,6 +1929,7 @@ def run_temporal_project(
     project.updated_at = _utc_now_iso()
     project = _refresh_project_bundle(project, settings)
     _save_project(project, settings)
+    _write_temporal_project_timing_safely(timing, project)
     return TemporalProjectRunResponse(success=True, project=project)
 
 

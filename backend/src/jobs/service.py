@@ -99,27 +99,29 @@ def start_temporal_project_job(project_id: str, *, settings: Settings) -> JobSta
                 f"Unknown temporal project: {project_id}",
                 details={"project_id": project_id},
             )
-        job = create_job(
+        job_id = create_job(
             job_kind="temporal_project",
             session=session,
             project_db_id=project.id,
             project_id=project_id,
             raw_request={"project_id": project_id},
+        ).job_id
+    assert job_id is not None
+    try:
+        async_result = celery_app.send_task(
+            "building_change.run_temporal_project",
+            args=[job_id, project_id],
+            kwargs={"settings_payload": None},
+            queue=settings.celery_task_default_queue,
         )
-        job_id = job.job_id
-        try:
-            async_result = celery_app.send_task(
-                "building_change.run_temporal_project",
-                args=[job.job_id, project_id],
-                kwargs={"settings_payload": None},
-                queue=settings.celery_task_default_queue,
-            )
-        except Exception as exc:  # noqa: BLE001
-            mark_job_failed(job_id=job.job_id, error_code="celery_unavailable", error_message=str(exc), session=session)
-            enqueue_error = exc
-        else:
-            celery_task_id = async_result.id
-            mark_job_enqueued(job_id=job.job_id, celery_task_id=async_result.id, session=session)
+    except Exception as exc:  # noqa: BLE001
+        with session_scope(settings) as session:
+            mark_job_failed(job_id=job_id, error_code="celery_unavailable", error_message=str(exc), session=session)
+        enqueue_error = exc
+    else:
+        celery_task_id = async_result.id
+        with session_scope(settings) as session:
+            mark_job_enqueued(job_id=job_id, celery_task_id=async_result.id, session=session)
 
     if enqueue_error is not None:
         raise CeleryEnqueueError(
@@ -137,26 +139,28 @@ def start_detection_job(request: RunRequest, *, settings: Settings) -> JobStartR
     job_id: str | None = None
     celery_task_id: str | None = None
     with session_scope(settings) as session:
-        job = create_job(
+        job_id = create_job(
             job_kind="detection",
             session=session,
             project_id=None,
             raw_request=request.model_dump(mode="json"),
+        ).job_id
+    assert job_id is not None
+    try:
+        async_result = celery_app.send_task(
+            "building_change.run_detection",
+            args=[job_id, request.model_dump(mode="json")],
+            kwargs={"settings_payload": None},
+            queue=settings.celery_task_default_queue,
         )
-        job_id = job.job_id
-        try:
-            async_result = celery_app.send_task(
-                "building_change.run_detection",
-                args=[job.job_id, request.model_dump(mode="json")],
-                kwargs={"settings_payload": None},
-                queue=settings.celery_task_default_queue,
-            )
-        except Exception as exc:  # noqa: BLE001
-            mark_job_failed(job_id=job.job_id, error_code="celery_unavailable", error_message=str(exc), session=session)
-            enqueue_error = exc
-        else:
-            celery_task_id = async_result.id
-            mark_job_enqueued(job_id=job.job_id, celery_task_id=async_result.id, session=session)
+    except Exception as exc:  # noqa: BLE001
+        with session_scope(settings) as session:
+            mark_job_failed(job_id=job_id, error_code="celery_unavailable", error_message=str(exc), session=session)
+        enqueue_error = exc
+    else:
+        celery_task_id = async_result.id
+        with session_scope(settings) as session:
+            mark_job_enqueued(job_id=job_id, celery_task_id=async_result.id, session=session)
 
     if enqueue_error is not None:
         raise CeleryEnqueueError(

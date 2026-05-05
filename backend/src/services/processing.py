@@ -131,13 +131,13 @@ def _inference_stage_message(model_backend: Literal["sam3", "bandon_mps"], infer
 def _write_bandon_input_images(
     *,
     output_dir: Path,
-    t1_rgb: Any,
-    t2_rgb: Any,
+    t1_image: Image.Image,
+    t2_image: Image.Image,
 ) -> tuple[Path, Path]:
     t1_path = output_dir / "bandon_input_t1.png"
     t2_path = output_dir / "bandon_input_t2.png"
-    Image.fromarray(t1_rgb).save(t1_path)
-    Image.fromarray(t2_rgb).save(t2_path)
+    t1_image.save(t1_path)
+    t2_image.save(t2_path)
     return t1_path, t2_path
 
 
@@ -1741,10 +1741,36 @@ def run_detection(
         if model_backend == "bandon_mps":
             try:
                 with timings.track("bandon_inference"):
+                    bandon_input_prepare_start = time.perf_counter_ns()
+                    bandon_input_t1_image = Image.fromarray(arr_t1)
+                    bandon_input_t2_image = Image.fromarray(arr_t2)
+                    _safe_add_timing_stage(
+                        timing,
+                        "inference.bandon.input_prepare",
+                        duration_ms=_elapsed_ms(bandon_input_prepare_start),
+                        metadata={
+                            "backend": "bandon_mps",
+                            "input_height": int(arr_t1.shape[0]),
+                            "input_width": int(arr_t1.shape[1]),
+                        },
+                    )
+                    bandon_input_write_start = time.perf_counter_ns()
                     bandon_input_t1_path, bandon_input_t2_path = _write_bandon_input_images(
                         output_dir=run_tmp_dir,
-                        t1_rgb=arr_t1,
-                        t2_rgb=arr_t2,
+                        t1_image=bandon_input_t1_image,
+                        t2_image=bandon_input_t2_image,
+                    )
+                    _safe_add_timing_stage(
+                        timing,
+                        "inference.bandon.input_write",
+                        duration_ms=_elapsed_ms(bandon_input_write_start),
+                        metadata={
+                            "backend": "bandon_mps",
+                            "t1_path": bandon_input_t1_path.name,
+                            "t2_path": bandon_input_t2_path.name,
+                            "t1_input_path_exists": bandon_input_t1_path.exists(),
+                            "t2_input_path_exists": bandon_input_t2_path.exists(),
+                        },
                     )
                     bandon_result = run_bandon_inference(
                         image_a_path=bandon_input_t1_path,
@@ -1752,6 +1778,8 @@ def run_detection(
                         settings=settings,
                         out_dir=run_tmp_dir / "bandon_run",
                     )
+                    if bandon_result.child_timing is not None:
+                        timing.merge_child_timings(bandon_result.child_timing, prefix="inference.bandon")
             except RuntimeError as exc:
                 return RunResponse(
                     success=False,

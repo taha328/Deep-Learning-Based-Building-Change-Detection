@@ -43,6 +43,25 @@ def test_stage_timing_recorder_records_failure_and_reraises() -> None:
     assert payload["stages"][0]["error_type"] == "ValueError"
 
 
+def test_stage_timing_recorder_preserves_nested_metadata(tmp_path) -> None:
+    recorder = StageTimingRecorder(run_id="run-2b", pipeline_kind="detection")
+
+    with recorder.stage(
+        "forward",
+        input_tensor_shapes=[[1, 6, 32, 48]],
+        input_tensor_devices_before_forward=["mps"],
+        model_parameter_devices=["mps"],
+    ):
+        pass
+
+    report_path = recorder.write_timing_report(tmp_path / "timing.json")
+    payload = json.loads(report_path.read_text(encoding="utf-8"))
+
+    assert payload["stages"][0]["metadata"]["input_tensor_shapes"] == [[1, 6, 32, 48]]
+    assert payload["stages"][0]["metadata"]["input_tensor_devices_before_forward"] == ["mps"]
+    assert payload["stages"][0]["metadata"]["model_parameter_devices"] == ["mps"]
+
+
 def test_timing_report_is_manifest_metadata_and_not_exportable(tmp_path) -> None:
     request_dir = tmp_path / "runtime_cache" / "requests" / "run-3"
     request_dir.mkdir(parents=True)
