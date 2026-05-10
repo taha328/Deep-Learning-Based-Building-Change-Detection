@@ -8,7 +8,7 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import rasterio
-from rasterio.features import shapes
+from rasterio.features import geometry_mask, shapes
 from pyproj import Geod
 from shapely.geometry import GeometryCollection, LineString, MultiPolygon, Polygon, mapping, shape
 from shapely.geometry.base import BaseGeometry
@@ -54,6 +54,7 @@ def _vectorize_regions(
     context: VectorizationContext,
     *,
     id_field: str,
+    probability: np.ndarray | None = None,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     records: list[dict[str, Any]] = []
     features_out: list[dict[str, Any]] = []
@@ -70,6 +71,15 @@ def _vectorize_regions(
             continue
 
         geom_native = shape(geom)
+        probability_stats: dict[str, float | None] = {"mean_probability": None, "max_probability": None}
+        if probability is not None and probability.shape == mask.shape:
+            component_mask = geometry_mask([geom], out_shape=mask.shape, transform=transform, invert=True) & mask.astype(bool)
+            values = probability[component_mask]
+            if values.size:
+                probability_stats = {
+                    "mean_probability": float(np.nanmean(values)),
+                    "max_probability": float(np.nanmax(values)),
+                }
         geom_wgs84 = reproject_geometry(geom_native, str(crs), "EPSG:4326")
         area_m2 = abs(GEOD.geometry_area_perimeter(geom_wgs84)[0])
         centroid = geom_wgs84.centroid
@@ -83,6 +93,7 @@ def _vectorize_regions(
             "release_t2": context.release_t2,
             "src_date_t1": context.src_date_t1,
             "src_date_t2": context.src_date_t2,
+            **probability_stats,
         }
         records.append(record)
         features_out.append(
@@ -108,8 +119,10 @@ def vectorize_change_regions(
     mask: np.ndarray,
     reference_path: Path,
     context: VectorizationContext,
+    *,
+    probability: np.ndarray | None = None,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
-    return _vectorize_regions(mask, reference_path, context, id_field="change_id")
+    return _vectorize_regions(mask, reference_path, context, id_field="change_id", probability=probability)
 
 
 def vectorize_segmentation_regions(

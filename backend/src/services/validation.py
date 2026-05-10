@@ -2,13 +2,23 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+import logging
 
 from src.config import ModeLimits, Settings
-from src.domain.tiling import estimate_patch_count, pixel_size_m_at_tile, scene_tile_count, tile_range_for_bbox
+from src.domain.tiling import (
+    estimate_patch_count,
+    intersecting_tiles_for_aoi,
+    pixel_size_m_at_tile,
+    scene_tile_count,
+    tile_range_for_bbox,
+)
 from src.domain.wayback import WaybackRelease
 from src.schemas import RunRequest, SegmentationRequest, ValidationRequest, ValidationResponse
 from src.utils.geometry import bounds_dict, geodesic_area_m2, normalized_aoi_geojson, parse_aoi_geometry
 from src.utils.hashing import build_request_hash
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -123,13 +133,22 @@ def validate_request(
             blocking_errors.append("Mapbox current imagery is not enabled.")
         if settings.mapbox_current_imagery_enabled and not settings.mapbox_access_token:
             blocking_errors.append("Mapbox current imagery is enabled but MAPBOX_ACCESS_TOKEN is not configured.")
-        warnings.append(
-            "The latest milestone uses Mapbox Satellite current basemap imagery. Exact capture date is not guaranteed."
-        )
 
     area_m2 = geodesic_area_m2(geometry)
     bbox = bounds_dict(geometry)
     tile_count = scene_tile_count(bbox, settings.zoom)
+    mapbox_tile_count = tile_count
+    if uses_mapbox_current:
+        intersecting_tiles, bbox_tile_count = intersecting_tiles_for_aoi(normalized, bbox=bbox, zoom=settings.zoom)
+        if intersecting_tiles is not None:
+            mapbox_tile_count = len(intersecting_tiles)
+            LOGGER.info(
+                "MAPBOX_TILE_SELECTION bboxTileCount=%s intersectingTileCount=%s skippedOutsideAoiTileCount=%s zoom=%s",
+                bbox_tile_count,
+                mapbox_tile_count,
+                max(bbox_tile_count - mapbox_tile_count, 0),
+                settings.zoom,
+            )
     patch_count = _estimated_remote_patch_count(bbox, settings)
     total_tiles = tile_count * 2
 
@@ -148,6 +167,20 @@ def validate_request(
         warnings.append(
             f"AOI requires {tile_count} tiles per date, exceeding the {mode_limits.label} tile budget of {mode_limits.max_scene_tiles}."
             " The request remains allowed, but imagery download will be much heavier."
+        )
+    if uses_mapbox_current:
+        if mapbox_tile_count > settings.mapbox_max_tiles_per_request:
+            blocking_errors.append(
+                f"AOI would download {mapbox_tile_count} Mapbox tiles at z={settings.zoom}, exceeding the limit of "
+                f"{settings.mapbox_max_tiles_per_request}."
+            )
+        elif mapbox_tile_count > settings.full_limits.max_scene_tiles:
+            warnings.append(
+                f"AOI will download {mapbox_tile_count} Mapbox tiles at z={settings.zoom}. "
+                "This may take longer and consume more Mapbox quota."
+            )
+        warnings.append(
+            "The latest milestone uses Mapbox Satellite current basemap imagery. Exact capture date is not guaranteed."
         )
     if remote_patch_budget_enabled and patch_count > mode_limits.max_remote_patches_per_scene:
         blocking_errors.append(
@@ -213,6 +246,13 @@ def validate_request(
         "buffer_distances_m": request.buffer_distances_m or list(settings.default_buffer_distances_m),
         "keep_disjoint_buffer_parts_separate": request.keep_disjoint_buffer_parts_separate,
         "road_constraint_layer_path": request.road_constraint_layer_path,
+        "addition_min_area_m2": settings.addition_min_area_m2,
+        "addition_max_existing_overlap_ratio": settings.addition_max_existing_overlap_ratio,
+        "addition_thin_artifact_max_area_m2": settings.addition_thin_artifact_max_area_m2,
+        "addition_thinness_min_ratio": settings.addition_thinness_min_ratio,
+        "addition_edge_buffer_m": settings.addition_edge_buffer_m,
+        "addition_max_edge_overlap_ratio": settings.addition_max_edge_overlap_ratio,
+        "addition_thin_artifact_max_mean_probability": settings.addition_thin_artifact_max_mean_probability,
     }
     if request_hash_context:
         hash_payload.update(request_hash_context)

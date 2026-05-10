@@ -62,7 +62,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import type { FrontendRuntimeConfig } from "@/lib/env";
-import { buildBackendFileUrl } from "@/lib/backend-files";
+import { buildBackendFileUrl, resolveBackendUrl } from "@/lib/backend-files";
 import { cn, formatNumber } from "@/lib/utils";
 import { downloadFileFromUrl } from "@/lib/download";
 import { useI18n } from "@/lib/i18n";
@@ -338,6 +338,8 @@ function emptyProject(aoi: Polygon | null, projectName: string, executionConfig:
     validation_blocking_errors: [],
     download_bundle_path: null,
     latest_source: "esri_wayback",
+    has_reference_layers: false,
+    reference_layer_count: 0,
   };
 }
 
@@ -405,10 +407,21 @@ function hasValidRasterBounds(bounds: number[] | null | undefined): bounds is [n
   return Array.isArray(bounds) && bounds.length >= 4 && bounds.every((value) => Number.isFinite(value));
 }
 
+function milestoneHasReferenceImageryPresentation(milestone: TemporalMilestone): boolean {
+  const imagery = milestone.reference_imagery;
+  if (!imagery) {
+    return false;
+  }
+
+  if (imagery.tilejson_url || imagery.tiles_url_template || imagery.cog_url || imagery.cog_path) {
+    return true;
+  }
+
+  return Boolean(imagery.image_png_data_url || imagery.image_path) && hasValidRasterBounds(imagery.raster_bounds_wgs84);
+}
+
 function milestoneHasMapPresentation(milestone: TemporalMilestone): boolean {
-  const hasReferenceImagery =
-    Boolean(milestone.reference_imagery?.image_png_data_url || milestone.reference_imagery?.image_path) &&
-    hasValidRasterBounds(milestone.reference_imagery?.raster_bounds_wgs84);
+  const hasReferenceImagery = milestoneHasReferenceImageryPresentation(milestone);
 
   return (
     hasReferenceImagery ||
@@ -848,6 +861,34 @@ export function TemporalMosaicPanel({
     }
 
     const referenceImagery = selectedMilestone.reference_imagery;
+    const toReferenceImageryPresentation = (milestone: TemporalMilestone) => {
+      const imagery = milestone.reference_imagery;
+      const storageStrategy =
+        imagery?.storage_strategy ??
+        (imagery?.tilejson_url || imagery?.tiles_url_template
+          ? "raster_tiles"
+          : imagery?.cog_url || imagery?.cog_path
+            ? "cog"
+            : "image_overlay");
+      return {
+        releaseIdentifier: milestone.release_identifier,
+        storageStrategy,
+        tilejsonUrl: resolveBackendUrl(backendUrl, imagery?.tilejson_url),
+        tilesUrlTemplate: resolveBackendUrl(backendUrl, imagery?.tiles_url_template),
+        cogUrl: imagery?.cog_url
+          ? resolveBackendUrl(backendUrl, imagery.cog_url)
+          : imagery?.cog_path
+            ? buildBackendFileUrl(backendUrl, imagery.cog_path)
+            : null,
+        imageUrl: imagery?.image_path
+          ? buildBackendFileUrl(backendUrl, imagery.image_path)
+          : imagery?.image_png_data_url ?? null,
+        bounds: hasValidRasterBounds(imagery?.raster_bounds_wgs84) ? imagery?.raster_bounds_wgs84 ?? null : null,
+        minzoom: imagery?.minzoom ?? null,
+        maxzoom: imagery?.maxzoom ?? null,
+        tileSize: imagery?.tile_size ?? 256,
+      };
+    };
     const referenceImageryUrl = referenceImagery?.image_path
       ? buildBackendFileUrl(backendUrl, referenceImagery.image_path)
       : referenceImagery?.image_png_data_url
@@ -874,11 +915,21 @@ export function TemporalMosaicPanel({
         .slice(0, selectedMilestoneIndex + 1)
         .map((milestone) => ensureFeatureCollection(milestone.buffer_layers_geojson?.["20m"])),
     );
+    const referenceImageryTimeline = project.milestones
+      .filter((milestone) => milestone.reference_imagery)
+      .map((milestone) => toReferenceImageryPresentation(milestone));
 
     onMapPresentationChange({
+      projectId: project.project_id,
+      projectUpdatedAt: project.updated_at,
+      isHydratingProject: Boolean(temporalProjectBootstrap || loadProjectMutation.isPending || hydratingAoiRef.current),
+      availableMilestoneIds: project.milestones.map((milestone) => milestone.release_identifier),
+      selectedMilestoneIndex,
       selectedReleaseIdentifier: selectedMilestone.release_identifier,
       selectedMilestoneStatus: selectedMilestone.status,
       milestoneCount: project.milestones.length,
+      referenceImagery: referenceImagery ? toReferenceImageryPresentation(selectedMilestone) : null,
+      referenceImageryTimeline,
       referenceImageryUrl,
       referenceImageryBounds,
       automatedCandidate: ensureFeatureCollection(selectedMilestone.automated_candidate_footprint_geojson),
@@ -1081,8 +1132,10 @@ export function TemporalMosaicPanel({
     if (!project?.project_id) {
       return;
     }
-    const bundlePath = project.download_bundle_path ?? (await createTemporalProjectExportBundle(project.project_id));
-    const fileName = bundlePath.split("/").pop() ?? `${project.project_id}.zip`;
+    const bundleResult = project.download_bundle_path ?? (await createTemporalProjectExportBundle(project.project_id));
+    const bundlePath = typeof bundleResult === "string" ? bundleResult : bundleResult.path;
+    const fileName =
+      typeof bundleResult === "string" ? bundleResult.split("/").pop() ?? `${project.project_id}.zip` : bundleResult.filename;
     await downloadFileFromUrl(buildBackendFileUrl(backendUrl, bundlePath), fileName);
   };
 

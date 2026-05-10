@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import rasterio
 from rasterio.enums import Resampling
+from rasterio.features import rasterize
 from rasterio.warp import reproject
+
+from src.utils.geometry import parse_aoi_geometry, reproject_geometry
 
 
 def read_rgb(path: Path) -> np.ndarray:
@@ -76,3 +80,22 @@ def align_single_band_mask_to_reference(source_path: Path, reference_path: Path)
             resampling=Resampling.nearest,
         )
     return destination > 0.5
+
+
+def rasterize_aoi_mask_like(reference_path: Path, aoi_geojson: dict[str, Any]) -> np.ndarray:
+    with rasterio.open(reference_path) as ref:
+        if ref.crs is None:
+            raise ValueError(f"Reference raster has no CRS: {reference_path}")
+        geometry = parse_aoi_geometry(aoi_geojson)
+        reference_crs = ref.crs.to_string()
+        if reference_crs != "EPSG:4326":
+            geometry = reproject_geometry(geometry, "EPSG:4326", reference_crs)
+        mask = rasterize(
+            [(geometry, 1)],
+            out_shape=(ref.height, ref.width),
+            transform=ref.transform,
+            fill=0,
+            dtype="uint8",
+            all_touched=False,
+        )
+    return mask.astype(bool)

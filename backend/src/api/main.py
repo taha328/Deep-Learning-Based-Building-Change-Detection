@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from src.api.routes import backends, cache, detection, files, health, jobs, releases, temporal_projects
+from src.api.routes import backends, cache, detection, dev, files, health, jobs, releases, temporal_projects
 from src.config import get_settings
 
 
@@ -26,6 +26,7 @@ def create_fastapi_app() -> FastAPI:
     app.include_router(detection.router, prefix="/api/detection", tags=["detection"])
     app.include_router(jobs.router, prefix="/api/jobs", tags=["jobs"])
     app.include_router(temporal_projects.router, prefix="/api/temporal-projects", tags=["temporal-projects"])
+    app.include_router(dev.router, prefix="/api/dev", tags=["dev"])
     app.include_router(cache.router, prefix="/api/cache", tags=["cache"])
     app.include_router(files.router, prefix="/api/files", tags=["files"])
 

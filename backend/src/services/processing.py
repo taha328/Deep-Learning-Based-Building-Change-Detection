@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
+import numpy as np
 import pandas as pd
 from PIL import Image
 from pathlib import Path
@@ -22,8 +23,16 @@ from src.domain.imagery_providers import MapboxCurrentProvider
 from src.domain.inference import derive_new_building_products, run_single_scene_inference, run_tiled_inference
 from src.domain.mapbox_current import MAPBOX_ATTRIBUTION, MAPBOX_SOURCE_ID
 from src.domain.mosaic import MosaicResult, align_mosaic_pair, download_wayback_mosaic
-from src.domain.postprocess import remove_small_components, suppress_edge_hugging_components
-from src.domain.tiling import estimate_patch_count
+from rasterio.features import rasterize
+from shapely.geometry import shape
+
+from src.domain.postprocess import (
+    AdditionCandidateFilterSettings,
+    filter_addition_candidates,
+    remove_small_components,
+    suppress_edge_hugging_components,
+)
+from src.domain.tiling import estimate_patch_count, intersecting_tiles_for_aoi
 from src.domain.wayback_metadata_cache import (
     acquire_wayback_metadata_cache_lock,
     build_wayback_metadata_cache_key,
@@ -68,7 +77,8 @@ from src.services.validation import (
     validate_request,
     validate_segmentation_request,
 )
-from src.utils.raster import read_rgb
+from src.utils.raster import rasterize_aoi_mask_like, read_rgb
+from src.utils.geometry import reproject_geometry
 from src.utils.logging import get_logger
 from src.utils.profiling import StageTimings
 
@@ -115,6 +125,31 @@ def _report(progress: ProgressReporter, value: float, message: str) -> None:
         progress(value, message)
 
 
+def _resolve_available_tiles_for_aoi(
+    normalized_aoi: dict[str, Any],
+    *,
+    bbox: dict[str, float],
+    zoom: int,
+    preflight_available_tiles: frozenset[tuple[int, int]] | None,
+) -> frozenset[tuple[int, int]] | None:
+    intersecting_tiles, bbox_tile_count = intersecting_tiles_for_aoi(normalized_aoi, bbox=bbox, zoom=zoom)
+    if intersecting_tiles is None:
+        return preflight_available_tiles
+    selected_tiles = (
+        intersecting_tiles
+        if preflight_available_tiles is None
+        else frozenset(tile for tile in intersecting_tiles if tile in preflight_available_tiles)
+    )
+    LOGGER.info(
+        "AOI_TILE_SELECTION bboxTileCount=%s intersectingTileCount=%s selectedTileCount=%s zoom=%s",
+        bbox_tile_count,
+        len(intersecting_tiles),
+        len(selected_tiles),
+        zoom,
+    )
+    return selected_tiles
+
+
 def _inference_stage_message(model_backend: Literal["sam3", "bandon_mps"], inference_runner) -> str:
     if model_backend == "bandon_mps":
         return "Running BANDON MTGCDNet change detection"
@@ -139,6 +174,86 @@ def _write_bandon_input_images(
     t1_image.save(t1_path)
     t2_image.save(t2_path)
     return t1_path, t2_path
+
+
+def _write_bandon_mask_png(output_dir: Path, name: str, mask: np.ndarray) -> Path:
+    path = output_dir / name
+    Image.fromarray((np.asarray(mask, dtype=bool).astype(np.uint8) * 255), mode="L").save(path)
+    return path
+
+
+def _rasterize_wgs84_feature_collection_like(
+    feature_collection: dict[str, Any],
+    reference_raster_path: Path,
+) -> np.ndarray:
+    with rasterio.open(reference_raster_path) as src:
+        out_shape = (src.height, src.width)
+        transform = src.transform
+        crs = src.crs
+    if crs is None:
+        return np.zeros(out_shape, dtype=bool)
+
+    geometries = []
+    for feature in feature_collection.get("features", []):
+        if not isinstance(feature, dict) or not isinstance(feature.get("geometry"), dict):
+            continue
+        try:
+            geometry = shape(feature["geometry"]).buffer(0)
+            if geometry.is_empty:
+                continue
+            native_geometry = reproject_geometry(geometry, "EPSG:4326", str(crs)).buffer(0)
+        except Exception:
+            continue
+        if not native_geometry.is_empty:
+            geometries.append(native_geometry)
+
+    if not geometries:
+        return np.zeros(out_shape, dtype=bool)
+    return rasterize(
+        [(geometry, 1) for geometry in geometries],
+        out_shape=out_shape,
+        transform=transform,
+        fill=0,
+        dtype="uint8",
+    ).astype(bool)
+
+
+def _apply_aoi_mask_to_aligned_inputs(
+    *,
+    arr_t1: np.ndarray,
+    arr_t2: np.ndarray,
+    t1_valid_mask: np.ndarray,
+    t2_valid_mask: np.ndarray,
+    reference_raster_path: Path,
+    normalized_aoi: dict[str, Any],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    aoi_mask = rasterize_aoi_mask_like(reference_raster_path, normalized_aoi)
+    if aoi_mask.shape != t1_valid_mask.shape or aoi_mask.shape != t2_valid_mask.shape:
+        raise ValueError(
+            f"AOI mask shape {aoi_mask.shape} does not match aligned mask shapes "
+            f"{t1_valid_mask.shape} / {t2_valid_mask.shape}."
+        )
+    if int(aoi_mask.sum()) == 0:
+        LOGGER.warning(
+            "AOI mask resolved to zero valid pixels for %s; skipping AOI mask application to preserve run stability.",
+            reference_raster_path,
+        )
+        return arr_t1, arr_t2, np.asarray(t1_valid_mask, dtype=bool), np.asarray(t2_valid_mask, dtype=bool), aoi_mask
+    t1_masked = np.asarray(t1_valid_mask, dtype=bool) & aoi_mask
+    t2_masked = np.asarray(t2_valid_mask, dtype=bool) & aoi_mask
+    arr_t1_masked = np.asarray(arr_t1).copy()
+    arr_t2_masked = np.asarray(arr_t2).copy()
+    arr_t1_masked[~t1_masked] = 0
+    arr_t2_masked[~t2_masked] = 0
+    LOGGER.info(
+        "AOI_RASTER_MASK_APPLIED rasterPath=%s width=%s height=%s outsideAoiPixelCount=%s validInsideAoiPixelCount=%s",
+        reference_raster_path,
+        int(aoi_mask.shape[1]),
+        int(aoi_mask.shape[0]),
+        int((~aoi_mask).sum()),
+        int(aoi_mask.sum()),
+    )
+    return arr_t1_masked, arr_t2_masked, t1_masked, t2_masked, aoi_mask
 
 
 def _source_manifest_entries_for_scenes(
@@ -1140,6 +1255,25 @@ def run_segmentation(
             source_rgb = read_rgb(scene.geotiff_path)
             with rasterio.open(scene.valid_mask_path) as src:
                 valid_mask = src.read(1).astype(bool)
+            aoi_mask = rasterize_aoi_mask_like(scene.geotiff_path, prepared.normalized_aoi)
+            if aoi_mask.shape == valid_mask.shape:
+                if int(aoi_mask.sum()) > 0:
+                    valid_mask &= aoi_mask
+                    source_rgb = source_rgb.copy()
+                    source_rgb[~valid_mask] = 0
+                    LOGGER.info(
+                        "AOI_RASTER_MASK_APPLIED rasterPath=%s width=%s height=%s outsideAoiPixelCount=%s validInsideAoiPixelCount=%s",
+                        scene.geotiff_path,
+                        int(aoi_mask.shape[1]),
+                        int(aoi_mask.shape[0]),
+                        int((~aoi_mask).sum()),
+                        int(aoi_mask.sum()),
+                    )
+                else:
+                    LOGGER.warning(
+                        "AOI mask resolved to zero valid pixels for %s; skipping AOI mask application to preserve run stability.",
+                        scene.geotiff_path,
+                    )
 
         actual_patch_count = estimate_patch_count(
             source_rgb.shape[0],
@@ -1362,6 +1496,8 @@ def run_detection(
         normalized_aoi=prepared.normalized_aoi,
         settings=settings,
     )
+    change_threshold = float(request.change_threshold if request.change_threshold is not None else settings.default_change_threshold)
+    semantic_threshold = float(request.semantic_threshold if request.semantic_threshold is not None else settings.default_semantic_threshold)
     old_building_mask_dilation_pixels = max(
         int(
             request.old_building_mask_dilation_pixels
@@ -1561,6 +1697,14 @@ def run_detection(
         _report(progress, 0.18, "Downloading imagery" if use_mapbox_t2 else "Downloading Wayback imagery")
         try:
             with timings.track("download"):
+                selected_tiles_t1 = _resolve_available_tiles_for_aoi(
+                    prepared.normalized_aoi,
+                    bbox=aoi_bbox,
+                    zoom=resolved_t1.zoom,
+                    preflight_available_tiles=tilemap_t1.available_tiles
+                    if tilemap_t1 is not None and tilemap_t1.preflight_complete
+                    else None,
+                )
                 scene_t1 = download_wayback_mosaic(
                     prepared.t1_release,
                     aoi_bbox,
@@ -1569,13 +1713,16 @@ def run_detection(
                     out_dir=result_dir,
                     label="t1",
                     max_tiles=None,
-                    available_tiles=tilemap_t1.available_tiles
-                    if tilemap_t1 is not None and tilemap_t1.preflight_complete
-                    else None,
+                    available_tiles=selected_tiles_t1,
                 )
                 if use_mapbox_t2:
                     mapbox_start = time.perf_counter_ns()
-                    scene_t2 = MapboxCurrentProvider().download(aoi_bbox, settings=settings, zoom=resolved_t2.zoom)
+                    scene_t2 = MapboxCurrentProvider().download(
+                        aoi_bbox,
+                        settings=settings,
+                        zoom=resolved_t2.zoom,
+                        aoi_geojson=prepared.normalized_aoi,
+                    )
                     _safe_add_timing_stage(
                         timing,
                         "mapbox_imagery_download_or_load",
@@ -1598,6 +1745,14 @@ def run_detection(
                         "attribution": MAPBOX_ATTRIBUTION,
                     }
                 else:
+                    selected_tiles_t2 = _resolve_available_tiles_for_aoi(
+                        prepared.normalized_aoi,
+                        bbox=aoi_bbox,
+                        zoom=resolved_t2.zoom,
+                        preflight_available_tiles=tilemap_t2.available_tiles
+                        if tilemap_t2 is not None and tilemap_t2.preflight_complete
+                        else None,
+                    )
                     scene_t2 = download_wayback_mosaic(
                         prepared.t2_release,
                         aoi_bbox,
@@ -1606,9 +1761,7 @@ def run_detection(
                         out_dir=result_dir,
                         label="t2",
                         max_tiles=None,
-                        available_tiles=tilemap_t2.available_tiles
-                        if tilemap_t2 is not None and tilemap_t2.preflight_complete
-                        else None,
+                        available_tiles=selected_tiles_t2,
                     )
         except ValueError as exc:
             return RunResponse(
@@ -1690,6 +1843,14 @@ def run_detection(
         arr_t2 = alignment_result.t2_rgb
         t1_valid_mask = alignment_result.t1_valid_mask
         t2_valid_mask = alignment_result.t2_valid_mask
+        arr_t1, arr_t2, t1_valid_mask, t2_valid_mask, aligned_aoi_mask = _apply_aoi_mask_to_aligned_inputs(
+            arr_t1=arr_t1,
+            arr_t2=arr_t2,
+            t1_valid_mask=t1_valid_mask,
+            t2_valid_mask=t2_valid_mask,
+            reference_raster_path=scene_t2.geotiff_path,
+            normalized_aoi=prepared.normalized_aoi,
+        )
         alignment_warnings = [
             str(item)
             for item in alignment_result.diagnostics.get("warnings", [])
@@ -1760,6 +1921,68 @@ def run_detection(
                         t1_image=bandon_input_t1_image,
                         t2_image=bandon_input_t2_image,
                     )
+                    if arr_t1.shape[:2] != t1_valid_mask.shape:
+                        raise ValueError(
+                            f"T1 valid mask shape {t1_valid_mask.shape} does not match BANDON input shape {arr_t1.shape[:2]}."
+                        )
+                    if arr_t2.shape[:2] != t2_valid_mask.shape:
+                        raise ValueError(
+                            f"T2 valid mask shape {t2_valid_mask.shape} does not match BANDON input shape {arr_t2.shape[:2]}."
+                        )
+                    bandon_t1_valid_mask_path: Path | None = None
+                    bandon_t2_valid_mask_path: Path | None = None
+                    bandon_aoi_mask_path: Path | None = None
+                    bandon_mask_write_metadata: dict[str, object] = {"enabled": False}
+                    if settings.bandon_skip_invalid_crops:
+                        try:
+                            bandon_t1_valid_mask_path = _write_bandon_mask_png(
+                                run_tmp_dir,
+                                "bandon_t1_valid_mask.png",
+                                t1_valid_mask,
+                            )
+                            bandon_t2_valid_mask_path = _write_bandon_mask_png(
+                                run_tmp_dir,
+                                "bandon_t2_valid_mask.png",
+                                t2_valid_mask,
+                            )
+                            bandon_aoi_mask = aligned_aoi_mask
+                            if bandon_aoi_mask.shape != t2_valid_mask.shape:
+                                raise ValueError(
+                                    f"AOI mask shape {bandon_aoi_mask.shape} does not match BANDON input shape {t2_valid_mask.shape}."
+                                )
+                            bandon_aoi_mask_path = _write_bandon_mask_png(
+                                run_tmp_dir,
+                                "bandon_aoi_mask.png",
+                                bandon_aoi_mask,
+                            )
+                            LOGGER.info(
+                                "BANDON_MASK_PATHS_WRITTEN t1Valid=%s t2Valid=%s aoi=%s width=%s height=%s",
+                                bandon_t1_valid_mask_path,
+                                bandon_t2_valid_mask_path,
+                                bandon_aoi_mask_path,
+                                int(arr_t2.shape[1]),
+                                int(arr_t2.shape[0]),
+                            )
+                            bandon_mask_write_metadata = {
+                                "enabled": True,
+                                "t1_valid_mask_path": bandon_t1_valid_mask_path.name,
+                                "t2_valid_mask_path": bandon_t2_valid_mask_path.name,
+                                "aoi_mask_path": bandon_aoi_mask_path.name,
+                                "mask_height": int(t2_valid_mask.shape[0]),
+                                "mask_width": int(t2_valid_mask.shape[1]),
+                            }
+                        except Exception as exc:  # noqa: BLE001
+                            bandon_t1_valid_mask_path = None
+                            bandon_t2_valid_mask_path = None
+                            bandon_aoi_mask_path = None
+                            bandon_mask_write_metadata = {
+                                "enabled": False,
+                                "reason": f"{type(exc).__name__}: {exc}",
+                            }
+                            LOGGER.warning(
+                                "BANDON_MASK_PATHS_WRITTEN enabled=false reason=%s",
+                                bandon_mask_write_metadata["reason"],
+                            )
                     _safe_add_timing_stage(
                         timing,
                         "inference.bandon.input_write",
@@ -1770,6 +1993,7 @@ def run_detection(
                             "t2_path": bandon_input_t2_path.name,
                             "t1_input_path_exists": bandon_input_t1_path.exists(),
                             "t2_input_path_exists": bandon_input_t2_path.exists(),
+                            "crop_skip_masks": bandon_mask_write_metadata,
                         },
                     )
                     bandon_result = run_bandon_inference(
@@ -1777,6 +2001,9 @@ def run_detection(
                         image_b_path=bandon_input_t2_path,
                         settings=settings,
                         out_dir=run_tmp_dir / "bandon_run",
+                        t1_valid_mask_path=bandon_t1_valid_mask_path,
+                        t2_valid_mask_path=bandon_t2_valid_mask_path,
+                        aoi_mask_path=bandon_aoi_mask_path,
                     )
                     if bandon_result.child_timing is not None:
                         timing.merge_child_timings(bandon_result.child_timing, prefix="inference.bandon")
@@ -1843,7 +2070,7 @@ def run_detection(
             _report(progress, 0.72, "Applying post-processing")
             with timings.track("postprocessing"):
                 raw_change_mask = (
-                    bandon_result.change_probability >= float(request.change_threshold)
+                    bandon_result.change_probability >= change_threshold
                 ) & bandon_result.change_mask & valid_comparison_mask
                 filtered_change_mask = suppress_edge_hugging_components(
                     raw_change_mask,
@@ -1861,9 +2088,39 @@ def run_detection(
                     filtered_change_mask,
                     scene_t2.geotiff_path,
                     vector_context,
+                    probability=bandon_result.change_probability,
                 )
+                if raw_change_geojson.get("features"):
+                    addition_filter_result = filter_addition_candidates(
+                        raw_change_geojson,
+                        existing_footprint_geojson=request.existing_footprint_geojson,
+                        settings=AdditionCandidateFilterSettings(
+                            min_area_m2=settings.addition_min_area_m2,
+                            max_existing_overlap_ratio=settings.addition_max_existing_overlap_ratio,
+                            thin_artifact_max_area_m2=settings.addition_thin_artifact_max_area_m2,
+                            thinness_min_ratio=settings.addition_thinness_min_ratio,
+                            edge_buffer_m=settings.addition_edge_buffer_m,
+                            max_edge_overlap_ratio=settings.addition_max_edge_overlap_ratio,
+                            thin_artifact_max_mean_probability=settings.addition_thin_artifact_max_mean_probability,
+                        ),
+                    )
+                    filtered_change_mask = _rasterize_wgs84_feature_collection_like(
+                        addition_filter_result.kept_geojson,
+                        scene_t2.geotiff_path,
+                    )
+                    filtered_change_mask, change_labels = remove_small_components(filtered_change_mask, 1)
+                    change_polygons_df = pd.DataFrame(
+                        [feature.get("properties", {}) for feature in addition_filter_result.kept_geojson.get("features", [])]
+                    )
+                    if change_polygons_df.empty:
+                        change_polygons_df = pd.DataFrame(columns=list(raw_change_df.columns))
+                    change_polygons_geojson = addition_filter_result.kept_geojson
+                else:
+                    addition_filter_result = None
+                    change_polygons_df = raw_change_df
+                    change_polygons_geojson = raw_change_geojson
                 change_polygons_df, change_polygons_geojson = merge_close_change_regions(
-                    raw_change_geojson,
+                    change_polygons_geojson,
                     max_gap_m=request.merge_close_gap_m,
                     context=vector_context,
                 )
@@ -1898,6 +2155,15 @@ def run_detection(
                     buffer_layers=change_buffer_layers,
                     summary_df=pair_summary_df,
                     bandon_metadata_path=run_tmp_dir / "bandon_run" / "run_metadata.json",
+                    addition_candidate_diagnostics_geojson=(
+                        addition_filter_result.diagnostics_geojson if addition_filter_result is not None else None
+                    ),
+                    rejected_addition_candidates_geojson=(
+                        addition_filter_result.rejected_geojson if addition_filter_result is not None else None
+                    ),
+                    flagged_addition_candidates_geojson=(
+                        addition_filter_result.flagged_geojson if addition_filter_result is not None else None
+                    ),
                 )
 
             total_change_area = float(change_polygons_df["area_m2"].sum()) if not change_polygons_df.empty else 0.0
@@ -1939,10 +2205,17 @@ def run_detection(
                     },
                     patch_count=0,
                     thresholds={
-                        "change_threshold": request.change_threshold,
-                        "semantic_threshold": request.semantic_threshold,
+                        "change_threshold": change_threshold,
+                        "semantic_threshold": semantic_threshold,
                         "old_building_mask_dilation_pixels": float(old_building_mask_dilation_pixels),
                         "new_building_core_distance_pixels": float(new_building_core_distance_pixels),
+                        "addition_min_area_m2": settings.addition_min_area_m2,
+                        "addition_max_existing_overlap_ratio": settings.addition_max_existing_overlap_ratio,
+                        "addition_thin_artifact_max_area_m2": settings.addition_thin_artifact_max_area_m2,
+                        "addition_thinness_min_ratio": settings.addition_thinness_min_ratio,
+                        "addition_edge_buffer_m": settings.addition_edge_buffer_m,
+                        "addition_max_edge_overlap_ratio": settings.addition_max_edge_overlap_ratio,
+                        "addition_thin_artifact_max_mean_probability": settings.addition_thin_artifact_max_mean_probability,
                     },
                     min_new_building_pixels=min_pixels,
                     alignment=alignment_result.diagnostics,
@@ -2019,8 +2292,8 @@ def run_detection(
                 probs["change_prediction"],  # type: ignore[index]
                 probs["t1_semantic_prediction"],  # type: ignore[index]
                 probs["t2_semantic_prediction"],  # type: ignore[index]
-                change_threshold=request.change_threshold,
-                semantic_threshold=request.semantic_threshold,
+                change_threshold=change_threshold,
+                semantic_threshold=semantic_threshold,
                 min_new_building_pixels=min_pixels,
                 old_building_mask_dilation_pixels=old_building_mask_dilation_pixels,
                 new_building_core_distance_pixels=new_building_core_distance_pixels,
@@ -2115,8 +2388,8 @@ def run_detection(
                 },
                 patch_count=inference_diag.patch_count,
                 thresholds={
-                    "change_threshold": request.change_threshold,
-                    "semantic_threshold": request.semantic_threshold,
+                    "change_threshold": change_threshold,
+                    "semantic_threshold": semantic_threshold,
                     "old_building_mask_dilation_pixels": float(old_building_mask_dilation_pixels),
                     "new_building_core_distance_pixels": float(new_building_core_distance_pixels),
                 },

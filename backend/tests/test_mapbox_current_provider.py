@@ -116,6 +116,17 @@ def test_mapbox_network_error_does_not_leak_token(tmp_path, monkeypatch) -> None
     assert "access_token" not in str(exc_info.value)
 
 
+def test_mapbox_tile_limit_uses_configurable_setting(tmp_path, monkeypatch) -> None:
+    settings = _settings(tmp_path, token="pk.secret").model_copy(update={"mapbox_max_tiles_per_request": 4})
+    monkeypatch.setattr("src.domain.mapbox_current.tile_range_for_bbox", lambda bbox, zoom: (0, 2, 0, 1))  # 6 tiles
+
+    with pytest.raises(MapboxCurrentImageryError, match="exceeding the limit of 4"):
+        download_mapbox_current_mosaic(
+            {"west": 0, "south": 0, "east": 1, "north": 1},
+            settings=settings,
+        )
+
+
 def test_mapbox_cache_miss_writes_georeferenced_tif_and_cache_hit_avoids_network(tmp_path, monkeypatch) -> None:
     settings = _settings(tmp_path)
     calls: list[str] = []
@@ -144,6 +155,26 @@ def test_mapbox_cache_miss_writes_georeferenced_tif_and_cache_hit_avoids_network
         assert src.height == 256
         assert src.count == 3
         assert src.transform is not None
+
+
+def test_mapbox_download_uses_intersecting_tiles_only(tmp_path, monkeypatch) -> None:
+    settings = _settings(tmp_path)
+    calls: list[str] = []
+    monkeypatch.setattr("src.domain.mapbox_current.tile_range_for_bbox", lambda bbox, zoom: (0, 1, 0, 0))
+    monkeypatch.setattr(
+        "src.domain.mapbox_current.intersecting_tiles_for_aoi",
+        lambda aoi, *, bbox, zoom: (frozenset({(1, 0)}), 2),
+    )
+    monkeypatch.setattr("src.domain.mapbox_current.requests.get", lambda url, timeout: calls.append(url) or _FakeResponse())
+
+    scene = download_mapbox_current_mosaic(
+        {"west": 0, "south": 0, "east": 1, "north": 1},
+        settings=settings,
+        aoi_geojson={"type": "Polygon", "coordinates": [[[0, 0], [0, 1], [1, 1], [0, 0]]]},
+    )
+
+    assert scene.tile_count == 1
+    assert len(calls) == 1
 
 
 def test_mapbox_manifest_metadata_does_not_include_token_and_is_non_exportable(tmp_path, monkeypatch) -> None:

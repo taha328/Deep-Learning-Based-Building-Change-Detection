@@ -227,7 +227,7 @@ def test_run_temporal_imagery_prefetch_uses_shared_cache_only_without_manifest_o
         download_calls.append(("esri_wayback", release.identifier, settings.materialize_source_imagery_in_requests, settings.download_workers))
         return _fake_mosaic_result(settings.wayback_mosaic_cache_dir / release.identifier, provider="esri_wayback", identifier=release.identifier, source_type="historical_release")
 
-    def _fake_mapbox_download(self, bbox, *, settings, zoom=None):
+    def _fake_mapbox_download(self, bbox, *, settings, zoom=None, aoi_geojson=None):
         download_calls.append(("mapbox", MAPBOX_SOURCE_ID, settings.materialize_source_imagery_in_requests, settings.download_workers))
         return _fake_mosaic_result(settings.mapbox_current_imagery_cache_dir / "mapbox", provider="mapbox", identifier=MAPBOX_SOURCE_ID, source_type="current_basemap")
 

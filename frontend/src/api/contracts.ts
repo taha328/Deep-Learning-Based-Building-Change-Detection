@@ -266,6 +266,14 @@ export const temporalReferenceImagerySchema = z.object({
   image_path: z.string().nullable().optional(),
   image_png_data_url: z.string().nullable().optional(),
   raster_bounds_wgs84: z.array(z.number()).nullable().optional(),
+  storage_strategy: z.enum(["image_overlay", "cog", "raster_tiles"]).nullable().optional(),
+  cog_path: z.string().nullable().optional(),
+  cog_url: z.string().nullable().optional(),
+  tilejson_url: z.string().nullable().optional(),
+  tiles_url_template: z.string().nullable().optional(),
+  minzoom: z.number().nullable().optional(),
+  maxzoom: z.number().nullable().optional(),
+  tile_size: z.number().nullable().optional(),
 });
 
 export const temporalMilestoneSchema = z.object({
@@ -307,6 +315,8 @@ export const temporalProjectSchema = z.object({
   validation_blocking_errors: z.array(z.string()).default([]),
   download_bundle_path: z.string().nullable().optional(),
   latest_source: latestImagerySourceSchema.default("esri_wayback"),
+  has_reference_layers: z.boolean().default(false),
+  reference_layer_count: z.number().int().default(0),
 });
 
 export const temporalProjectSummarySchema = z.object({
@@ -354,6 +364,12 @@ export const temporalProjectRunResponseSchema = z.object({
   project: temporalProjectSchema,
 });
 
+export const temporalProjectExportBundleSchema = z.object({
+  path: z.string(),
+  filename: z.string(),
+  label: z.string(),
+});
+
 export type ModeName = z.infer<typeof modeSchema>;
 export type ModelBackendName = z.infer<typeof modelBackendSchema>;
 export type Sam3BackendMode = z.infer<typeof sam3BackendModeSchema>;
@@ -380,3 +396,4 @@ export type TemporalProjectSaveResponse = z.infer<typeof temporalProjectSaveResp
 export type TemporalPairEstimate = z.infer<typeof temporalPairEstimateSchema>;
 export type TemporalProjectValidationResponse = z.infer<typeof temporalProjectValidationResponseSchema>;
 export type TemporalProjectRunResponse = z.infer<typeof temporalProjectRunResponseSchema>;
+export type TemporalProjectExportBundle = z.infer<typeof temporalProjectExportBundleSchema>;

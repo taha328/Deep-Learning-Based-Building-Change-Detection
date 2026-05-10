@@ -146,6 +146,7 @@ class ValidationRequest(BaseModel):
     keep_disjoint_buffer_parts_separate: bool = True
     road_constraint_layer_path: str | None = None
     latest_source: LatestImagerySource = "esri_wayback"
+    existing_footprint_geojson: dict[str, Any] | None = None
 
     @field_validator("buffer_distances_m")
     @classmethod
@@ -186,7 +187,7 @@ class ValidationResponse(BaseModel):
 class RunRequest(ValidationRequest):
     model_config = ConfigDict(extra="forbid")
 
-    change_threshold: float = 0.50
+    change_threshold: float = 0.60
     semantic_threshold: float = 0.50
     old_building_mask_dilation_pixels: int = 2
     new_building_core_distance_pixels: int = 2
@@ -327,6 +328,14 @@ class TemporalReferenceImagery(BaseModel):
     image_path: str | None = None
     image_png_data_url: str | None = None
     raster_bounds_wgs84: list[float] | None = None
+    storage_strategy: Literal["image_overlay", "cog", "raster_tiles"] | None = None
+    cog_path: str | None = None
+    cog_url: str | None = None
+    tilejson_url: str | None = None
+    tiles_url_template: str | None = None
+    minzoom: int | None = None
+    maxzoom: int | None = None
+    tile_size: int | None = None
 
 
 class TemporalMilestone(BaseModel):
@@ -372,6 +381,13 @@ class TemporalProject(BaseModel):
     validation_blocking_errors: list[str] = Field(default_factory=list)
     download_bundle_path: str | None = None
     latest_source: LatestImagerySource = "esri_wayback"
+
+
+class TemporalProjectResponse(TemporalProject):
+    model_config = ConfigDict(extra="forbid")
+
+    has_reference_layers: bool = False
+    reference_layer_count: int = 0
 
 
 class TemporalProjectSummary(BaseModel):
@@ -431,6 +447,16 @@ class TemporalProjectSaveRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     project: TemporalProject
+
+    @field_validator("project", mode="before")
+    @classmethod
+    def strip_derived_project_fields(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            sanitized = dict(value)
+            sanitized.pop("has_reference_layers", None)
+            sanitized.pop("reference_layer_count", None)
+            return sanitized
+        return value
 
 
 class TemporalProjectSaveResponse(BaseModel):

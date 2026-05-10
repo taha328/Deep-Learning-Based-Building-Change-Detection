@@ -62,6 +62,7 @@ def test_run_detection_populates_release_dates_in_summary(tmp_path, monkeypatch)
     settings = Settings(
         runtime_cache_dir=tmp_path,
         wayback_tilemap_preflight_enabled=False,
+        keep_intermediate_artifacts=True,
     )
     releases = [
         WaybackRelease(
@@ -716,6 +717,7 @@ def test_run_detection_supports_bandon_backend(tmp_path, monkeypatch) -> None:
     settings = Settings(
         runtime_cache_dir=tmp_path,
         wayback_tilemap_preflight_enabled=False,
+        keep_intermediate_artifacts=True,
     )
     releases = [
         WaybackRelease(
@@ -781,9 +783,11 @@ def test_run_detection_supports_bandon_backend(tmp_path, monkeypatch) -> None:
         ),
     )
     monkeypatch.setattr("src.services.processing.resolve_min_new_building_pixels", lambda *args, **kwargs: 1)
-    monkeypatch.setattr(
-        "src.services.processing.run_bandon_inference",
-        lambda **kwargs: type(
+    captured_bandon_kwargs: dict[str, object] = {}
+
+    def _fake_run_bandon_inference(**kwargs):
+        captured_bandon_kwargs.update(kwargs)
+        return type(
             "BandonResult",
             (),
             {
@@ -801,8 +805,9 @@ def test_run_detection_supports_bandon_backend(tmp_path, monkeypatch) -> None:
                 "launcher": "env_python",
                 "command": ["python", "infer_mps.py"],
             },
-        )(),
-    )
+        )()
+
+    monkeypatch.setattr("src.services.processing.run_bandon_inference", _fake_run_bandon_inference)
     empty_fc = {"type": "FeatureCollection", "features": []}
     monkeypatch.setattr(
         "src.services.processing.vectorize_change_regions",
@@ -830,6 +835,12 @@ def test_run_detection_supports_bandon_backend(tmp_path, monkeypatch) -> None:
     assert response.summary.total_change_polygons == 0
     assert response.diagnostics is not None
     assert response.diagnostics.backend["model_backend"] == "bandon_mps"
+    assert isinstance(captured_bandon_kwargs["t1_valid_mask_path"], Path)
+    assert isinstance(captured_bandon_kwargs["t2_valid_mask_path"], Path)
+    assert isinstance(captured_bandon_kwargs["aoi_mask_path"], Path)
+    assert Path(captured_bandon_kwargs["t1_valid_mask_path"]).exists()
+    assert Path(captured_bandon_kwargs["t2_valid_mask_path"]).exists()
+    assert Path(captured_bandon_kwargs["aoi_mask_path"]).exists()
 
 
 def test_run_detection_bandon_writes_manifest_and_nested_timing_without_auto_bundle(tmp_path, monkeypatch) -> None:

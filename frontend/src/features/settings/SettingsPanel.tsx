@@ -419,6 +419,8 @@ function buildTemporalBootstrapProject(
     validation_blocking_errors: [],
     download_bundle_path: null,
     latest_source: "esri_wayback",
+    has_reference_layers: false,
+    reference_layer_count: 0,
   };
 }
 
@@ -629,6 +631,8 @@ export function SettingsPanel({
         validation_blocking_errors: [],
         download_bundle_path: null,
         latest_source: "esri_wayback",
+        has_reference_layers: false,
+        reference_layer_count: 0,
       };
       const savedProject = await saveTemporalProject(nextProject);
       setSelectedProjectId(savedProject.project_id);

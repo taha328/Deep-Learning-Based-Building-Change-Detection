@@ -132,6 +132,10 @@ def _fallback_exportable_paths(request_dir: Path) -> list[Path]:
         "building_blocks.geojson",
         "building_change_polygons.csv",
         "building_change_polygons.geojson",
+        "addition_candidate_diagnostics.csv",
+        "addition_candidate_diagnostics.geojson",
+        "rejected_addition_candidates.geojson",
+        "flagged_addition_candidates.geojson",
         "building_change_blocks.csv",
         "building_change_blocks.geojson",
         "segmentation_polygons.csv",
@@ -413,6 +417,9 @@ def export_bandon_outputs(
     buffer_layers: dict[str, tuple[pd.DataFrame, dict]],
     summary_df: pd.DataFrame,
     bandon_metadata_path: Path | None = None,
+    addition_candidate_diagnostics_geojson: dict | None = None,
+    rejected_addition_candidates_geojson: dict | None = None,
+    flagged_addition_candidates_geojson: dict | None = None,
 ) -> tuple[PreviewImages, list[ArtifactEntry], str | None, TabularMetrics]:
     t1_preview_path = _save_png(result_dir / "t1_preview.png", t1_rgb)
     t2_preview_path = _save_png(result_dir / "t2_preview.png", t2_rgb)
@@ -445,6 +452,27 @@ def export_bandon_outputs(
 
     change_polygons_csv = write_csv(result_dir / "building_change_polygons.csv", change_polygons_df)
     change_polygons_geojson_path = write_geojson(result_dir / "building_change_polygons.geojson", change_polygons_geojson)
+    diagnostics_geojson_path = None
+    rejected_geojson_path = None
+    flagged_geojson_path = None
+    diagnostics_csv_path = None
+    if addition_candidate_diagnostics_geojson is not None:
+        diagnostics_geojson_path = write_geojson(
+            result_dir / "addition_candidate_diagnostics.geojson",
+            addition_candidate_diagnostics_geojson,
+        )
+        diagnostics_rows = [feature.get("properties", {}) for feature in addition_candidate_diagnostics_geojson.get("features", [])]
+        diagnostics_csv_path = write_csv(result_dir / "addition_candidate_diagnostics.csv", pd.DataFrame(diagnostics_rows))
+    if rejected_addition_candidates_geojson is not None:
+        rejected_geojson_path = write_geojson(
+            result_dir / "rejected_addition_candidates.geojson",
+            rejected_addition_candidates_geojson,
+        )
+    if flagged_addition_candidates_geojson is not None:
+        flagged_geojson_path = write_geojson(
+            result_dir / "flagged_addition_candidates.geojson",
+            flagged_addition_candidates_geojson,
+        )
     change_blocks_csv = write_csv(result_dir / "building_change_blocks.csv", change_blocks_df)
     change_blocks_geojson_path = write_geojson(result_dir / "building_change_blocks.geojson", change_blocks_geojson)
     summary_csv = write_csv(result_dir / "wayback_pair_summary.csv", summary_df)
@@ -510,6 +538,42 @@ def export_bandon_outputs(
         ),
         ArtifactEntry(name="summary_csv", path=str(summary_csv), media_type="text/csv", description="Pair summary"),
     ]
+    if diagnostics_csv_path is not None:
+        artifacts.append(
+            ArtifactEntry(
+                name="addition_candidate_diagnostics_csv",
+                path=str(diagnostics_csv_path),
+                media_type="text/csv",
+                description="Per-candidate addition filter diagnostics",
+            )
+        )
+    if diagnostics_geojson_path is not None:
+        artifacts.append(
+            ArtifactEntry(
+                name="addition_candidate_diagnostics_geojson",
+                path=str(diagnostics_geojson_path),
+                media_type="application/geo+json",
+                description="Per-candidate addition filter diagnostics",
+            )
+        )
+    if rejected_geojson_path is not None:
+        artifacts.append(
+            ArtifactEntry(
+                name="rejected_addition_candidates_geojson",
+                path=str(rejected_geojson_path),
+                media_type="application/geo+json",
+                description="Rejected building-addition candidates",
+            )
+        )
+    if flagged_geojson_path is not None:
+        artifacts.append(
+            ArtifactEntry(
+                name="flagged_addition_candidates_geojson",
+                path=str(flagged_geojson_path),
+                media_type="application/geo+json",
+                description="Building-addition candidates flagged for review",
+            )
+        )
     buffer_rows: dict[str, list[dict]] = {}
     for label, (buffer_df, buffer_geojson) in buffer_layers.items():
         buffer_csv = write_csv(result_dir / f"building_change_buffer_{label}.csv", buffer_df)

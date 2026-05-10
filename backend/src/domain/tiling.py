@@ -6,6 +6,9 @@ from typing import Iterator
 
 import numpy as np
 from pyproj import Transformer
+from shapely.geometry import box, shape
+from shapely.geometry.base import BaseGeometry
+from shapely.ops import transform as shapely_transform
 
 
 TO_3857 = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
@@ -52,6 +55,38 @@ def tile_bounds_3857(x: int, y: int, zoom: int) -> tuple[float, float, float, fl
 def scene_tile_count(bbox: dict[str, float], zoom: int) -> int:
     x_min, x_max, y_min, y_max = tile_range_for_bbox(bbox, zoom)
     return (x_max - x_min + 1) * (y_max - y_min + 1)
+
+
+def intersecting_tiles_for_aoi(
+    aoi_geojson: dict[str, object] | None,
+    *,
+    bbox: dict[str, float],
+    zoom: int,
+) -> tuple[frozenset[tuple[int, int]] | None, int]:
+    """Return AOI-intersecting xyz tiles and bbox candidate count.
+
+    Returns (None, bbox_count) when AOI geometry cannot be evaluated safely, so callers can
+    fall back to bbox-only selection.
+    """
+    x_min, x_max, y_min, y_max = tile_range_for_bbox(bbox, zoom)
+    bbox_count = (x_max - x_min + 1) * (y_max - y_min + 1)
+    if not aoi_geojson:
+        return None, bbox_count
+    try:
+        aoi_geom = shape(aoi_geojson).buffer(0)
+        if aoi_geom.is_empty:
+            return frozenset(), bbox_count
+        aoi_3857: BaseGeometry = shapely_transform(TO_3857.transform, aoi_geom)
+    except Exception:
+        return None, bbox_count
+
+    selected: set[tuple[int, int]] = set()
+    for y in range(y_min, y_max + 1):
+        for x in range(x_min, x_max + 1):
+            tile_poly = box(*tile_bounds_3857(x, y, zoom))
+            if tile_poly.intersects(aoi_3857):
+                selected.add((x, y))
+    return frozenset(selected), bbox_count
 
 
 def pixel_size_m_at_tile(x: int, y: int, zoom: int) -> tuple[float, float]:

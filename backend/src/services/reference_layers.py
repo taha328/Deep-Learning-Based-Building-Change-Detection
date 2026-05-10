@@ -120,10 +120,23 @@ def _extension(filename: str) -> str:
 
 
 def _project_dir(settings: Settings, project_id: str) -> Path:
-    project = get_temporal_project(_safe_project_id(project_id), settings)
-    if project.project_dir:
-        return Path(project.project_dir).resolve()
-    return (settings.temporal_projects_dir / project.project_id).resolve()
+    safe_project_id = _safe_project_id(project_id)
+    registry_path = settings.runtime_cache_dir / "temporal_projects_registry.json"
+    if registry_path.exists():
+        try:
+            registry = json.loads(registry_path.read_text(encoding="utf-8"))
+        except Exception:
+            registry = {}
+        project_dir = registry.get(safe_project_id) if isinstance(registry, dict) else None
+        if isinstance(project_dir, str) and project_dir:
+            return Path(project_dir).resolve()
+
+    default_dir = (settings.temporal_projects_dir / safe_project_id).resolve()
+    project_json = default_dir / "project.json"
+    if project_json.exists():
+        return default_dir
+
+    raise FileNotFoundError(f"Unknown temporal project: {safe_project_id}")
 
 
 def _reference_layers_dir(settings: Settings, project_id: str) -> Path:

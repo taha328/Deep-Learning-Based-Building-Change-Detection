@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import logging
 import os
 from pathlib import Path
 import shutil
@@ -14,6 +15,9 @@ import numpy as np
 from PIL import Image
 
 from src.config import Settings
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -304,6 +308,9 @@ def run_bandon_inference(
     image_b_path: Path,
     settings: Settings,
     out_dir: Path,
+    t1_valid_mask_path: Path | None = None,
+    t2_valid_mask_path: Path | None = None,
+    aoi_mask_path: Path | None = None,
 ) -> BandonRunResult:
     paths = _resolve_runtime_paths(settings)
     launcher_name, launcher_prefix, _python_executable = _resolve_launcher(paths["env_prefix"])
@@ -324,6 +331,42 @@ def run_bandon_inference(
     ]
     if settings.bandon_allow_mps_fallback:
         command.append("--allow-mps-fallback")
+    skip_mask_paths = (t1_valid_mask_path, t2_valid_mask_path, aoi_mask_path)
+    if settings.bandon_skip_invalid_crops:
+        if all(path is not None and path.exists() for path in skip_mask_paths):
+            logger.info(
+                "BANDON_CROP_SKIP_CLI_ENABLED t1Valid=%s t2Valid=%s aoi=%s minValidRatioWithinAoi=%s",
+                t1_valid_mask_path,
+                t2_valid_mask_path,
+                aoi_mask_path,
+                settings.bandon_min_valid_ratio_within_aoi,
+            )
+            command.extend(
+                [
+                    "--skip-invalid-crops",
+                    "--t1-valid-mask",
+                    str(t1_valid_mask_path),
+                    "--t2-valid-mask",
+                    str(t2_valid_mask_path),
+                    "--aoi-mask",
+                    str(aoi_mask_path),
+                    "--min-valid-ratio-within-aoi",
+                    str(settings.bandon_min_valid_ratio_within_aoi),
+                ]
+            )
+            if settings.bandon_skip_outside_aoi_crops:
+                command.append("--skip-outside-aoi-crops")
+            if settings.bandon_skip_nodata_crops:
+                command.append("--skip-nodata-crops")
+        else:
+            logger.warning(
+                "BANDON_CROP_SKIP_CLI_DISABLED reason=missing_masks t1=%s t2=%s aoi=%s",
+                t1_valid_mask_path,
+                t2_valid_mask_path,
+                aoi_mask_path,
+            )
+    else:
+        logger.info("BANDON_CROP_SKIP_CLI_DISABLED reason=setting_disabled")
 
     completed = _run_command(
         command,

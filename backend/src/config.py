@@ -62,13 +62,20 @@ class Settings(BaseModel):
     mapbox_current_imagery_max_zoom: int = 19
     mapbox_current_imagery_default_zoom: int = 19
     mapbox_current_imagery_timeout_seconds: int = 30
-    mapbox_current_imagery_max_tiles: int = 256
+    mapbox_current_imagery_max_tiles: int = 1024
     patch_size: int = 1024
     stride: int = 768
     scene_segmentation_concurrency: int = 2
-    default_change_threshold: float = 0.50
+    default_change_threshold: float = 0.60
     default_semantic_threshold: float = 0.50
     default_min_new_building_pixels: int = 50
+    addition_min_area_m2: float = 8.0
+    addition_max_existing_overlap_ratio: float = 0.50
+    addition_thin_artifact_max_area_m2: float = 80.0
+    addition_thinness_min_ratio: float = 0.20
+    addition_edge_buffer_m: float = 2.0
+    addition_max_edge_overlap_ratio: float = 0.60
+    addition_thin_artifact_max_mean_probability: float = 0.75
     default_old_building_mask_dilation_pixels: int = 2
     default_new_building_core_distance_pixels: int = 2
     default_merge_close_gap_m: float = 10.0
@@ -107,6 +114,10 @@ class Settings(BaseModel):
     )
     bandon_device: Literal["mps", "cpu"] = "mps"
     bandon_allow_mps_fallback: bool = False
+    bandon_skip_invalid_crops: bool = True
+    bandon_skip_outside_aoi_crops: bool = True
+    bandon_skip_nodata_crops: bool = True
+    bandon_min_valid_ratio_within_aoi: float = 0.01
     database_url: str = "postgresql+psycopg://building_change:building_change@localhost:5432/building_change"
     database_echo: bool = False
     persistence_backend: PersistenceBackendName = "filesystem"
@@ -194,6 +205,23 @@ class Settings(BaseModel):
             raise ValueError("reference_layer_pmtiles_build_timeout_seconds must be greater than or equal to 30.")
         if self.reference_layer_pmtiles_max_upload_mb < 1:
             raise ValueError("reference_layer_pmtiles_max_upload_mb must be greater than 0.")
+        if self.bandon_min_valid_ratio_within_aoi < 0 or self.bandon_min_valid_ratio_within_aoi > 1:
+            raise ValueError("bandon_min_valid_ratio_within_aoi must be between 0 and 1.")
+        ratio_values = {
+            "addition_max_existing_overlap_ratio": self.addition_max_existing_overlap_ratio,
+            "addition_thinness_min_ratio": self.addition_thinness_min_ratio,
+            "addition_max_edge_overlap_ratio": self.addition_max_edge_overlap_ratio,
+            "addition_thin_artifact_max_mean_probability": self.addition_thin_artifact_max_mean_probability,
+        }
+        for name, value in ratio_values.items():
+            if value < 0 or value > 1:
+                raise ValueError(f"{name} must be between 0 and 1.")
+        if self.addition_min_area_m2 < 0:
+            raise ValueError("addition_min_area_m2 must be greater than or equal to 0.")
+        if self.addition_thin_artifact_max_area_m2 < 0:
+            raise ValueError("addition_thin_artifact_max_area_m2 must be greater than or equal to 0.")
+        if self.addition_edge_buffer_m < 0:
+            raise ValueError("addition_edge_buffer_m must be greater than or equal to 0.")
         self.ensure_runtime_cache_dirs()
         if not self.allowed_file_roots:
             self.allowed_file_roots = (self.request_cache_dir, self.temporal_projects_dir)
@@ -454,6 +482,28 @@ def get_settings() -> Settings:
             "APP_MIN_NEW_BUILDING_PIXELS",
             base.default_min_new_building_pixels,
         ),
+        addition_min_area_m2=_float_env("APP_ADDITION_MIN_AREA_M2", base.addition_min_area_m2),
+        addition_max_existing_overlap_ratio=_float_env(
+            "APP_ADDITION_MAX_EXISTING_OVERLAP_RATIO",
+            base.addition_max_existing_overlap_ratio,
+        ),
+        addition_thin_artifact_max_area_m2=_float_env(
+            "APP_ADDITION_THIN_ARTIFACT_MAX_AREA_M2",
+            base.addition_thin_artifact_max_area_m2,
+        ),
+        addition_thinness_min_ratio=_float_env(
+            "APP_ADDITION_THINNESS_MIN_RATIO",
+            base.addition_thinness_min_ratio,
+        ),
+        addition_edge_buffer_m=_float_env("APP_ADDITION_EDGE_BUFFER_M", base.addition_edge_buffer_m),
+        addition_max_edge_overlap_ratio=_float_env(
+            "APP_ADDITION_MAX_EDGE_OVERLAP_RATIO",
+            base.addition_max_edge_overlap_ratio,
+        ),
+        addition_thin_artifact_max_mean_probability=_float_env(
+            "APP_ADDITION_THIN_ARTIFACT_MAX_MEAN_PROBABILITY",
+            base.addition_thin_artifact_max_mean_probability,
+        ),
         default_old_building_mask_dilation_pixels=_int_env(
             "APP_OLD_BUILDING_MASK_DILATION_PIXELS",
             base.default_old_building_mask_dilation_pixels,
@@ -540,6 +590,22 @@ def get_settings() -> Settings:
         bandon_allow_mps_fallback=_bool_env(
             "APP_BANDON_ALLOW_MPS_FALLBACK",
             base.bandon_allow_mps_fallback,
+        ),
+        bandon_skip_invalid_crops=_bool_env(
+            "APP_BANDON_SKIP_INVALID_CROPS",
+            base.bandon_skip_invalid_crops,
+        ),
+        bandon_skip_outside_aoi_crops=_bool_env(
+            "APP_BANDON_SKIP_OUTSIDE_AOI_CROPS",
+            base.bandon_skip_outside_aoi_crops,
+        ),
+        bandon_skip_nodata_crops=_bool_env(
+            "APP_BANDON_SKIP_NODATA_CROPS",
+            base.bandon_skip_nodata_crops,
+        ),
+        bandon_min_valid_ratio_within_aoi=_float_env(
+            "APP_BANDON_MIN_VALID_RATIO_WITHIN_AOI",
+            base.bandon_min_valid_ratio_within_aoi,
         ),
         database_url=os.getenv("DATABASE_URL", base.database_url),
         database_echo=_bool_env("DATABASE_ECHO", base.database_echo),

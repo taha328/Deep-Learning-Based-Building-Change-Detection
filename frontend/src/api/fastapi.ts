@@ -9,6 +9,7 @@ import {
   referenceLayerSchema,
   runResponseSchema,
   temporalProjectRunResponseSchema,
+  temporalProjectExportBundleSchema,
   temporalProjectSaveResponseSchema,
   temporalProjectSchema,
   temporalProjectSummarySchema,
@@ -24,6 +25,7 @@ import {
   type RunResponse,
   type TemporalProject,
   type TemporalProjectRunResponse,
+  type TemporalProjectExportBundle,
   type TemporalProjectSaveResponse,
   type TemporalProjectSummary,
   type TemporalProjectValidationResponse,
@@ -372,17 +374,19 @@ export async function cancelJob(jobId: string): Promise<JobResponse> {
 }
 
 export async function saveTemporalProject(project: TemporalProject): Promise<TemporalProjectSaveResponse> {
+  const { has_reference_layers: _hasReferenceLayers, reference_layer_count: _referenceLayerCount, ...persistedProject } = project;
   const result = await apiFetch<unknown>("/api/temporal-projects", {
     method: "POST",
-    body: JSON.stringify({ project }),
+    body: JSON.stringify({ project: persistedProject }),
   });
   return temporalProjectSaveResponseSchema.parse(result);
 }
 
 export async function validateTemporalProject(project: TemporalProject): Promise<TemporalProjectValidationResponse> {
+  const { has_reference_layers: _hasReferenceLayers, reference_layer_count: _referenceLayerCount, ...persistedProject } = project;
   const result = await apiFetch<unknown>("/api/temporal-projects/validate", {
     method: "POST",
-    body: JSON.stringify({ project }),
+    body: JSON.stringify({ project: persistedProject }),
   });
   return temporalProjectValidationResponseSchema.parse(result);
 }
@@ -566,9 +570,9 @@ export async function deleteReferenceLayer(projectId: string, layerId: string): 
   );
 }
 
-export async function createTemporalProjectExportBundle(projectId: string): Promise<string> {
-  const result = await apiFetch<{ path: string }>(`/api/temporal-projects/${encodeURIComponent(projectId)}/export-bundle`, {
+export async function createTemporalProjectExportBundle(projectId: string): Promise<TemporalProjectExportBundle> {
+  const result = await apiFetch<unknown>(`/api/temporal-projects/${encodeURIComponent(projectId)}/export-bundle`, {
     method: "POST",
   });
-  return result.path;
+  return temporalProjectExportBundleSchema.parse(result);
 }

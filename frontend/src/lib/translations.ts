@@ -196,6 +196,7 @@ export const translations = {
     "map.reference_imagery": "Imagerie de référence",
     "map.reference_imagery_unavailable": "Aucune archive géoréférencée n'est disponible pour ce jalon.",
     "map.reference_imagery_missing_georeference": "L'image du jalon existe mais ses limites de géoréférencement sont manquantes.",
+    "map.loading_reference_imagery": "Chargement de l'imagerie de référence...",
     "map.georeference_warning":
       "Les superpositions raster sont masquées car les limites de géoréférencement manquent. Relancez avec le backend mis à jour pour que la carte puisse les placer correctement.",
 
@@ -921,6 +922,7 @@ export const translations = {
     "map.cumulative_growth_blocks": "Cumulative growth blocks",
     "map.reference_imagery_unavailable": "No georeferenced archive image is available for this milestone.",
     "map.reference_imagery_missing_georeference": "The milestone image exists, but its georeferencing bounds are missing.",
+    "map.loading_reference_imagery": "Loading reference imagery...",
     "map.georeference_warning":
       "Raster overlays are hidden because georeferencing bounds are missing. Re-run with the updated backend so the map can place them correctly.",
 

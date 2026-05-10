@@ -51,6 +51,6 @@ class MapboxCurrentProvider:
         *,
         settings: Settings,
         zoom: int | None = None,
+        aoi_geojson: dict[str, object] | None = None,
     ) -> MosaicResult:
-        return download_mapbox_current_mosaic(bbox, settings=settings, zoom=zoom)
-
+        return download_mapbox_current_mosaic(bbox, settings=settings, zoom=zoom, aoi_geojson=aoi_geojson)

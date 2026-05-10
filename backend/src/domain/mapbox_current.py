@@ -20,7 +20,8 @@ import requests
 
 from src.config import Settings
 from src.domain.mosaic import MosaicResult
-from src.domain.tiling import tile_bounds_3857, tile_range_for_bbox
+from src.domain.tiling import intersecting_tiles_for_aoi, tile_bounds_3857, tile_range_for_bbox
+import logging
 
 
 MAPBOX_PROVIDER = "mapbox"
@@ -34,6 +35,7 @@ _CACHE_VALID_MASK_NAME = "valid_mask.tif"
 _CACHE_METADATA_NAME = "metadata.json"
 _CACHE_LOCK_TIMEOUT_SEC = 30.0
 _CACHE_LOCK_POLL_INTERVAL_SEC = 0.05
+logger = logging.getLogger(__name__)
 
 
 class MapboxCurrentImageryError(ValueError):
@@ -65,6 +67,7 @@ def build_mapbox_current_cache_key(
     tileset: str,
     image_format: str,
     tile_range: tuple[int, int, int, int] | None = None,
+    selected_tiles: frozenset[tuple[int, int]] | None = None,
 ) -> str:
     resolved_tile_range = tile_range or tile_range_for_bbox(bbox, zoom)
     payload = {
@@ -75,6 +78,7 @@ def build_mapbox_current_cache_key(
         "zoom": zoom,
         "format": image_format,
         "tile_range": list(resolved_tile_range),
+        "selected_tiles": None if selected_tiles is None else [list(tile) for tile in sorted(selected_tiles)],
     }
     digest = hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()[:32]
     return f"mapbox-current-{digest}"
@@ -243,6 +247,7 @@ def download_mapbox_current_mosaic(
     *,
     settings: Settings,
     zoom: int | None = None,
+    aoi_geojson: dict[str, object] | None = None,
 ) -> MosaicResult:
     if not settings.mapbox_current_imagery_enabled:
         raise MapboxCurrentImageryError("Mapbox current imagery is disabled.")
@@ -252,11 +257,25 @@ def download_mapbox_current_mosaic(
     resolved_zoom = min(zoom or settings.mapbox_current_imagery_default_zoom, settings.mapbox_current_imagery_max_zoom)
     tile_range = tile_range_for_bbox(bbox, resolved_zoom)
     x_min, x_max, y_min, y_max = tile_range
-    tile_count = (x_max - x_min + 1) * (y_max - y_min + 1)
-    if tile_count > settings.mapbox_current_imagery_max_tiles:
+    selected_tiles, bbox_tile_count = intersecting_tiles_for_aoi(aoi_geojson, bbox=bbox, zoom=resolved_zoom)
+    if selected_tiles is None:
+        tile_coords = frozenset((x, y) for y in range(y_min, y_max + 1) for x in range(x_min, x_max + 1))
+    else:
+        tile_coords = selected_tiles
+    tile_count = len(tile_coords)
+    logger.info(
+        "MAPBOX_TILE_SELECTION bboxTileCount=%s intersectingTileCount=%s skippedOutsideAoiTileCount=%s zoom=%s",
+        bbox_tile_count,
+        tile_count,
+        max(bbox_tile_count - tile_count, 0),
+        resolved_zoom,
+    )
+    if tile_count == 0:
+        raise MapboxCurrentImageryError("AOI has no intersecting Mapbox tiles at the selected zoom.")
+    if tile_count > settings.mapbox_max_tiles_per_request:
         raise MapboxCurrentImageryError(
             f"AOI would download {tile_count} Mapbox tiles at z={resolved_zoom}, exceeding the limit of "
-            f"{settings.mapbox_current_imagery_max_tiles}."
+            f"{settings.mapbox_max_tiles_per_request}."
         )
 
     width = (x_max - x_min + 1) * 256
@@ -270,6 +289,7 @@ def download_mapbox_current_mosaic(
         tileset=settings.mapbox_satellite_tileset,
         image_format=settings.mapbox_current_imagery_format,
         tile_range=tile_range,
+        selected_tiles=tile_coords,
     )
     cache_dir = settings.mapbox_current_imagery_cache_dir / cache_key
 
@@ -308,6 +328,7 @@ def download_mapbox_current_mosaic(
             )
             for y in range(y_min, y_max + 1)
             for x in range(x_min, x_max + 1)
+            if (x, y) in tile_coords
         ]
 
         with ThreadPoolExecutor(max_workers=settings.download_workers) as executor:
@@ -336,6 +357,7 @@ def download_mapbox_current_mosaic(
             "zoom": resolved_zoom,
             "tile_range": list(tile_range),
             "tile_count": tile_count,
+            "bbox_tile_count": bbox_tile_count,
             "bounds_3857": list(bounds_3857),
             "width": width,
             "height": height,
