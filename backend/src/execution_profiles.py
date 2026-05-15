@@ -300,6 +300,14 @@ class BandonMpsDetectionBackend(DetectionBackend):
             update["bandon_config_path"] = Path(config.config_path).expanduser()
         if config.checkpoint_path:
             update["bandon_checkpoint_path"] = Path(config.checkpoint_path).expanduser()
+        if settings.inference_backend == "mtgcdnet_s2looking_mps":
+            if settings.s2looking_checkpoint_path is None:
+                raise RuntimeError(
+                    "APP_S2LOOKING_CHECKPOINT_PATH is required when "
+                    "APP_INFERENCE_BACKEND=mtgcdnet_s2looking_mps."
+                )
+            update["bandon_checkpoint_path"] = settings.s2looking_checkpoint_path
+            update["default_change_threshold"] = settings.s2looking_change_threshold
         return settings.model_copy(update=update)
 
     def availability(self, settings: Settings) -> BackendAvailability:
@@ -319,13 +327,15 @@ class BandonMpsDetectionBackend(DetectionBackend):
         return {
             "model_backend": self.model_backend,
             "backend_mode": self.probe_mode,
-            "bandon_processing_version": 2,
+            "effective_backend": configured.inference_backend,
+            "bandon_processing_version": 3,
             "bandon_repo_dir": str(configured.bandon_repo_dir),
             "bandon_env_prefix": str(configured.bandon_env_prefix),
             "bandon_config_path": str(configured.bandon_config_path),
             "bandon_checkpoint_path": str(configured.bandon_checkpoint_path),
             "bandon_device": configured.bandon_device,
             "bandon_allow_mps_fallback": configured.bandon_allow_mps_fallback,
+            "change_threshold": configured.default_change_threshold,
         }
 
 
@@ -349,6 +359,12 @@ def resolve_backend(
     if config.backend_mode == "huggingface_gpu":
         return HuggingFaceGpuBackend(config)
     raise RuntimeError(f"Unsupported backend mode: {config.backend_mode}")
+
+
+def resolve_configured_inference_execution_config(settings: Settings) -> PipelineExecutionConfig:
+    if settings.inference_backend in {"bandon_mps", "mtgcdnet_s2looking_mps"}:
+        return PipelineExecutionConfig(model_backend="bandon_mps")
+    raise RuntimeError(f"Unsupported inference backend: {settings.inference_backend}")
 
 
 def collect_backend_availability(

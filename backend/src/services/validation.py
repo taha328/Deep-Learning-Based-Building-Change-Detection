@@ -51,7 +51,10 @@ def _find_release(releases: list[WaybackRelease], identifier: str) -> WaybackRel
 
 
 def _validate_thresholds(request: ValidationRequest, settings: Settings) -> tuple[float, float]:
-    change_threshold = request.change_threshold or settings.default_change_threshold
+    if settings.inference_backend == "mtgcdnet_s2looking_mps":
+        change_threshold = settings.default_change_threshold
+    else:
+        change_threshold = request.change_threshold or settings.default_change_threshold
     semantic_threshold = request.semantic_threshold or settings.default_semantic_threshold
     if not 0.0 <= change_threshold <= 1.0:
         raise ValueError("change_threshold must be between 0.0 and 1.0.")
@@ -99,7 +102,7 @@ def validate_request(
     blocking_errors: list[str] = []
 
     try:
-        _validate_thresholds(request, settings)
+        change_threshold, semantic_threshold = _validate_thresholds(request, settings)
         geometry = parse_aoi_geometry(request.aoi_geojson)
         normalized = normalized_aoi_geojson(request.aoi_geojson)
     except ValueError as exc:
@@ -138,8 +141,9 @@ def validate_request(
     bbox = bounds_dict(geometry)
     tile_count = scene_tile_count(bbox, settings.zoom)
     mapbox_tile_count = tile_count
+    mapbox_zoom = min(settings.mapbox_current_imagery_default_zoom, settings.mapbox_current_imagery_max_zoom)
     if uses_mapbox_current:
-        intersecting_tiles, bbox_tile_count = intersecting_tiles_for_aoi(normalized, bbox=bbox, zoom=settings.zoom)
+        intersecting_tiles, bbox_tile_count = intersecting_tiles_for_aoi(normalized, bbox=bbox, zoom=mapbox_zoom)
         if intersecting_tiles is not None:
             mapbox_tile_count = len(intersecting_tiles)
             LOGGER.info(
@@ -147,7 +151,7 @@ def validate_request(
                 bbox_tile_count,
                 mapbox_tile_count,
                 max(bbox_tile_count - mapbox_tile_count, 0),
-                settings.zoom,
+                mapbox_zoom,
             )
     patch_count = _estimated_remote_patch_count(bbox, settings)
     total_tiles = tile_count * 2
@@ -171,12 +175,12 @@ def validate_request(
     if uses_mapbox_current:
         if mapbox_tile_count > settings.mapbox_max_tiles_per_request:
             blocking_errors.append(
-                f"AOI would download {mapbox_tile_count} Mapbox tiles at z={settings.zoom}, exceeding the limit of "
+                f"AOI would download {mapbox_tile_count} Mapbox tiles at z={mapbox_zoom}, exceeding the limit of "
                 f"{settings.mapbox_max_tiles_per_request}."
             )
         elif mapbox_tile_count > settings.full_limits.max_scene_tiles:
             warnings.append(
-                f"AOI will download {mapbox_tile_count} Mapbox tiles at z={settings.zoom}. "
+                f"AOI will download {mapbox_tile_count} Mapbox tiles at z={mapbox_zoom}. "
                 "This may take longer and consume more Mapbox quota."
             )
         warnings.append(
@@ -231,8 +235,8 @@ def validate_request(
         "t2_release": t2_release.identifier,
         "latest_source": request.latest_source,
         "mode": request.mode,
-        "change_threshold": request.change_threshold or settings.default_change_threshold,
-        "semantic_threshold": request.semantic_threshold or settings.default_semantic_threshold,
+        "change_threshold": change_threshold,
+        "semantic_threshold": semantic_threshold,
         "min_new_building_pixels": request.min_new_building_pixels,
         "min_new_building_area_m2": request.min_new_building_area_m2,
         "old_building_mask_dilation_pixels": request.old_building_mask_dilation_pixels

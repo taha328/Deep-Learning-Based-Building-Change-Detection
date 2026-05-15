@@ -203,8 +203,7 @@ def _extract_capture_dates_from_polygon_features(features: list[dict[str, object
     return capture_dates
 
 
-def parse_wmts_capabilities(session: requests.Session, url: str) -> list[WaybackRelease]:
-    xml = get_text(session, url)
+def parse_wmts_capabilities_xml(xml: str) -> list[WaybackRelease]:
     ns = {
         "wmts": "https://www.opengis.net/wmts/1.0",
         "ows": "https://www.opengis.net/ows/1.1",
@@ -243,6 +242,10 @@ def parse_wmts_capabilities(session: requests.Session, url: str) -> list[Wayback
 
     releases.sort(key=lambda item: item.release_date)
     return releases
+
+
+def parse_wmts_capabilities(session: requests.Session, url: str) -> list[WaybackRelease]:
+    return parse_wmts_capabilities_xml(get_text(session, url))
 
 
 def metadata_base_url_from_identifier(identifier: str) -> str:
@@ -495,7 +498,7 @@ def summarize_wayback_metadata(
     *,
     grid_size: int,
     aoi_geojson: dict[str, object] | None = None,
-    zoom: int = 19,
+    zoom: int = 18,
 ) -> MetadataSummary:
     metadata_base_url = metadata_base_url_from_identifier(release_identifier)
     layer_lookup = _metadata_layer_lookup(session, metadata_base_url)

@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 ModeName = Literal["fast_preview", "full_run"]
 ModelBackendName = Literal["sam3", "bandon_mps"]
+InferenceBackendName = Literal["bandon_mps", "mtgcdnet_s2looking_mps"]
 PersistenceBackendName = Literal["filesystem", "postgres"]
 
 
@@ -25,12 +26,13 @@ class Settings(BaseModel):
     project_root: Path = Field(default_factory=lambda: Path(__file__).resolve().parents[2])
     runtime_cache_dir: Path = Field(default_factory=lambda: Path(__file__).resolve().parents[1] / "runtime_cache")
     model_backend_default: ModelBackendName = "sam3"
+    inference_backend: str = "bandon_mps"
     wmts_capabilities_url: str = (
         "https://wayback.maptiles.arcgis.com/arcgis/rest/services/"
         "World_Imagery/MapServer/WMTS/1.0.0/WMTSCapabilities.xml"
     )
     tile_matrix_set: str = "default028mm"
-    zoom: int = 19
+    zoom: int = 18
     min_zoom: int = 13
     request_timeout_sec: int = 120
     download_workers: int = 6
@@ -43,10 +45,18 @@ class Settings(BaseModel):
     wayback_releases_cache_ttl_seconds: int = 86400
     wayback_releases_stale_if_error_enabled: bool = True
     wayback_releases_cache_path: Path | None = None
-    wayback_releases_connect_timeout_seconds: int = 10
-    wayback_releases_read_timeout_seconds: int = 30
-    wayback_releases_retries: int = 2
+    wayback_capabilities_cache_path: Path | None = None
+    wayback_releases_connect_timeout_seconds: int = 20
+    wayback_releases_read_timeout_seconds: int = 60
+    wayback_releases_retries: int = 4
     wayback_releases_retry_backoff_seconds: float = 1.0
+    wayback_http_connect_timeout_seconds: int = 20
+    wayback_http_read_timeout_seconds: int = 60
+    wayback_http_max_retries: int = 4
+    wayback_http_backoff_base_seconds: float = 1.0
+    wayback_tile_max_concurrency: int = 4
+    wayback_max_missing_tile_ratio: float = 0.05
+    wayback_tile_cache_dir: Path | None = None
     wayback_tilemap_preflight_enabled: bool = True
     wayback_metadata_cache_enabled: bool = True
     wayback_metadata_cache_ttl_seconds: int = 604800
@@ -62,11 +72,12 @@ class Settings(BaseModel):
     mapbox_current_imagery_max_zoom: int = 19
     mapbox_current_imagery_default_zoom: int = 19
     mapbox_current_imagery_timeout_seconds: int = 30
+    mapbox_max_tiles_per_request: int = 1024
     mapbox_current_imagery_max_tiles: int = 1024
     patch_size: int = 1024
     stride: int = 768
     scene_segmentation_concurrency: int = 2
-    default_change_threshold: float = 0.60
+    default_change_threshold: float = 0.30
     default_semantic_threshold: float = 0.50
     default_min_new_building_pixels: int = 50
     addition_min_area_m2: float = 8.0
@@ -118,6 +129,8 @@ class Settings(BaseModel):
     bandon_skip_outside_aoi_crops: bool = True
     bandon_skip_nodata_crops: bool = True
     bandon_min_valid_ratio_within_aoi: float = 0.01
+    s2looking_checkpoint_path: Path | None = None
+    s2looking_change_threshold: float = 0.50
     database_url: str = "postgresql+psycopg://building_change:building_change@localhost:5432/building_change"
     database_echo: bool = False
     persistence_backend: PersistenceBackendName = "filesystem"
@@ -134,6 +147,7 @@ class Settings(BaseModel):
     jobs_enabled: bool = True
     keep_intermediate_artifacts: bool = False
     materialize_source_imagery_in_requests: bool = False
+    enable_client_log_relay: bool = True
     temporal_imagery_prefetch_enabled: bool = False
     temporal_imagery_prefetch_workers: int = 2
     temporal_imagery_prefetch_max_pairs: int = 4
@@ -187,10 +201,52 @@ class Settings(BaseModel):
             self.wayback_metadata_cache_dir = self.runtime_cache_dir / "wayback_metadata_cache"
         if self.wayback_releases_cache_path is None:
             self.wayback_releases_cache_path = self.runtime_cache_dir / "wayback_releases" / "releases_cache.json"
+        if self.wayback_capabilities_cache_path is None:
+            self.wayback_capabilities_cache_path = self.runtime_cache_dir / "wayback_releases" / "WMTSCapabilities.xml"
         if self.wayback_tile_preflight_cache_dir is None:
             self.wayback_tile_preflight_cache_dir = self.runtime_cache_dir / "wayback_tile_preflight_cache"
+        if self.wayback_tile_cache_dir is None:
+            self.wayback_tile_cache_dir = self.runtime_cache_dir / "wayback_tiles"
         if self.mapbox_current_imagery_cache_dir is None:
             self.mapbox_current_imagery_cache_dir = self.runtime_cache_dir / "mapbox_mosaics"
+        if self.mapbox_max_tiles_per_request < 1:
+            raise ValueError("mapbox_max_tiles_per_request must be greater than or equal to 1.")
+        if self.wayback_http_connect_timeout_seconds < 1:
+            raise ValueError("wayback_http_connect_timeout_seconds must be greater than or equal to 1.")
+        if self.wayback_http_read_timeout_seconds < 1:
+            raise ValueError("wayback_http_read_timeout_seconds must be greater than or equal to 1.")
+        if self.wayback_http_max_retries < 0:
+            raise ValueError("wayback_http_max_retries must be greater than or equal to 0.")
+        if self.wayback_http_backoff_base_seconds < 0:
+            raise ValueError("wayback_http_backoff_base_seconds must be greater than or equal to 0.")
+        if self.wayback_tile_max_concurrency < 1:
+            raise ValueError("wayback_tile_max_concurrency must be greater than or equal to 1.")
+        if self.wayback_max_missing_tile_ratio < 0 or self.wayback_max_missing_tile_ratio > 1:
+            raise ValueError("wayback_max_missing_tile_ratio must be between 0 and 1.")
+        if self.inference_backend not in {"bandon_mps", "mtgcdnet_s2looking_mps"}:
+            raise ValueError(
+                "APP_INFERENCE_BACKEND must be one of: bandon_mps, mtgcdnet_s2looking_mps."
+            )
+        if self.s2looking_change_threshold < 0 or self.s2looking_change_threshold > 1:
+            raise ValueError("s2looking_change_threshold must be between 0 and 1.")
+        if self.s2looking_checkpoint_path is not None:
+            s2looking_checkpoint_path = self.s2looking_checkpoint_path.expanduser()
+            if not s2looking_checkpoint_path.is_absolute():
+                s2looking_checkpoint_path = (self.project_root / s2looking_checkpoint_path).resolve()
+            else:
+                s2looking_checkpoint_path = s2looking_checkpoint_path.resolve()
+            self.s2looking_checkpoint_path = s2looking_checkpoint_path
+        if self.inference_backend == "mtgcdnet_s2looking_mps":
+            if self.s2looking_checkpoint_path is None:
+                raise ValueError(
+                    "APP_S2LOOKING_CHECKPOINT_PATH is required when "
+                    "APP_INFERENCE_BACKEND=mtgcdnet_s2looking_mps."
+                )
+            if not self.s2looking_checkpoint_path.is_file():
+                raise ValueError(
+                    "APP_S2LOOKING_CHECKPOINT_PATH does not point to an existing file: "
+                    f"{self.s2looking_checkpoint_path}"
+                )
         if not 1 <= self.temporal_imagery_prefetch_workers <= 4:
             raise ValueError("temporal_imagery_prefetch_workers must be between 1 and 4.")
         if self.temporal_imagery_prefetch_max_pairs < 1:
@@ -236,8 +292,10 @@ class Settings(BaseModel):
         self.temporal_projects_dir.mkdir(parents=True, exist_ok=True)
         self.wayback_mosaic_cache_dir.mkdir(parents=True, exist_ok=True)
         self.wayback_releases_cache_path.parent.mkdir(parents=True, exist_ok=True)
+        self.wayback_capabilities_cache_path.parent.mkdir(parents=True, exist_ok=True)
         self.wayback_metadata_cache_dir.mkdir(parents=True, exist_ok=True)
         self.wayback_tile_preflight_cache_dir.mkdir(parents=True, exist_ok=True)
+        self.wayback_tile_cache_dir.mkdir(parents=True, exist_ok=True)
         self.mapbox_current_imagery_cache_dir.mkdir(parents=True, exist_ok=True)
         self.tmp_cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -257,6 +315,14 @@ class Settings(BaseModel):
     def tmp_cache_dir(self) -> Path:
         return self.runtime_cache_dir / "tmp"
 
+    @property
+    def tile_zoom(self) -> int:
+        return self.zoom
+
+    @property
+    def wayback_default_zoom(self) -> int:
+        return self.zoom
+
     def get_mode_limits(self, mode: ModeName) -> ModeLimits:
         return self.preview_limits if mode == "fast_preview" else self.full_limits
 
@@ -269,6 +335,14 @@ def _float_env(name: str, default: float) -> float:
 def _int_env(name: str, default: int) -> int:
     value = os.getenv(name)
     return int(value) if value else default
+
+
+def _int_env_any(names: tuple[str, ...], default: int) -> int:
+    for name in names:
+        value = os.getenv(name)
+        if value:
+            return int(value)
+    return default
 
 
 def _bool_env(name: str, default: bool) -> bool:
@@ -354,9 +428,10 @@ def get_settings() -> Settings:
         project_root=base.project_root,
         runtime_cache_dir=Path(os.getenv("APP_RUNTIME_CACHE_DIR", str(base.runtime_cache_dir))),
         model_backend_default=os.getenv("APP_MODEL_BACKEND_DEFAULT", base.model_backend_default),  # type: ignore[arg-type]
+        inference_backend=os.getenv("APP_INFERENCE_BACKEND", base.inference_backend),  # type: ignore[arg-type]
         wmts_capabilities_url=os.getenv("APP_WMTS_CAPABILITIES_URL", base.wmts_capabilities_url),
         tile_matrix_set=os.getenv("APP_TILE_MATRIX_SET", base.tile_matrix_set),
-        zoom=_int_env("APP_TILE_ZOOM", base.zoom),
+        zoom=_int_env_any(("APP_WAYBACK_DEFAULT_ZOOM", "APP_TILE_ZOOM"), base.zoom),
         min_zoom=_int_env("APP_TILE_MIN_ZOOM", base.min_zoom),
         request_timeout_sec=_int_env("APP_REQUEST_TIMEOUT_SEC", base.request_timeout_sec),
         download_workers=_int_env("APP_DOWNLOAD_WORKERS", base.download_workers),
@@ -388,21 +463,60 @@ def get_settings() -> Settings:
             if (cache_path_env := _optional_str_env("WAYBACK_RELEASES_CACHE_PATH", "APP_WAYBACK_RELEASES_CACHE_PATH"))
             else None
         ),
-        wayback_releases_connect_timeout_seconds=_int_env(
-            "WAYBACK_RELEASES_CONNECT_TIMEOUT_SECONDS",
+        wayback_capabilities_cache_path=(
+            Path(cache_path_env)
+            if (
+                cache_path_env := _optional_str_env(
+                    "WAYBACK_CAPABILITIES_CACHE_PATH",
+                    "APP_WAYBACK_CAPABILITIES_CACHE_PATH",
+                )
+            )
+            else None
+        ),
+        wayback_releases_connect_timeout_seconds=_int_env_any(
+            ("APP_WAYBACK_HTTP_CONNECT_TIMEOUT_SECONDS", "WAYBACK_RELEASES_CONNECT_TIMEOUT_SECONDS"),
             base.wayback_releases_connect_timeout_seconds,
         ),
-        wayback_releases_read_timeout_seconds=_int_env(
-            "WAYBACK_RELEASES_READ_TIMEOUT_SECONDS",
+        wayback_releases_read_timeout_seconds=_int_env_any(
+            ("APP_WAYBACK_HTTP_READ_TIMEOUT_SECONDS", "WAYBACK_RELEASES_READ_TIMEOUT_SECONDS"),
             base.wayback_releases_read_timeout_seconds,
         ),
-        wayback_releases_retries=_int_env(
-            "WAYBACK_RELEASES_RETRIES",
+        wayback_releases_retries=_int_env_any(
+            ("APP_WAYBACK_HTTP_MAX_RETRIES", "WAYBACK_RELEASES_RETRIES"),
             base.wayback_releases_retries,
         ),
         wayback_releases_retry_backoff_seconds=_float_env(
-            "WAYBACK_RELEASES_RETRY_BACKOFF_SECONDS",
-            base.wayback_releases_retry_backoff_seconds,
+            "APP_WAYBACK_HTTP_BACKOFF_BASE_SECONDS",
+            _float_env("WAYBACK_RELEASES_RETRY_BACKOFF_SECONDS", base.wayback_releases_retry_backoff_seconds),
+        ),
+        wayback_http_connect_timeout_seconds=_int_env(
+            "APP_WAYBACK_HTTP_CONNECT_TIMEOUT_SECONDS",
+            base.wayback_http_connect_timeout_seconds,
+        ),
+        wayback_http_read_timeout_seconds=_int_env(
+            "APP_WAYBACK_HTTP_READ_TIMEOUT_SECONDS",
+            base.wayback_http_read_timeout_seconds,
+        ),
+        wayback_http_max_retries=_int_env(
+            "APP_WAYBACK_HTTP_MAX_RETRIES",
+            base.wayback_http_max_retries,
+        ),
+        wayback_http_backoff_base_seconds=_float_env(
+            "APP_WAYBACK_HTTP_BACKOFF_BASE_SECONDS",
+            base.wayback_http_backoff_base_seconds,
+        ),
+        wayback_tile_max_concurrency=_int_env(
+            "APP_WAYBACK_TILE_MAX_CONCURRENCY",
+            base.wayback_tile_max_concurrency,
+        ),
+        wayback_max_missing_tile_ratio=_float_env(
+            "APP_WAYBACK_MAX_MISSING_TILE_RATIO",
+            base.wayback_max_missing_tile_ratio,
+        ),
+        wayback_tile_cache_dir=(
+            Path(cache_dir_env)
+            if (cache_dir_env := _optional_str_env("WAYBACK_TILE_CACHE_DIR", "APP_WAYBACK_TILE_CACHE_DIR"))
+            else None
         ),
         wayback_tilemap_preflight_enabled=_bool_env(
             "APP_WAYBACK_TILEMAP_PREFLIGHT_ENABLED",
@@ -465,6 +579,10 @@ def get_settings() -> Settings:
         mapbox_current_imagery_timeout_seconds=_int_env(
             "MAPBOX_CURRENT_IMAGERY_TIMEOUT_SECONDS",
             base.mapbox_current_imagery_timeout_seconds,
+        ),
+        mapbox_max_tiles_per_request=_int_env(
+            "APP_MAPBOX_MAX_TILES_PER_REQUEST",
+            _int_env("MAPBOX_CURRENT_IMAGERY_MAX_TILES", base.mapbox_current_imagery_max_tiles),
         ),
         mapbox_current_imagery_max_tiles=_int_env(
             "MAPBOX_CURRENT_IMAGERY_MAX_TILES",
@@ -607,6 +725,15 @@ def get_settings() -> Settings:
             "APP_BANDON_MIN_VALID_RATIO_WITHIN_AOI",
             base.bandon_min_valid_ratio_within_aoi,
         ),
+        s2looking_checkpoint_path=(
+            Path(s2looking_checkpoint_env)
+            if (s2looking_checkpoint_env := _optional_str_env("APP_S2LOOKING_CHECKPOINT_PATH"))
+            else None
+        ),
+        s2looking_change_threshold=_float_env(
+            "APP_S2LOOKING_CHANGE_THRESHOLD",
+            base.s2looking_change_threshold,
+        ),
         database_url=os.getenv("DATABASE_URL", base.database_url),
         database_echo=_bool_env("DATABASE_ECHO", base.database_echo),
         persistence_backend=os.getenv("PERSISTENCE_BACKEND", base.persistence_backend),  # type: ignore[arg-type]
@@ -637,6 +764,10 @@ def get_settings() -> Settings:
         materialize_source_imagery_in_requests=_bool_env(
             "MATERIALIZE_SOURCE_IMAGERY_IN_REQUESTS",
             base.materialize_source_imagery_in_requests,
+        ),
+        enable_client_log_relay=_bool_env(
+            "APP_ENABLE_CLIENT_LOG_RELAY",
+            base.enable_client_log_relay,
         ),
         temporal_imagery_prefetch_enabled=_bool_env(
             "TEMPORAL_IMAGERY_PREFETCH_ENABLED",

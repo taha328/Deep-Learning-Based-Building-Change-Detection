@@ -1,4 +1,3 @@
-import type { ReactNode } from "react";
 import {
   AlertTriangle,
   ArrowDown,
@@ -35,11 +34,6 @@ type ComparisonCardProps = {
 
 type SpatialCompositionCardProps = {
   metrics: NonNullable<TemporalMilestone["metrics"]>;
-  t: TranslateFn;
-};
-
-type QualityCompactCardProps = {
-  milestone: TemporalMilestone;
   t: TranslateFn;
 };
 
@@ -329,44 +323,6 @@ function SpatialCompositionCard({ metrics, t }: SpatialCompositionCardProps) {
   );
 }
 
-function QualityCompactCard({ milestone, t }: QualityCompactCardProps) {
-  const statusTone =
-    milestone.status === "complete"
-      ? "success"
-      : milestone.status === "validated"
-        ? "warning"
-        : milestone.status === "error"
-          ? "danger"
-          : "neutral";
-
-  const sourceModeLabel =
-    milestone.source_mode === "automated"
-      ? t("temporal.metrics.source_automated")
-      : milestone.source_mode === "manual_override"
-        ? t("temporal.metrics.source_manual")
-        : t("temporal.metrics.source_hybrid");
-
-  const buildingDetailLabel = milestone.metrics?.building_level_available
-    ? t("temporal.metrics.available")
-    : t("temporal.metrics.not_available");
-
-  return (
-    <div className="rounded-xl border border-sidebar-border/80 bg-background/70 p-3">
-      <div className="flex flex-wrap gap-1.5">
-        <span className="inline-flex items-center gap-1 rounded-full border border-sidebar-border/70 bg-surface/70 px-2 py-0.5 text-caption font-medium text-foreground">
-          {t(`temporal.milestone_status.${milestone.status}`)}
-        </span>
-        <span className="inline-flex items-center gap-1 rounded-full border border-sidebar-border/70 bg-surface/70 px-2 py-0.5 text-caption font-medium text-foreground">
-          {sourceModeLabel}
-        </span>
-        <span className="inline-flex items-center gap-1 rounded-full border border-sidebar-border/70 bg-surface/70 px-2 py-0.5 text-caption font-medium text-foreground">
-          {buildingDetailLabel}
-        </span>
-      </div>
-    </div>
-  );
-}
-
 // ============================================================================
 // Main Component
 // ============================================================================
@@ -489,9 +445,6 @@ export function MilestoneMetricCards({
 
       {/* Spatial composition */}
       <SpatialCompositionCard metrics={metrics} t={t} />
-
-      {/* Quality compact */}
-      <QualityCompactCard milestone={milestone} t={t} />
     </div>
   );
 }

@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import logging
+import random
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from threading import Lock
 
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+import urllib3
 
 from src.config import Settings
-from src.domain.wayback import WaybackRelease, build_session, parse_wmts_capabilities
+from src.domain.wayback import WaybackRelease, build_session, parse_wmts_capabilities_xml
 from src.domain.wayback_release_cache import (
     WaybackReleaseCachePayload,
     build_wayback_release_cache_payload,
@@ -73,19 +74,6 @@ def _build_release_session(settings: Settings) -> requests.Session:
         settings.wayback_releases_connect_timeout_seconds,
         settings.wayback_releases_read_timeout_seconds,
     )
-    retry = Retry(
-        total=settings.wayback_releases_retries,
-        connect=settings.wayback_releases_retries,
-        read=settings.wayback_releases_retries,
-        status=settings.wayback_releases_retries,
-        backoff_factor=settings.wayback_releases_retry_backoff_seconds,
-        status_forcelist=(429, 500, 502, 503, 504),
-        allowed_methods=frozenset({"GET"}),
-        raise_on_status=False,
-    )
-    adapter = HTTPAdapter(max_retries=retry)
-    session.mount("https://", adapter)
-    session.mount("http://", adapter)
     return session
 
 
@@ -126,10 +114,83 @@ def _store_disk_cache(settings: Settings, releases: list[WaybackRelease], fetche
     write_wayback_release_cache_atomic(settings.wayback_releases_cache_path, payload)
 
 
-def _fetch_live_releases(settings: Settings) -> CachedReleasesSnapshot:
+def _write_capabilities_cache(settings: Settings, xml: str) -> None:
+    if not settings.wayback_releases_cache_enabled:
+        return
+    settings.wayback_capabilities_cache_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = settings.wayback_capabilities_cache_path.with_suffix(".tmp")
+    tmp_path.write_text(xml, encoding="utf-8")
+    tmp_path.replace(settings.wayback_capabilities_cache_path)
+
+
+def _read_capabilities_cache(settings: Settings) -> str | None:
+    if not settings.wayback_releases_cache_enabled:
+        return None
+    try:
+        if settings.wayback_capabilities_cache_path.exists():
+            return settings.wayback_capabilities_cache_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    return None
+
+
+def _fetch_live_capabilities_xml(settings: Settings) -> str:
     session = _build_release_session(settings)
+    timeout = (
+        settings.wayback_releases_connect_timeout_seconds,
+        settings.wayback_releases_read_timeout_seconds,
+    )
+    max_attempts = max(settings.wayback_releases_retries, 0) + 1
+    retryable_exceptions = (
+        OSError,
+        requests.exceptions.ConnectionError,
+        requests.exceptions.ConnectTimeout,
+        requests.exceptions.ReadTimeout,
+        urllib3.exceptions.ProtocolError,
+    )
+    last_exc: Exception | None = None
+    try:
+        for attempt in range(1, max_attempts + 1):
+            started_ns = time.perf_counter_ns()
+            try:
+                response = session.get(settings.wmts_capabilities_url, timeout=timeout)
+                response.raise_for_status()
+                elapsed_ms = round((time.perf_counter_ns() - started_ns) / 1_000_000, 2)
+                logger.info(
+                    "WAYBACK_CAPABILITIES_FETCH attempt=%s maxAttempts=%s exception=None elapsedMs=%s",
+                    attempt,
+                    max_attempts,
+                    elapsed_ms,
+                )
+                logger.info("WAYBACK_CAPABILITIES_SOURCE live")
+                return response.text
+            except retryable_exceptions as exc:
+                last_exc = exc
+                elapsed_ms = round((time.perf_counter_ns() - started_ns) / 1_000_000, 2)
+                logger.warning(
+                    "WAYBACK_CAPABILITIES_FETCH attempt=%s maxAttempts=%s exception=%s elapsedMs=%s",
+                    attempt,
+                    max_attempts,
+                    type(exc).__name__,
+                    elapsed_ms,
+                )
+                if attempt < max_attempts:
+                    backoff = settings.wayback_releases_retry_backoff_seconds * (2 ** (attempt - 1))
+                    time.sleep(backoff + random.uniform(0, min(0.5, max(backoff * 0.25, 0.0))))
+                    continue
+                raise
+        if last_exc is not None:
+            raise last_exc
+    finally:
+        session.close()
+    raise RuntimeError("Wayback capabilities fetch failed without an exception.")
+
+
+def _fetch_live_releases(settings: Settings) -> CachedReleasesSnapshot:
+    xml = _fetch_live_capabilities_xml(settings)
     fetched_at = datetime.now(UTC)
-    releases = tuple(parse_wmts_capabilities(session, settings.wmts_capabilities_url))
+    releases = tuple(parse_wmts_capabilities_xml(xml))
+    _write_capabilities_cache(settings, xml)
     snapshot = CachedReleasesSnapshot(
         releases=releases,
         fetched_at=fetched_at,
@@ -137,6 +198,26 @@ def _fetch_live_releases(settings: Settings) -> CachedReleasesSnapshot:
     )
     _store_memory_cache(settings, snapshot)
     _store_disk_cache(settings, list(releases), fetched_at)
+    return snapshot
+
+
+def _fallback_snapshot_from_capabilities_cache(
+    settings: Settings,
+    *,
+    warning: dict[str, object],
+) -> CachedReleasesSnapshot | None:
+    xml = _read_capabilities_cache(settings)
+    if not xml:
+        return None
+    releases = tuple(parse_wmts_capabilities_xml(xml))
+    snapshot = CachedReleasesSnapshot(
+        releases=releases,
+        fetched_at=datetime.fromtimestamp(settings.wayback_capabilities_cache_path.stat().st_mtime, tz=UTC),
+        source_status="stale_cache",
+        warnings=(warning,),
+    )
+    _store_memory_cache(settings, snapshot)
+    logger.info("WAYBACK_CAPABILITIES_SOURCE stale_cache")
     return snapshot
 
 
@@ -203,9 +284,13 @@ def resolve_releases_snapshot(settings: Settings) -> CachedReleasesSnapshot:
         return fresh_memory
     try:
         return _fetch_live_releases(settings)
-    except (requests.RequestException, ValueError) as exc:
+    except (OSError, requests.RequestException, urllib3.exceptions.ProtocolError, ValueError) as exc:
         warning = _build_warning()
         if settings.wayback_releases_stale_if_error_enabled:
+            stale_xml = _fallback_snapshot_from_capabilities_cache(settings, warning=warning)
+            if stale_xml is not None:
+                _log_live_fetch_failure(exc, settings, stale_xml.source_status)
+                return stale_xml
             stale_disk = _fallback_snapshot_from_disk(settings, warning=warning)
             if stale_disk is not None:
                 _log_live_fetch_failure(exc, settings, stale_disk.source_status)

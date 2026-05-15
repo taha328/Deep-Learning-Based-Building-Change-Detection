@@ -6,7 +6,7 @@ from pydantic import ValidationError as PydanticValidationError
 from src.api.deps import get_app_settings
 from src.config import Settings
 from src.core_api import run_detection_api, validate_request_api
-from src.execution_profiles import PipelineExecutionConfig
+from src.execution_profiles import PipelineExecutionConfig, resolve_configured_inference_execution_config
 from src.schemas import RunRequest, RunResponse, ValidationRequest, ValidationResponse
 
 
@@ -14,13 +14,8 @@ router = APIRouter()
 
 
 def build_execution_config(request: ValidationRequest | RunRequest, settings: Settings) -> PipelineExecutionConfig:
-    model_backend = request.model_backend or settings.model_backend_default
-    if model_backend == "bandon_mps":
-        return PipelineExecutionConfig(model_backend="bandon_mps")
-    return PipelineExecutionConfig(
-        model_backend="sam3",
-        backend_mode=request.sam3_backend_mode or "public_zerogpu",
-    )
+    del request
+    return resolve_configured_inference_execution_config(settings)
 
 
 @router.post("/validate")

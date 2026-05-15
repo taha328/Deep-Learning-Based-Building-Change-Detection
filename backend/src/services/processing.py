@@ -22,7 +22,7 @@ from src.domain.exports import export_bandon_outputs, export_run_outputs, export
 from src.domain.imagery_providers import MapboxCurrentProvider
 from src.domain.inference import derive_new_building_products, run_single_scene_inference, run_tiled_inference
 from src.domain.mapbox_current import MAPBOX_ATTRIBUTION, MAPBOX_SOURCE_ID
-from src.domain.mosaic import MosaicResult, align_mosaic_pair, download_wayback_mosaic
+from src.domain.mosaic import MosaicResult, WaybackTileDownloadError, align_mosaic_pair, download_wayback_mosaic
 from rasterio.features import rasterize
 from shapely.geometry import shape
 
@@ -123,6 +123,54 @@ class ResolvedWaybackRelease:
 def _report(progress: ProgressReporter, value: float, message: str) -> None:
     if progress is not None:
         progress(value, message)
+
+
+def _wayback_download_progress_message(payload: dict[str, object]) -> str:
+    return (
+        f"{payload.get('stage', 'Téléchargement des tuiles Wayback')} "
+        f"{payload.get('cache_hit_count', 0)} cache, "
+        f"{payload.get('downloaded_tile_count', 0)}/{payload.get('selected_tile_count', 0)} téléchargées, "
+        f"{payload.get('failed_tile_count', 0)} échecs, "
+        f"{payload.get('retry_count', 0)} retries, "
+        f"missing_tile_ratio={float(payload.get('missing_tile_ratio') or 0.0):.3f}"
+    )
+
+
+def _probability_stats(values: np.ndarray, mask: np.ndarray | None = None) -> dict[str, float | None]:
+    sample = values[mask] if mask is not None else values.reshape(-1)
+    sample = sample.astype(np.float32, copy=False)
+    sample = sample[np.isfinite(sample)]
+    if sample.size == 0:
+        return {
+            "min": None,
+            "max": None,
+            "mean": None,
+            "std": None,
+            "p01": None,
+            "p05": None,
+            "p50": None,
+            "p95": None,
+            "p99": None,
+            "fraction_ge_0_50": None,
+            "fraction_ge_0_60": None,
+            "fraction_ge_0_75": None,
+            "fraction_ge_0_90": None,
+        }
+    return {
+        "min": float(np.min(sample)),
+        "max": float(np.max(sample)),
+        "mean": float(np.mean(sample)),
+        "std": float(np.std(sample)),
+        "p01": float(np.percentile(sample, 1)),
+        "p05": float(np.percentile(sample, 5)),
+        "p50": float(np.percentile(sample, 50)),
+        "p95": float(np.percentile(sample, 95)),
+        "p99": float(np.percentile(sample, 99)),
+        "fraction_ge_0_50": float(np.mean(sample >= 0.50)),
+        "fraction_ge_0_60": float(np.mean(sample >= 0.60)),
+        "fraction_ge_0_75": float(np.mean(sample >= 0.75)),
+        "fraction_ge_0_90": float(np.mean(sample >= 0.90)),
+    }
 
 
 def _resolve_available_tiles_for_aoi(
@@ -1240,7 +1288,14 @@ def run_segmentation(
                     label="source",
                     max_tiles=None,
                     available_tiles=tilemap.available_tiles if tilemap is not None and tilemap.preflight_complete else None,
+                    progress_callback=lambda payload: _report(
+                        progress,
+                        0.18,
+                        _wayback_download_progress_message(payload),
+                    ),
                 )
+        except WaybackTileDownloadError as exc:
+            return RunResponse(success=False, error_code="wayback_tile_download_failed", error_message=str(exc))
         except ValueError as exc:
             return RunResponse(success=False, error_code="wayback_tile_coverage_unavailable", error_message=str(exc))
         except requests.RequestException as exc:
@@ -1496,7 +1551,10 @@ def run_detection(
         normalized_aoi=prepared.normalized_aoi,
         settings=settings,
     )
-    change_threshold = float(request.change_threshold if request.change_threshold is not None else settings.default_change_threshold)
+    if settings.inference_backend == "mtgcdnet_s2looking_mps":
+        change_threshold = float(settings.default_change_threshold)
+    else:
+        change_threshold = float(request.change_threshold if request.change_threshold is not None else settings.default_change_threshold)
     semantic_threshold = float(request.semantic_threshold if request.semantic_threshold is not None else settings.default_semantic_threshold)
     old_building_mask_dilation_pixels = max(
         int(
@@ -1515,7 +1573,10 @@ def run_detection(
         0,
     )
     run_warnings: list[str] = []
-    backend_diagnostics: dict[str, Any] = {"model_backend": model_backend}
+    backend_diagnostics: dict[str, Any] = {
+        "model_backend": model_backend,
+        "effective_backend": settings.inference_backend,
+    }
     if model_backend == "bandon_mps":
         backend_diagnostics.update(
             {
@@ -1714,6 +1775,11 @@ def run_detection(
                     label="t1",
                     max_tiles=None,
                     available_tiles=selected_tiles_t1,
+                    progress_callback=lambda payload: _report(
+                        progress,
+                        0.18,
+                        _wayback_download_progress_message(payload),
+                    ),
                 )
                 if use_mapbox_t2:
                     mapbox_start = time.perf_counter_ns()
@@ -1762,7 +1828,35 @@ def run_detection(
                         label="t2",
                         max_tiles=None,
                         available_tiles=selected_tiles_t2,
+                        progress_callback=lambda payload: _report(
+                            progress,
+                            0.18,
+                            _wayback_download_progress_message(payload),
+                        ),
                     )
+        except WaybackTileDownloadError as exc:
+            backend_diagnostics["wayback_download_error"] = exc.details
+            return RunResponse(
+                success=False,
+                error_code="wayback_tile_download_failed",
+                error_message=str(exc),
+                diagnostics=_build_failure_diagnostics(
+                    timings=timings,
+                    prepared=prepared,
+                    request=request,
+                    min_new_building_pixels=min_pixels,
+                    old_building_mask_dilation_pixels=old_building_mask_dilation_pixels,
+                    new_building_core_distance_pixels=new_building_core_distance_pixels,
+                    scene_t1_metadata=scene_t1_metadata,
+                    scene_t2_metadata=scene_t2_metadata,
+                    tilemap_t1=tilemap_t1,
+                    tilemap_t2=tilemap_t2,
+                    zoom_t1=resolved_t1.zoom,
+                    zoom_t2=resolved_t2.zoom,
+                    warnings=run_warnings,
+                    backend=backend_diagnostics,
+                ),
+            )
         except ValueError as exc:
             return RunResponse(
                 success=False,
@@ -1910,7 +2004,8 @@ def run_detection(
                         "inference.bandon.input_prepare",
                         duration_ms=_elapsed_ms(bandon_input_prepare_start),
                         metadata={
-                            "backend": "bandon_mps",
+                            "runner_family": "bandon_mps",
+                            "effective_backend": settings.inference_backend,
                             "input_height": int(arr_t1.shape[0]),
                             "input_width": int(arr_t1.shape[1]),
                         },
@@ -1988,7 +2083,8 @@ def run_detection(
                         "inference.bandon.input_write",
                         duration_ms=_elapsed_ms(bandon_input_write_start),
                         metadata={
-                            "backend": "bandon_mps",
+                            "runner_family": "bandon_mps",
+                            "effective_backend": settings.inference_backend,
                             "t1_path": bandon_input_t1_path.name,
                             "t2_path": bandon_input_t2_path.name,
                             "t1_input_path_exists": bandon_input_t1_path.exists(),
@@ -2004,6 +2100,8 @@ def run_detection(
                         t1_valid_mask_path=bandon_t1_valid_mask_path,
                         t2_valid_mask_path=bandon_t2_valid_mask_path,
                         aoi_mask_path=bandon_aoi_mask_path,
+                        effective_backend=settings.inference_backend,
+                        threshold=change_threshold,
                     )
                     if bandon_result.child_timing is not None:
                         timing.merge_child_timings(bandon_result.child_timing, prefix="inference.bandon")
@@ -2057,8 +2155,31 @@ def run_detection(
                 )
 
             backend_diagnostics["bandon"] = {
+                "effective_backend": bandon_result.metadata.get("effective_backend"),
+                "runner_family": bandon_result.metadata.get("runner_family"),
                 "launcher": bandon_result.launcher,
                 "command": bandon_result.command,
+                "checkpoint_path": bandon_result.metadata.get("checkpoint_path"),
+                "checkpoint_sha256": bandon_result.metadata.get("checkpoint_sha256"),
+                "checkpoint_diagnostics": bandon_result.metadata.get("checkpoint_diagnostics"),
+                "threshold": bandon_result.metadata.get("threshold"),
+                "config_path": bandon_result.metadata.get("config_path"),
+                "normalization_used": bandon_result.metadata.get("normalization_used"),
+                "input_order": bandon_result.metadata.get("input_order"),
+                "decode_method": bandon_result.metadata.get("decode_method"),
+                "probability_stats": bandon_result.metadata.get("probability_stats"),
+                "probability_stats_inside_aoi": bandon_result.metadata.get("probability_stats_inside_aoi"),
+                "probability_stats_valid_comparison": _probability_stats(
+                    bandon_result.change_probability,
+                    valid_comparison_mask,
+                ),
+                "output_min_by_channel": bandon_result.metadata.get("output_min_by_channel"),
+                "output_max_by_channel": bandon_result.metadata.get("output_max_by_channel"),
+                "output_mean_by_channel": bandon_result.metadata.get("output_mean_by_channel"),
+                "output_std_by_channel": bandon_result.metadata.get("output_std_by_channel"),
+                "input_t1": bandon_result.metadata.get("input_t1"),
+                "input_t2": bandon_result.metadata.get("input_t2"),
+                "device": bandon_result.metadata.get("device"),
                 "device_resolved": bandon_result.metadata.get("device_resolved"),
                 "allow_mps_fallback": bandon_result.metadata.get("allow_mps_fallback"),
                 "pytorch_enable_mps_fallback": bandon_result.metadata.get("pytorch_enable_mps_fallback"),

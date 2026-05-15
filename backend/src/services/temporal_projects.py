@@ -30,7 +30,7 @@ from src.domain.imagery_providers import EsriWaybackProvider, MapboxCurrentProvi
 from src.domain.mapbox_current import MAPBOX_SOURCE_ID
 from src.domain.stage_timing import StageTimingRecorder
 from src.domain.vectorize import build_temporal_growth_blocks, build_temporal_growth_envelope
-from src.execution_profiles import PipelineExecutionConfig, resolve_backend
+from src.execution_profiles import PipelineExecutionConfig, resolve_backend, resolve_configured_inference_execution_config
 from src.schemas import (
     RunRequest,
     RunResponse,
@@ -179,9 +179,7 @@ def _populate_milestone_release_dates(project: TemporalProject, settings: Settin
 
 
 def _default_temporal_execution_config(settings: Settings) -> PipelineExecutionConfig:
-    if settings.model_backend_default == "bandon_mps":
-        return PipelineExecutionConfig(model_backend="bandon_mps")
-    return PipelineExecutionConfig(model_backend="sam3", backend_mode="public_zerogpu")
+    return resolve_configured_inference_execution_config(settings)
 
 
 def resolve_temporal_project_execution_config(project: TemporalProject, settings: Settings) -> PipelineExecutionConfig:

@@ -80,7 +80,7 @@ import { WorkflowSectionCard } from "@/features/workspace/WorkflowSectionCard";
 import { WorkspaceShell } from "@/features/workspace/WorkspaceShell";
 import type { WorkflowSectionId } from "@/features/workspace/workflowSections";
 
-const DEFAULT_PROJECT_DIRECTORY = "/Users/tahaelouali/Desktop/Building_change_app/backend/runtime_cache";
+const DEFAULT_PROJECT_DIRECTORY = "/Users/tahaelouali/Developer/Building_change_app/backend/runtime_cache";
 const MAPBOX_CURRENT_MILESTONE_ID = "mapbox.satellite";
 
 function resolveProjectDirectory(projectId: string, directory: string): string {
@@ -501,6 +501,9 @@ export function TemporalMosaicPanel({
   const [createProjectBusy, setCreateProjectBusy] = useState(false);
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [progressMetricsVisible, setProgressMetricsVisible] = useState(false);
+  const [resultsExportMenuOpen, setResultsExportMenuOpen] = useState(false);
+  const [resultsExportBusy, setResultsExportBusy] = useState<"xlsx" | "kml" | null>(null);
+  const [resultsExportError, setResultsExportError] = useState<string | null>(null);
 
   const aoi = useAppStore((state) => state.aoi);
   const draftVertices = useAppStore((state) => state.draftVertices);
@@ -1139,6 +1142,24 @@ export function TemporalMosaicPanel({
     await downloadFileFromUrl(buildBackendFileUrl(backendUrl, bundlePath), fileName);
   };
 
+  const handleDownloadResults = async (format: "xlsx" | "kml") => {
+    if (!project?.project_id) {
+      return;
+    }
+    setResultsExportError(null);
+    setResultsExportBusy(format);
+    try {
+      const path = `/api/temporal-projects/${encodeURIComponent(project.project_id)}/exports/results.${format}`;
+      const filename = `resultats_${project.project_id}.${format}`;
+      await downloadFileFromUrl(resolveBackendUrl(backendUrl, path) ?? path, filename);
+      setResultsExportMenuOpen(false);
+    } catch {
+      setResultsExportError("Export impossible pour ce projet.");
+    } finally {
+      setResultsExportBusy(null);
+    }
+  };
+
   const handleImportOverride = async (geometry: Polygon) => {
     if (!project || !selectedMilestone) {
       return;
@@ -1173,6 +1194,7 @@ export function TemporalMosaicPanel({
   const aoiVertices = draftVertices.length || (aoi ? aoi.coordinates[0].length - 1 : 0);
   const showRunProgress = runProjectMutation.isPending || runProgress.phase !== "idle";
   const showMilestoneRunData = progressMetricsVisible && Boolean(selectedMilestone);
+  const hasCompletedTemporalResult = Boolean(project?.milestones.some((milestone) => milestone.status === "complete" && milestone.metrics));
 
   return (
     <>
@@ -1211,7 +1233,7 @@ export function TemporalMosaicPanel({
                 id="create-project-directory"
                 value={createProjectDirectory}
                 onChange={(event) => setCreateProjectDirectory(event.target.value)}
-                placeholder="/Users/tahaelouali/Desktop/Building_change_app/backend/runtime_cache/custom-projects/zone-industrial"
+                placeholder="/Users/tahaelouali/Developer/Building_change_app/backend/runtime_cache/custom-projects/zone-industrial"
                 className="border-sidebar-border bg-card text-card-foreground"
               />
               <p className="text-caption text-muted-foreground">
@@ -1571,11 +1593,47 @@ export function TemporalMosaicPanel({
                   <>
                     <Card className="border-sidebar-border bg-sidebar shadow-panel">
                       <CardContent className="space-y-6 p-5 lg:p-6">
-                        <div className="flex justify-end">
-                          <span className={cn("rounded-full border px-3 py-1.5 label-xs font-semibold uppercase", milestoneBadgeTone(selectedMilestone.status))}>
-                            {t(`temporal.milestone_status.${selectedMilestone.status}`)}
-                          </span>
+                        <div className="flex flex-col items-stretch gap-2 sm:flex-row sm:items-start sm:justify-end">
+                          <div className="relative">
+                            <Button
+                              type="button"
+                              variant="outline"
+                              className="h-10 w-full border-sidebar-border bg-card px-3 sm:w-auto"
+                              onClick={() => {
+                                setResultsExportError(null);
+                                setResultsExportMenuOpen((open) => !open);
+                              }}
+                              disabled={!hasCompletedTemporalResult || Boolean(resultsExportBusy)}
+                            >
+                              {resultsExportBusy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Download className="mr-2 h-4 w-4" />}
+                              Télécharger les résultats
+                              <ChevronDown className="ml-2 h-4 w-4" />
+                            </Button>
+                            {resultsExportMenuOpen ? (
+                              <div className="absolute right-0 z-20 mt-2 w-60 rounded-lg border border-sidebar-border bg-card p-1.5 shadow-panel">
+                                <button
+                                  type="button"
+                                  className="flex w-full items-center rounded-md px-3 py-2 text-left text-sm text-foreground transition hover:bg-surface"
+                                  onClick={() => void handleDownloadResults("xlsx")}
+                                >
+                                  Télécharger Excel (.xlsx)
+                                </button>
+                                <button
+                                  type="button"
+                                  className="flex w-full items-center rounded-md px-3 py-2 text-left text-sm text-foreground transition hover:bg-surface"
+                                  onClick={() => void handleDownloadResults("kml")}
+                                >
+                                  Télécharger KML (.kml)
+                                </button>
+                              </div>
+                            ) : null}
+                          </div>
                         </div>
+                        {resultsExportError ? (
+                          <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive-foreground">
+                            {resultsExportError}
+                          </div>
+                        ) : null}
 
                         <MilestoneMetricCards
                           milestone={selectedMilestone}

@@ -60,7 +60,7 @@ import { WorkflowSectionCard } from "@/features/workspace/WorkflowSectionCard";
 import { WorkspaceShell } from "@/features/workspace/WorkspaceShell";
 import type { WorkflowSectionId } from "@/features/workspace/workflowSections";
 
-const DEFAULT_PROJECT_DIRECTORY = "/Users/tahaelouali/Desktop/Building_change_app/backend/runtime_cache";
+const DEFAULT_PROJECT_DIRECTORY = "/Users/tahaelouali/Developer/Building_change_app/backend/runtime_cache";
 
 function resolveProjectDirectory(projectId: string, directory: string): string {
   const trimmedDirectory = directory.trim();

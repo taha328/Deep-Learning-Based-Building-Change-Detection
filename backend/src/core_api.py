@@ -8,6 +8,7 @@ from src.execution_profiles import (
     PipelineExecutionConfig,
     collect_backend_availability,
     resolve_backend,
+    resolve_configured_inference_execution_config,
 )
 from src.domain.cache import load_cached_response
 from src.schemas import (
@@ -57,7 +58,9 @@ def validate_request_api(
     execution_config: PipelineExecutionConfig | None = None,
 ) -> ValidationResponse:
     resolved_settings = _resolve_settings(settings)
-    backend = resolve_backend(execution_config, settings=resolved_settings)
+    del execution_config
+    resolved_execution_config = resolve_configured_inference_execution_config(resolved_settings)
+    backend = resolve_backend(resolved_execution_config, settings=resolved_settings)
     validation, _ = validate_request(
         request,
         releases=list_releases(resolved_settings),
@@ -116,7 +119,9 @@ def run_detection_api(
     x_ip_token: str | None = None,
 ) -> RunResponse:
     resolved_settings = _resolve_settings(settings)
-    backend = resolve_backend(execution_config, settings=resolved_settings)
+    del execution_config
+    resolved_execution_config = resolve_configured_inference_execution_config(resolved_settings)
+    backend = resolve_backend(resolved_execution_config, settings=resolved_settings)
     availability = backend.availability(resolved_settings)
     if not availability.available:
         return RunResponse(
@@ -221,7 +226,8 @@ def validate_temporal_project_api(
     execution_config: PipelineExecutionConfig | None = None,
 ) -> TemporalProjectValidationResponse:
     resolved_settings = _resolve_settings(settings)
-    resolved_execution_config = execution_config or resolve_temporal_project_execution_config(project, resolved_settings)
+    del execution_config
+    resolved_execution_config = resolve_configured_inference_execution_config(resolved_settings)
     backend = resolve_backend(resolved_execution_config, settings=resolved_settings)
     configured_settings = backend.configure_settings(resolved_settings)
     return validate_temporal_project(
@@ -242,7 +248,8 @@ def run_temporal_project_api(
 ) -> TemporalProjectRunResponse:
     resolved_settings = _resolve_settings(settings)
     project = get_temporal_project(project_id, resolved_settings)
-    resolved_execution_config = execution_config or resolve_temporal_project_execution_config(project, resolved_settings)
+    del execution_config
+    resolved_execution_config = resolve_configured_inference_execution_config(resolved_settings)
     backend = resolve_backend(resolved_execution_config, settings=resolved_settings)
     availability = backend.availability(resolved_settings)
     if not availability.available:

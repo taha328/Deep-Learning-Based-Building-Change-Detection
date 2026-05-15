@@ -37,7 +37,7 @@ def relay_client_log(
     body: ClientLogRelayBody,
     settings=Depends(get_app_settings),
 ) -> Response:
-    if not settings.enable_client_log_relay:
+    if not getattr(settings, "enable_client_log_relay", True):
         return Response(status_code=status.HTTP_404_NOT_FOUND)
     if not body.event.startswith(_ALLOWED_EVENT_PREFIX):
         return Response(status_code=status.HTTP_204_NO_CONTENT)

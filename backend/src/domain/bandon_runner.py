@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
 import logging
 import os
@@ -120,6 +121,14 @@ def _clean_env() -> dict[str, str]:
     env.pop("PYTORCH_ENABLE_MPS_FALLBACK", None)
     env["PYTHONUNBUFFERED"] = "1"
     return env
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _read_pipe_thread(fd: int, chunks: list[bytes]) -> None:
@@ -311,6 +320,8 @@ def run_bandon_inference(
     t1_valid_mask_path: Path | None = None,
     t2_valid_mask_path: Path | None = None,
     aoi_mask_path: Path | None = None,
+    effective_backend: str | None = None,
+    threshold: float | None = None,
 ) -> BandonRunResult:
     paths = _resolve_runtime_paths(settings)
     launcher_name, launcher_prefix, _python_executable = _resolve_launcher(paths["env_prefix"])
@@ -328,6 +339,8 @@ def run_bandon_inference(
         settings.bandon_device,
         "--outdir",
         str(out_dir),
+        "--effective-backend",
+        effective_backend or settings.inference_backend,
     ]
     if settings.bandon_allow_mps_fallback:
         command.append("--allow-mps-fallback")
@@ -390,6 +403,28 @@ def run_bandon_inference(
         raise RuntimeError(f"BANDON MTGCDNet did not write change_mask.png to {mask_path}")
 
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata.update(
+        {
+            "effective_backend": effective_backend or settings.inference_backend,
+            "runner_family": metadata.get("runner_family") or "bandon_mps",
+            "checkpoint_path": str(paths["checkpoint_path"]),
+            "checkpoint_sha256": _sha256_file(paths["checkpoint_path"]),
+            "threshold": threshold,
+            "device": settings.bandon_device,
+            "config_path": str(paths["config_path"]),
+            "normalization_used": metadata.get("normalization_used")
+            or {
+                "type": "mmcv.Normalize",
+                "name": "app_0_1",
+                "mean": [0.0, 0.0, 0.0],
+                "std": [255.0, 255.0, 255.0],
+                "to_rgb": True,
+            },
+            "input_t1": str(image_a_path),
+            "input_t2": str(image_b_path),
+        }
+    )
+    metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
     child_timing = metadata.get("stage_timings") if isinstance(metadata.get("stage_timings"), dict) else None
     change_probability = np.load(probability_path).astype(np.float32)
     change_mask = np.asarray(Image.open(mask_path).convert("L"), dtype=np.uint8) > 0

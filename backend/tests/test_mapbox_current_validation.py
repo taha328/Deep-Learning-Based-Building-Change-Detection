@@ -182,6 +182,60 @@ def test_mapbox_546_tiles_allowed_with_configured_limit(monkeypatch, tmp_path) -
     assert any("AOI will download 546 Mapbox tiles at z=19" in warning for warning in response.warnings)
 
 
+def test_mapbox_430_tiles_allowed_with_1024_limit_and_blocked_with_256(monkeypatch, tmp_path) -> None:
+    releases = [
+        _release("WB_2024_R02", date(2024, 3, 7), 1),
+        _release("WB_2026_R03", date(2026, 3, 25), 2),
+    ]
+    monkeypatch.setattr("src.services.validation.scene_tile_count", lambda bbox, zoom: 430)
+    monkeypatch.setattr(
+        "src.services.validation.intersecting_tiles_for_aoi",
+        lambda aoi, *, bbox, zoom: (frozenset((index, 0) for index in range(430)), 430),
+    )
+    request = ValidationRequest(
+        aoi_geojson=_aoi(),
+        t1_release="WB_2024_R02",
+        t2_release="WB_2026_R03",
+        mode="full_run",
+        latest_source="mapbox_current",
+    )
+
+    allowed_response, allowed_prepared = validate_request(
+        request,
+        releases=releases,
+        settings=Settings(
+            runtime_cache_dir=tmp_path / "runtime_allowed",
+            mapbox_current_imagery_enabled=True,
+            mapbox_access_token="pk.test",
+            mapbox_max_tiles_per_request=1024,
+        ),
+        remote_patch_budget_enabled=False,
+    )
+
+    assert allowed_response.valid is True
+    assert allowed_prepared is not None
+    assert not allowed_response.blocking_errors
+
+    blocked_response, blocked_prepared = validate_request(
+        request,
+        releases=releases,
+        settings=Settings(
+            runtime_cache_dir=tmp_path / "runtime_blocked",
+            mapbox_current_imagery_enabled=True,
+            mapbox_access_token="pk.test",
+            mapbox_max_tiles_per_request=256,
+        ),
+        remote_patch_budget_enabled=False,
+    )
+
+    assert blocked_response.valid is False
+    assert blocked_prepared is None
+    assert any(
+        "AOI would download 430 Mapbox tiles at z=19, exceeding the limit of 256." in message
+        for message in blocked_response.blocking_errors
+    )
+
+
 def test_mapbox_546_tiles_blocked_with_limit_256(monkeypatch, tmp_path) -> None:
     settings = Settings(
         runtime_cache_dir=tmp_path / "runtime",

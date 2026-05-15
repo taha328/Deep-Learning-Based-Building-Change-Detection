@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.api.routes import backends, cache, detection, dev, files, health, jobs, releases, temporal_projects
 from src.config import get_settings
 
+logger = logging.getLogger(__name__)
+
 
 def create_fastapi_app() -> FastAPI:
     settings = get_settings()
+    logger.info("BACKEND_STARTUP_STAGE settings_loaded")
     app = FastAPI(title="Building Change Detection API", version="1.0.0")
 
     app.add_middleware(
@@ -29,6 +34,8 @@ def create_fastapi_app() -> FastAPI:
     app.include_router(dev.router, prefix="/api/dev", tags=["dev"])
     app.include_router(cache.router, prefix="/api/cache", tags=["cache"])
     app.include_router(files.router, prefix="/api/files", tags=["files"])
+    logger.info("BACKEND_STARTUP_STAGE routes_registered")
+    logger.info("BACKEND_STARTUP_STAGE app_created")
 
     return app
 

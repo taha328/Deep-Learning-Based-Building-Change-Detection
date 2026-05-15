@@ -21,6 +21,7 @@ from src.core_api import (
     validate_temporal_project_api,
 )
 from src.services.temporal_projects import create_temporal_project_bundle, temporal_project_response_payload
+from src.services.temporal_exports import build_temporal_results_kml, build_temporal_results_workbook
 from src.services.temporal_reference_imagery import (
     build_reference_tilejson_payload_cached,
     reference_imagery_version_token,
@@ -195,6 +196,34 @@ def run_project(
                 updated_at="1970-01-01T00:00:00Z",
             ),
         )
+
+
+@router.head("/{project_id}/exports/results.xlsx")
+@router.get("/{project_id}/exports/results.xlsx")
+def export_project_results_xlsx(project_id: str, settings=Depends(get_app_settings)) -> Response:
+    try:
+        payload = build_temporal_results_workbook(project_id, settings=settings)
+    except FileNotFoundError as exc:
+        raise_api_error(status.HTTP_404_NOT_FOUND, "not_found", str(exc))
+    return Response(
+        content=payload,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="resultats_{project_id}.xlsx"'},
+    )
+
+
+@router.head("/{project_id}/exports/results.kml")
+@router.get("/{project_id}/exports/results.kml")
+def export_project_results_kml(project_id: str, settings=Depends(get_app_settings)) -> Response:
+    try:
+        payload = build_temporal_results_kml(project_id, settings=settings)
+    except FileNotFoundError as exc:
+        raise_api_error(status.HTTP_404_NOT_FOUND, "not_found", str(exc))
+    return Response(
+        content=payload,
+        media_type="application/vnd.google-earth.kml+xml",
+        headers={"Content-Disposition": f'attachment; filename="resultats_{project_id}.kml"'},
+    )
 
 
 @router.post("/{project_id}/milestones/{release_identifier}/override")

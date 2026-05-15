@@ -6,7 +6,7 @@ from typing import Any
 from src.config import Settings, get_settings
 from src.core_api import run_detection_api, run_temporal_project_api
 from src.db.session import session_scope
-from src.execution_profiles import PipelineExecutionConfig
+from src.execution_profiles import PipelineExecutionConfig, resolve_configured_inference_execution_config
 from src.jobs.celery_app import celery_app
 from src.jobs.progress import update_progress
 from src.jobs.service import mark_job_execution_failed
@@ -52,13 +52,8 @@ def _resolve_settings(settings_payload: dict[str, Any] | None = None) -> Setting
 
 
 def _build_execution_config(request: RunRequest, settings: Settings) -> PipelineExecutionConfig:
-    model_backend = request.model_backend or settings.model_backend_default
-    if model_backend == "bandon_mps":
-        return PipelineExecutionConfig(model_backend="bandon_mps")
-    return PipelineExecutionConfig(
-        model_backend="sam3",
-        backend_mode=request.sam3_backend_mode or "public_zerogpu",
-    )
+    del request
+    return resolve_configured_inference_execution_config(settings)
 
 
 def _cancel_if_requested(job_id: str, settings: Settings) -> None:
