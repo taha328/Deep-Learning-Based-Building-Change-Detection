@@ -1,0 +1,7 @@
+.conda-macos-mps/
+checkpoints/
+mps_verification/
+.DS_Store
+**/.DS_Store
+__pycache__/
+*.py[cod]

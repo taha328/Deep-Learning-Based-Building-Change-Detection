@@ -11,3 +11,91 @@ backend/runtime_cache/
 .DS_Store
 **/__pycache__/
 *.pyc
+
+# Local generated dependencies and geospatial/model artifacts
+.mypy_cache/
+.ruff_cache/
+runtime_cache/
+backend/runtime_cache*/
+frontend/dist/
+*.pth
+*.pt
+*.ckpt
+*.onnx
+*.tif
+*.tiff
+*.geotiff
+*.cog.tif
+*.gpkg
+*.mbtiles
+*.zip
+*.pmtiles
+*.png
+*.jpg
+*.jpeg
+*.pdf
+*.pptx
+*.safetensors
+
+# Generated/runtime/cache
+.agents/
+Research-Paper-Writing-Skills/
+backend/runtime_cache/
+runtime_cache/
+backend/tmp/
+tmp/
+outputs/
+generated_assets/
+notebooks/outputs/
+
+# Python/env/cache
+backend/.venv/
+.venv/
+**/.venv/
+**/__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Frontend
+frontend/node_modules/
+node_modules/
+frontend/dist/
+
+# Vendor generated environments and nested Git metadata
+vendor/**/.conda*/
+vendor/**/.venv/
+vendor/**/__pycache__/
+vendor/**/.git/
+mps_verification/
+**/mps_verification/
+
+# Model/checkpoint artifacts
+backend/checkpoints/
+vendor/**/checkpoints/
+mtgcdnet_s2looking_outputs/
+checkpoints/
+*.safetensors
+*.pth
+*.pt
+*.ckpt
+*.onnx
+
+# Large generated geospatial/media artifacts
+*.tif
+*.tiff
+*.geotiff
+*.cog.tif
+*.png
+*.jpg
+*.jpeg
+*.zip
+*.gpkg
+*.mbtiles
+*.pmtiles
+*.pptx
+*.pdf
+
+# macOS / Office temp files
+.DS_Store
+~$*
