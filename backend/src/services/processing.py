@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
+import hashlib
 import numpy as np
 import pandas as pd
 from PIL import Image
@@ -447,14 +448,72 @@ def _write_manifest_with_timing(
     result_dir: Path,
     artifacts: list[Any],
     extra_artifacts: list[dict[str, object]] | None = None,
+    run_metadata: dict[str, object] | None = None,
 ) -> None:
     with timing.stage("manifest_write"):
-        write_run_manifest(result_dir, artifacts, extra_artifacts=extra_artifacts)
+        write_run_manifest(result_dir, artifacts, extra_artifacts=extra_artifacts, run_metadata=run_metadata)
     _write_timing_report_safely(timing, result_dir)
     try:
-        write_run_manifest(result_dir, artifacts, extra_artifacts=extra_artifacts)
+        write_run_manifest(result_dir, artifacts, extra_artifacts=extra_artifacts, run_metadata=run_metadata)
     except Exception as exc:
         LOGGER.warning("Failed to refresh manifest with timing report for %s: %s", timing.run_id, exc)
+
+
+def _sha256_file_or_none(path: Path | None) -> str | None:
+    if path is None or not path.is_file():
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _resolved_path(path: Path, *, base: Path | None = None) -> Path:
+    expanded = path.expanduser()
+    if expanded.is_absolute():
+        return expanded.resolve()
+    return ((base or Path.cwd()) / expanded).resolve()
+
+
+def _detection_run_identity(
+    *,
+    settings: Settings,
+    model_backend: str,
+    request_hash: str,
+    change_threshold: float,
+    request_hash_context: dict[str, object] | None,
+) -> dict[str, object]:
+    checkpoint_path: Path | None = None
+    config_path: Path | None = None
+    if model_backend == "bandon_mps":
+        checkpoint_path = _resolved_path(settings.bandon_checkpoint_path, base=settings.project_root)
+        config_path = _resolved_path(settings.bandon_config_path, base=settings.bandon_repo_dir)
+    checkpoint_sha256 = _sha256_file_or_none(checkpoint_path)
+    identity: dict[str, object] = {
+        "effective_backend": settings.inference_backend,
+        "runner_family": "bandon_mps" if model_backend == "bandon_mps" else model_backend,
+        "checkpoint_path": str(checkpoint_path) if checkpoint_path else None,
+        "checkpoint_sha256": checkpoint_sha256,
+        "threshold": change_threshold,
+        "config_path": str(config_path) if config_path else None,
+        "request_hash": request_hash,
+        "pair_hash": request_hash,
+        "inference_cache_key": request_hash,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    if request_hash_context is not None:
+        identity["request_hash_context"] = request_hash_context
+    return identity
+
+
+def _log_effective_detection_identity(identity: dict[str, object]) -> None:
+    LOGGER.info("EFFECTIVE_INFERENCE_BACKEND value=%s", identity.get("effective_backend"))
+    LOGGER.info("EFFECTIVE_CHECKPOINT_PATH value=%s", identity.get("checkpoint_path"))
+    LOGGER.info("EFFECTIVE_CHECKPOINT_SHA256 value=%s", identity.get("checkpoint_sha256"))
+    LOGGER.info("EFFECTIVE_THRESHOLD value=%s", identity.get("threshold"))
+    LOGGER.info("EFFECTIVE_RUN_CACHE_KEY value=%s", identity.get("inference_cache_key"))
+    LOGGER.info("EFFECTIVE_REQUEST_HASH value=%s", identity.get("request_hash"))
 
 
 def _summarize_release_metadata_for_request(
@@ -1526,6 +1585,35 @@ def run_detection(
         duration_ms=validation_duration_ms,
         metadata={"valid": True, "estimated_tiles": prepared.tile_count_per_scene * 2},
     )
+    if settings.inference_backend == "mtgcdnet_s2looking_mps":
+        change_threshold = float(settings.default_change_threshold)
+    else:
+        change_threshold = float(request.change_threshold if request.change_threshold is not None else settings.default_change_threshold)
+    semantic_threshold = float(request.semantic_threshold if request.semantic_threshold is not None else settings.default_semantic_threshold)
+    old_building_mask_dilation_pixels = max(
+        int(
+            request.old_building_mask_dilation_pixels
+            if request.old_building_mask_dilation_pixels is not None
+            else settings.default_old_building_mask_dilation_pixels
+        ),
+        0,
+    )
+    new_building_core_distance_pixels = max(
+        int(
+            request.new_building_core_distance_pixels
+            if request.new_building_core_distance_pixels is not None
+            else settings.default_new_building_core_distance_pixels
+        ),
+        0,
+    )
+    run_identity = _detection_run_identity(
+        settings=settings,
+        model_backend=model_backend,
+        request_hash=prepared.request_hash,
+        change_threshold=change_threshold,
+        request_hash_context=request_hash_context,
+    )
+    _log_effective_detection_identity(run_identity)
 
     with timing.stage("imagery_cache_lookup"):
         cached = load_cached_response(settings, prepared.request_hash)
@@ -1550,27 +1638,6 @@ def run_detection(
         request,
         normalized_aoi=prepared.normalized_aoi,
         settings=settings,
-    )
-    if settings.inference_backend == "mtgcdnet_s2looking_mps":
-        change_threshold = float(settings.default_change_threshold)
-    else:
-        change_threshold = float(request.change_threshold if request.change_threshold is not None else settings.default_change_threshold)
-    semantic_threshold = float(request.semantic_threshold if request.semantic_threshold is not None else settings.default_semantic_threshold)
-    old_building_mask_dilation_pixels = max(
-        int(
-            request.old_building_mask_dilation_pixels
-            if request.old_building_mask_dilation_pixels is not None
-            else settings.default_old_building_mask_dilation_pixels
-        ),
-        0,
-    )
-    new_building_core_distance_pixels = max(
-        int(
-            request.new_building_core_distance_pixels
-            if request.new_building_core_distance_pixels is not None
-            else settings.default_new_building_core_distance_pixels
-        ),
-        0,
     )
     run_warnings: list[str] = []
     backend_diagnostics: dict[str, Any] = {
@@ -2358,6 +2425,7 @@ def run_detection(
                     run_id=prepared.request_hash,
                     scenes=[scene_t1, scene_t2],
                 ),
+                run_metadata=run_identity,
             )
             _report(progress, 1.0, "Completed")
             run_succeeded = True
@@ -2534,6 +2602,7 @@ def run_detection(
                 run_id=prepared.request_hash,
                 scenes=[scene_t1, scene_t2],
             ),
+            run_metadata=run_identity,
         )
         _report(progress, 1.0, "Completed")
         run_succeeded = True

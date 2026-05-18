@@ -74,11 +74,13 @@ class Settings(BaseModel):
     mapbox_current_imagery_timeout_seconds: int = 30
     mapbox_max_tiles_per_request: int = 1024
     mapbox_current_imagery_max_tiles: int = 1024
+    reference_tile_cache_dir: Path | None = None
+    reference_tile_prewarm_max_tiles: int = 256
     patch_size: int = 1024
     stride: int = 768
     scene_segmentation_concurrency: int = 2
-    default_change_threshold: float = 0.30
-    default_semantic_threshold: float = 0.50
+    default_change_threshold: float = 0.40
+    default_semantic_threshold: float = 0.40
     default_min_new_building_pixels: int = 50
     addition_min_area_m2: float = 8.0
     addition_max_existing_overlap_ratio: float = 0.50
@@ -209,6 +211,10 @@ class Settings(BaseModel):
             self.wayback_tile_cache_dir = self.runtime_cache_dir / "wayback_tiles"
         if self.mapbox_current_imagery_cache_dir is None:
             self.mapbox_current_imagery_cache_dir = self.runtime_cache_dir / "mapbox_mosaics"
+        if self.reference_tile_cache_dir is None:
+            self.reference_tile_cache_dir = self.runtime_cache_dir / "reference_tiles"
+        if self.reference_tile_prewarm_max_tiles < 1:
+            raise ValueError("reference_tile_prewarm_max_tiles must be greater than or equal to 1.")
         if self.mapbox_max_tiles_per_request < 1:
             raise ValueError("mapbox_max_tiles_per_request must be greater than or equal to 1.")
         if self.wayback_http_connect_timeout_seconds < 1:
@@ -297,6 +303,7 @@ class Settings(BaseModel):
         self.wayback_tile_preflight_cache_dir.mkdir(parents=True, exist_ok=True)
         self.wayback_tile_cache_dir.mkdir(parents=True, exist_ok=True)
         self.mapbox_current_imagery_cache_dir.mkdir(parents=True, exist_ok=True)
+        self.reference_tile_cache_dir.mkdir(parents=True, exist_ok=True)
         self.tmp_cache_dir.mkdir(parents=True, exist_ok=True)
 
     @property
@@ -587,6 +594,15 @@ def get_settings() -> Settings:
         mapbox_current_imagery_max_tiles=_int_env(
             "MAPBOX_CURRENT_IMAGERY_MAX_TILES",
             base.mapbox_current_imagery_max_tiles,
+        ),
+        reference_tile_cache_dir=(
+            Path(cache_dir_env)
+            if (cache_dir_env := _optional_str_env("APP_REFERENCE_TILE_CACHE_DIR"))
+            else None
+        ),
+        reference_tile_prewarm_max_tiles=_int_env(
+            "APP_REFERENCE_TILE_PREWARM_MAX_TILES",
+            base.reference_tile_prewarm_max_tiles,
         ),
         patch_size=_int_env("APP_PATCH_SIZE", base.patch_size),
         stride=_int_env("APP_STRIDE", base.stride),

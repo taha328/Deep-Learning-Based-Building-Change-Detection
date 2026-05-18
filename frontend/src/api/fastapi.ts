@@ -507,8 +507,10 @@ export async function importTemporalOverride(
   return response;
 }
 
-export async function listReferenceLayers(projectId: string): Promise<ReferenceLayer[]> {
-  const result = await apiFetch<unknown>(`/api/temporal-projects/${encodeURIComponent(projectId)}/reference-layers`);
+export async function listReferenceLayers(projectId: string, options?: { signal?: AbortSignal }): Promise<ReferenceLayer[]> {
+  const result = await apiFetch<unknown>(`/api/temporal-projects/${encodeURIComponent(projectId)}/reference-layers`, {
+    signal: options?.signal,
+  });
   return z.array(referenceLayerSchema).parse(result);
 }
 

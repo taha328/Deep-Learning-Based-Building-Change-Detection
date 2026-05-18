@@ -7,6 +7,7 @@ import math
 import os
 from pathlib import Path
 import logging
+import tempfile
 import time
 from urllib.parse import quote
 import warnings
@@ -109,6 +110,15 @@ class ReferenceTileRenderResult:
     output_png_has_alpha: bool = False
     transparent_pixel_count: int = 0
     opaque_pixel_count: int = 0
+
+
+@dataclass(frozen=True)
+class ReferenceTileCacheResult:
+    cache_path: Path
+    cache_hit: bool
+    render_result: ReferenceTileRenderResult | None = None
+    cache_write_succeeded: bool = False
+    cache_write_error: str | None = None
 
 
 _REFERENCE_IMAGERY_METADATA_CACHE: dict[tuple[str, str, str, int, int], _ReferenceImageryMetadataCacheEntry] = {}
@@ -557,6 +567,109 @@ def reference_imagery_version_token(cog_info: TemporalReferenceCogInfo) -> str:
     stat_mtime = int(cog_info.cog_mtime) if cog_info.cog_mtime is not None else int(cog_info.cog_path.stat().st_mtime)
     stat_size = int(cog_info.cog_size) if cog_info.cog_size is not None else int(cog_info.cog_path.stat().st_size)
     return f"{stat_mtime}-{stat_size}"
+
+
+def _safe_cache_component(value: str) -> str:
+    return quote(value, safe="")
+
+
+def reference_tile_cache_path(
+    cache_root: Path,
+    *,
+    project_id: str,
+    release_identifier: str,
+    cog_version: str,
+    z: int,
+    x: int,
+    y: int,
+) -> Path:
+    return (
+        cache_root
+        / _safe_cache_component(project_id)
+        / _safe_cache_component(release_identifier)
+        / _safe_cache_component(cog_version)
+        / str(z)
+        / str(x)
+        / f"{y}.png"
+    )
+
+
+def _write_tile_cache_atomic(cache_path: Path, tile_bytes: bytes) -> None:
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_name = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            suffix=".tmp",
+            prefix=f".{cache_path.name}.",
+            dir=cache_path.parent,
+            delete=False,
+        ) as handle:
+            temp_name = handle.name
+            handle.write(tile_bytes)
+        os.replace(temp_name, cache_path)
+    finally:
+        if temp_name:
+            Path(temp_name).unlink(missing_ok=True)
+
+
+def ensure_reference_tile_png_cached_on_disk(
+    *,
+    cache_root: Path,
+    project_id: str,
+    release_identifier: str,
+    cog_info: TemporalReferenceCogInfo,
+    z: int,
+    x: int,
+    y: int,
+) -> ReferenceTileCacheResult:
+    cog_version = reference_imagery_version_token(cog_info)
+    cache_path = reference_tile_cache_path(
+        cache_root,
+        project_id=project_id,
+        release_identifier=release_identifier,
+        cog_version=cog_version,
+        z=z,
+        x=x,
+        y=y,
+    )
+    if cache_path.is_file():
+        return ReferenceTileCacheResult(cache_path=cache_path, cache_hit=True)
+
+    render_result = render_reference_tile_png_cached(
+        project_id=project_id,
+        release_identifier=release_identifier,
+        cog_info=cog_info,
+        z=z,
+        x=x,
+        y=y,
+    )
+    try:
+        _write_tile_cache_atomic(cache_path, render_result.content)
+    except OSError as exc:
+        logger.warning(
+            "TILE_CACHE_WRITE_FAILED projectId=%s releaseIdentifier=%s z=%s x=%s y=%s cachePath=%s error=%s",
+            project_id,
+            release_identifier,
+            z,
+            x,
+            y,
+            cache_path,
+            exc,
+        )
+        return ReferenceTileCacheResult(
+            cache_path=cache_path,
+            cache_hit=False,
+            render_result=render_result,
+            cache_write_succeeded=False,
+            cache_write_error=f"{type(exc).__name__}: {exc}",
+        )
+    return ReferenceTileCacheResult(
+        cache_path=cache_path,
+        cache_hit=False,
+        render_result=render_result,
+        cache_write_succeeded=True,
+    )
 
 
 def _encode_png_with_optional_alpha(rgb_or_rgba: np.ndarray, alpha: np.ndarray | None) -> tuple[bytes, bool, int, int]:

@@ -6,6 +6,7 @@ import base64
 import calendar
 from dataclasses import dataclass
 from datetime import UTC, datetime
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -13,6 +14,7 @@ import re
 import shutil
 import tempfile
 import time
+from urllib.parse import quote
 import uuid
 import xml.etree.ElementTree as ET
 import zipfile
@@ -29,11 +31,19 @@ from src.domain.cache import load_cached_response
 from src.domain.imagery_providers import EsriWaybackProvider, MapboxCurrentProvider
 from src.domain.mapbox_current import MAPBOX_SOURCE_ID
 from src.domain.stage_timing import StageTimingRecorder
-from src.domain.vectorize import build_temporal_growth_blocks, build_temporal_growth_envelope
+from src.domain.tiling import tile_bounds_3857, tile_range_for_bbox
+from src.domain.vectorize import (
+    VectorizationContext,
+    build_change_buffer_layers,
+    build_temporal_growth_blocks,
+    build_temporal_growth_envelope,
+)
 from src.execution_profiles import PipelineExecutionConfig, resolve_backend, resolve_configured_inference_execution_config
 from src.schemas import (
     RunRequest,
     RunResponse,
+    ReferenceLayer,
+    ReferenceLayerStyle,
     TemporalArtifactEntry,
     TemporalMilestone,
     TemporalMilestoneMetrics,
@@ -575,6 +585,451 @@ def _reference_valid_mask_path_from_pair_response(
     return None
 
 
+def _temporal_reference_aoi_hash(aoi_geojson: dict[str, Any] | None) -> str:
+    if not aoi_geojson:
+        return "no-aoi"
+    normalized = normalized_aoi_geojson(aoi_geojson)
+    return hashlib.sha256(json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _temporal_reference_route(project_id: str, release_identifier: str, suffix: str) -> str:
+    return f"/api/temporal-projects/{project_id}/milestones/{release_identifier}/reference/{suffix}"
+
+
+def _reference_imagery_from_cog_path(
+    *,
+    project_id: str,
+    release_identifier: str,
+    cog_path: Path,
+    source_reference: TemporalReferenceImagery | None = None,
+) -> TemporalReferenceImagery:
+    return TemporalReferenceImagery(
+        image_path=source_reference.image_path if source_reference else None,
+        image_png_data_url=None,
+        raster_bounds_wgs84=source_reference.raster_bounds_wgs84 if source_reference else None,
+        storage_strategy="raster_tiles",
+        cog_path=str(cog_path),
+        cog_url=f"/api/files?path={quote(str(cog_path))}",
+        tilejson_url=_temporal_reference_route(project_id, release_identifier, "tilejson.json"),
+        tiles_url_template=_temporal_reference_route(project_id, release_identifier, "tiles/{z}/{x}/{y}.png"),
+        minzoom=source_reference.minzoom if source_reference else None,
+        maxzoom=source_reference.maxzoom if source_reference else None,
+        tile_size=source_reference.tile_size if source_reference and source_reference.tile_size else 256,
+    )
+
+
+def _link_or_copy_reference_cog(source_path: Path, target_path: Path) -> str:
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    if target_path.exists():
+        return "existing"
+    try:
+        target_path.hardlink_to(source_path)
+        return "linked"
+    except OSError:
+        shutil.copy2(source_path, target_path)
+        return "copied"
+
+
+def _find_matching_project_reference_cog(
+    *,
+    settings: Settings,
+    project: TemporalProject,
+    release_identifier: str,
+    aoi_hash: str,
+) -> tuple[str, Path, TemporalReferenceImagery | None] | None:
+    logger.info(
+        "REFERENCE_REUSE_PROJECT_SCAN_START projectId=%s releaseIdentifier=%s aoiHash=%s",
+        project.project_id,
+        release_identifier,
+        aoi_hash,
+    )
+    if aoi_hash == "no-aoi":
+        return None
+    for project_json_path in sorted(settings.temporal_projects_dir.glob("*/project.json")):
+        source_project_id = project_json_path.parent.name
+        if source_project_id == project.project_id:
+            continue
+        try:
+            payload = json.loads(project_json_path.read_text())
+            candidate = TemporalProject.model_validate(payload)
+        except Exception:
+            continue
+        if _temporal_reference_aoi_hash(candidate.aoi_geojson) != aoi_hash:
+            continue
+        for milestone in candidate.milestones:
+            if milestone.release_identifier != release_identifier:
+                continue
+            reference = milestone.reference_imagery
+            candidate_paths: list[Path] = []
+            if reference and reference.cog_path:
+                candidate_paths.append(Path(reference.cog_path).expanduser().resolve())
+            candidate_paths.append(project_json_path.parent / "milestones" / release_identifier / "reference_imagery_cog.tif")
+            for candidate_path in candidate_paths:
+                if candidate_path.is_file():
+                    logger.info(
+                        "REFERENCE_REUSE_PROJECT_MATCH projectId=%s releaseIdentifier=%s aoiHash=%s sourceProjectId=%s sourcePath=%s",
+                        project.project_id,
+                        release_identifier,
+                        aoi_hash,
+                        source_project_id,
+                        candidate_path,
+                    )
+                    return source_project_id, candidate_path, reference
+    return None
+
+
+def _project_expected_mosaic_signature(project: TemporalProject, zoom: int) -> tuple[int, tuple[int, int, int, int]] | None:
+    if project.aoi_geojson is None:
+        return None
+    try:
+        bbox = bounds_dict(parse_aoi_geometry(project.aoi_geojson))
+        tile_range = tile_range_for_bbox(bbox, zoom)
+    except Exception:
+        return None
+    return zoom, tile_range
+
+
+def _metadata_matches_project_mosaic(
+    metadata: dict[str, Any],
+    *,
+    project: TemporalProject,
+    release_identifier: str,
+) -> tuple[bool, str]:
+    if metadata.get("release_identifier") != release_identifier:
+        return False, "release_mismatch"
+    try:
+        metadata_zoom = int(metadata.get("zoom", -1))
+    except (TypeError, ValueError):
+        return False, "missing_metadata"
+    if metadata_zoom < 0:
+        return False, "missing_metadata"
+    expected_signature = _project_expected_mosaic_signature(project, metadata_zoom)
+    if expected_signature is None:
+        return False, "aoi_mismatch"
+    expected_zoom, expected_tile_range = expected_signature
+    raw_tile_range = metadata.get("tile_range")
+    if isinstance(raw_tile_range, list) and len(raw_tile_range) == 4:
+        try:
+            observed_tile_range = tuple(int(value) for value in raw_tile_range)
+        except (TypeError, ValueError):
+            return False, "missing_metadata"
+        if observed_tile_range == expected_tile_range:
+            return True, "same_release_mosaic"
+        return False, "tile_range_mismatch"
+
+    raw_bounds = metadata.get("bounds_3857")
+    if not (isinstance(raw_bounds, list) and len(raw_bounds) == 4):
+        return False, "missing_metadata"
+    left, _, _, top = tile_bounds_3857(expected_tile_range[0], expected_tile_range[2], expected_zoom)
+    _, bottom, right, _ = tile_bounds_3857(expected_tile_range[1], expected_tile_range[3], expected_zoom)
+    expected_bounds = (left, bottom, right, top)
+    try:
+        if all(abs(float(observed) - expected) <= 1e-6 for observed, expected in zip(raw_bounds, expected_bounds)):
+            return True, "same_release_mosaic"
+        return False, "aoi_mismatch"
+    except (TypeError, ValueError):
+        return False, "missing_metadata"
+
+
+def _find_matching_shared_mosaic(
+    *,
+    settings: Settings,
+    project: TemporalProject,
+    release_identifier: str,
+    aoi_hash: str,
+) -> tuple[Path, Path | None] | None:
+    baseline_release_identifier = project.milestones[0].release_identifier if project.milestones else None
+    is_baseline_release = release_identifier == baseline_release_identifier
+    logger.info(
+        "REFERENCE_REUSE_SHARED_CACHE_CHECK projectId=%s releaseIdentifier=%s aoiHash=%s cacheDir=%s",
+        project.project_id,
+        release_identifier,
+        aoi_hash,
+        settings.wayback_mosaic_cache_dir,
+    )
+    if is_baseline_release:
+        logger.info(
+            "REFERENCE_BASELINE_IMAGERY_RESOLVE_START projectId=%s releaseIdentifier=%s aoiHash=%s cacheDir=%s",
+            project.project_id,
+            release_identifier,
+            aoi_hash,
+            settings.wayback_mosaic_cache_dir,
+        )
+    if aoi_hash == "no-aoi":
+        return None
+    for metadata_path in sorted(settings.wayback_mosaic_cache_dir.glob("*/metadata.json")):
+        try:
+            metadata = json.loads(metadata_path.read_text())
+        except Exception:
+            continue
+        if is_baseline_release:
+            logger.info(
+                "REFERENCE_BASELINE_IMAGERY_SHARED_MOSAIC_CANDIDATE projectId=%s releaseIdentifier=%s aoiHash=%s metadataPath=%s metadataRelease=%s metadataZoom=%s",
+                project.project_id,
+                release_identifier,
+                aoi_hash,
+                metadata_path,
+                metadata.get("release_identifier"),
+                metadata.get("zoom"),
+            )
+        matches, reason = _metadata_matches_project_mosaic(
+            metadata,
+            project=project,
+            release_identifier=release_identifier,
+        )
+        if not matches:
+            if is_baseline_release and metadata.get("release_identifier") == release_identifier:
+                logger.info(
+                    "REFERENCE_BASELINE_IMAGERY_SHARED_MOSAIC_REJECTED projectId=%s releaseIdentifier=%s aoiHash=%s metadataPath=%s reason=%s",
+                    project.project_id,
+                    release_identifier,
+                    aoi_hash,
+                    metadata_path,
+                    reason,
+                )
+            continue
+        mosaic_path = metadata_path.parent / "mosaic.tif"
+        if not mosaic_path.is_file():
+            if is_baseline_release:
+                logger.info(
+                    "REFERENCE_BASELINE_IMAGERY_SHARED_MOSAIC_REJECTED projectId=%s releaseIdentifier=%s aoiHash=%s metadataPath=%s reason=missing_mosaic_tif",
+                    project.project_id,
+                    release_identifier,
+                    aoi_hash,
+                    metadata_path,
+                )
+            continue
+        valid_mask_path = metadata_path.parent / "valid_mask.tif"
+        logger.info(
+            "REFERENCE_REUSE_SHARED_CACHE_MATCH projectId=%s releaseIdentifier=%s aoiHash=%s sourcePath=%s reason=%s zoom=%s",
+            project.project_id,
+            release_identifier,
+            aoi_hash,
+            mosaic_path,
+            reason,
+            metadata.get("zoom"),
+        )
+        if is_baseline_release:
+            logger.info(
+                "REFERENCE_BASELINE_IMAGERY_SHARED_MOSAIC_MATCH projectId=%s releaseIdentifier=%s aoiHash=%s sourcePath=%s reason=%s zoom=%s",
+                project.project_id,
+                release_identifier,
+                aoi_hash,
+                mosaic_path,
+                reason,
+                metadata.get("zoom"),
+            )
+        return mosaic_path, valid_mask_path if valid_mask_path.is_file() else None
+    if is_baseline_release:
+        logger.info(
+            "REFERENCE_BASELINE_IMAGERY_UNAVAILABLE projectId=%s releaseIdentifier=%s aoiHash=%s reason=no_project_cog_or_shared_mosaic",
+            project.project_id,
+            release_identifier,
+            aoi_hash,
+        )
+    return None
+
+
+def _persist_temporal_project_reference_repair(project: TemporalProject, settings: Settings) -> None:
+    project.updated_at = _utc_now_iso()
+    project_dir = _resolve_project_dir(settings, project.project_id, project.project_dir)
+    project.project_dir = str(project_dir)
+    payload = project.model_dump(mode="json")
+    project_json_path = project_dir / "project.json"
+    project_json_path.write_text(json.dumps(payload, indent=2))
+    manifest_path = project_dir / "project_manifest.json"
+    if manifest_path.exists():
+        manifest_path.write_text(json.dumps(payload, indent=2))
+    _write_project_summary(project, project_json_path)
+
+
+def repair_temporal_project_reference_imagery(project_id: str, settings: Settings) -> tuple[TemporalProject, int]:
+    started_at = time.perf_counter()
+    project = _load_project(
+        settings,
+        project_id,
+        hydrate_reference_imagery=False,
+        hydrate_buffer_layers=False,
+        refresh_derived_layers=False,
+        write_side_effects=False,
+    )
+    project_dir = _resolve_project_dir(settings, project.project_id, project.project_dir)
+    aoi_hash = _temporal_reference_aoi_hash(project.aoi_geojson)
+    repaired_count = 0
+    logger.info("REFERENCE_REUSE_LOOKUP_START projectId=%s aoiHash=%s", project.project_id, aoi_hash)
+
+    for milestone in project.milestones:
+        release_identifier = milestone.release_identifier
+        target_cog_path = project_dir / "milestones" / release_identifier / "reference_imagery_cog.tif"
+        logger.info(
+            "REFERENCE_LAYERS_REPAIR_SCAN_MILESTONE projectId=%s releaseIdentifier=%s path=%s",
+            project.project_id,
+            release_identifier,
+            target_cog_path,
+        )
+        if milestone.reference_imagery and milestone.reference_imagery.cog_path and Path(milestone.reference_imagery.cog_path).is_file():
+            continue
+        if target_cog_path.is_file():
+            milestone.reference_imagery = _reference_imagery_from_cog_path(
+                project_id=project.project_id,
+                release_identifier=release_identifier,
+                cog_path=target_cog_path,
+                source_reference=milestone.reference_imagery,
+            )
+            repaired_count += 1
+            logger.info(
+                "REFERENCE_REUSE_COG_LINKED projectId=%s releaseIdentifier=%s aoiHash=%s sourcePath=%s targetPath=%s reason=project_local_cog",
+                project.project_id,
+                release_identifier,
+                aoi_hash,
+                target_cog_path,
+                target_cog_path,
+            )
+            continue
+
+        match = _find_matching_project_reference_cog(
+            settings=settings,
+            project=project,
+            release_identifier=release_identifier,
+            aoi_hash=aoi_hash,
+        )
+        if match is not None:
+            source_project_id, source_path, source_reference = match
+            action = _link_or_copy_reference_cog(source_path, target_cog_path)
+            milestone.reference_imagery = _reference_imagery_from_cog_path(
+                project_id=project.project_id,
+                release_identifier=release_identifier,
+                cog_path=target_cog_path,
+                source_reference=source_reference,
+            )
+            repaired_count += 1
+            logger.info(
+                "REFERENCE_REUSE_COG_%s projectId=%s releaseIdentifier=%s aoiHash=%s sourceProjectId=%s sourcePath=%s targetPath=%s durationMs=%s",
+                "LINKED" if action == "linked" else "COPIED",
+                project.project_id,
+                release_identifier,
+                aoi_hash,
+                source_project_id,
+                source_path,
+                target_cog_path,
+                round((time.perf_counter() - started_at) * 1000, 2),
+            )
+            continue
+
+        shared = _find_matching_shared_mosaic(
+            settings=settings,
+            project=project,
+            release_identifier=release_identifier,
+            aoi_hash=aoi_hash,
+        )
+        if shared is not None:
+            source_raster_path, valid_mask_path = shared
+            reference = build_temporal_reference_imagery(
+                project_id=project.project_id,
+                project_dir=project_dir,
+                release_identifier=release_identifier,
+                source=TemporalReferenceSource(
+                    image_path=None,
+                    image_png_data_url=None,
+                    raster_bounds_wgs84=None,
+                    source_raster_path=str(source_raster_path),
+                    valid_mask_path=str(valid_mask_path) if valid_mask_path else None,
+                    aoi_geojson=project.aoi_geojson,
+                ),
+            )
+            if reference and reference.cog_path:
+                milestone.reference_imagery = reference
+                repaired_count += 1
+                if release_identifier == (project.milestones[0].release_identifier if project.milestones else None):
+                    logger.info(
+                        "REFERENCE_BASELINE_IMAGERY_COG_GENERATED projectId=%s releaseIdentifier=%s aoiHash=%s sourcePath=%s targetPath=%s",
+                        project.project_id,
+                        release_identifier,
+                        aoi_hash,
+                        source_raster_path,
+                        reference.cog_path,
+                    )
+                    logger.info(
+                        "REFERENCE_BASELINE_IMAGERY_ATTACHED projectId=%s releaseIdentifier=%s aoiHash=%s targetPath=%s",
+                        project.project_id,
+                        release_identifier,
+                        aoi_hash,
+                        reference.cog_path,
+                    )
+                logger.info(
+                    "REFERENCE_REUSE_COG_GENERATED_FROM_SHARED_MOSAIC projectId=%s releaseIdentifier=%s aoiHash=%s sourcePath=%s targetPath=%s durationMs=%s",
+                    project.project_id,
+                    release_identifier,
+                    aoi_hash,
+                    source_raster_path,
+                    reference.cog_path,
+                    round((time.perf_counter() - started_at) * 1000, 2),
+                )
+                continue
+
+        logger.info(
+            "REFERENCE_REUSE_NO_MATCH projectId=%s releaseIdentifier=%s aoiHash=%s reason=no_project_cog_or_shared_mosaic",
+            project.project_id,
+            release_identifier,
+            aoi_hash,
+        )
+
+    if repaired_count:
+        _persist_temporal_project_reference_repair(project, settings)
+    logger.info(
+        "REFERENCE_LAYERS_REPAIR_DONE projectId=%s count=%s aoiHash=%s durationMs=%s reason=%s",
+        project.project_id,
+        repaired_count,
+        aoi_hash,
+        round((time.perf_counter() - started_at) * 1000, 2),
+        "repaired" if repaired_count else "no_reference_imagery_source",
+    )
+    return project, repaired_count
+
+
+def temporal_reference_imagery_layers(project: TemporalProject) -> list[ReferenceLayer]:
+    layers: list[ReferenceLayer] = []
+    now = _utc_now_iso()
+    for milestone in project.milestones:
+        reference = milestone.reference_imagery
+        if reference is None or not reference.cog_path:
+            continue
+        cog_path = Path(reference.cog_path)
+        if not cog_path.is_file():
+            continue
+        layers.append(
+            ReferenceLayer(
+                layer_id=f"temporal-reference-{milestone.release_identifier}",
+                project_id=project.project_id,
+                name=f"{milestone.release_date or milestone.release_identifier} - reference imagery",
+                original_filename="reference_imagery_cog.tif",
+                original_format="geotiff",
+                layer_kind="raster",
+                geometry_type="raster",
+                scope="aoi_clipped",
+                storage_strategy="raster_tiles",
+                crs=None,
+                bounds_wgs84=reference.raster_bounds_wgs84,
+                feature_count=None,
+                file_size_bytes=cog_path.stat().st_size,
+                source_path=str(cog_path),
+                display_path=str(cog_path),
+                display_url=reference.cog_url,
+                pmtiles_url=None,
+                tilejson_url=reference.tilejson_url,
+                tiles_url_template=reference.tiles_url_template,
+                source_layer=milestone.release_identifier,
+                style=ReferenceLayerStyle(),
+                visible=True,
+                opacity=1.0,
+                created_at=project.created_at or now,
+                updated_at=project.updated_at or now,
+                warnings=[],
+            )
+        )
+    return layers
+
+
 def _hydrate_reference_imagery(
     project: TemporalProject,
     settings: Settings,
@@ -647,12 +1102,140 @@ def _ensure_temporal_derived_geometry_layers(project: TemporalProject) -> Tempor
 
 
 def _hydrate_milestone_buffer_layers(project: TemporalProject, settings: Settings) -> TemporalProject:
+    project_dir = _resolve_project_dir(settings, project.project_id, project.project_dir)
+    logger.info("TEMPORAL_OUTPUT_ARTIFACT_DISCOVERY_START projectId=%s", project.project_id)
     for milestone in project.milestones:
-        if milestone.buffer_layers_geojson or not milestone.pair_request_hash:
+        if milestone.buffer_layers_geojson:
+            for key, payload in milestone.buffer_layers_geojson.items():
+                logger.info(
+                    "TEMPORAL_OUTPUT_ARTIFACT_FEATURE_COUNT projectId=%s releaseIdentifier=%s artifactKey=building_change_buffer_%s featureCount=%s source=project_payload",
+                    project.project_id,
+                    milestone.release_identifier,
+                    key,
+                    len(payload.get("features", [])) if isinstance(payload, dict) and isinstance(payload.get("features"), list) else 0,
+                )
             continue
-        response = load_cached_response(settings, milestone.pair_request_hash)
-        if response is not None:
+        if milestone.pair_request_hash:
+            response = load_cached_response(settings, milestone.pair_request_hash)
+        else:
+            response = None
+        if response is not None and response.buffer_layers_geojson:
             milestone.buffer_layers_geojson = response.buffer_layers_geojson
+            for key, payload in milestone.buffer_layers_geojson.items():
+                logger.info(
+                    "TEMPORAL_OUTPUT_ARTIFACT_FOUND projectId=%s releaseIdentifier=%s artifactKey=building_change_buffer_%s source=pair_response featureCount=%s",
+                    project.project_id,
+                    milestone.release_identifier,
+                    key,
+                    len(payload.get("features", [])) if isinstance(payload, dict) and isinstance(payload.get("features"), list) else 0,
+                )
+            continue
+
+        existing_layers: dict[str, dict[str, Any]] = {}
+        for key, filename in (
+            ("10m", "building_change_buffer_10m.geojson"),
+            ("15m", "building_change_buffer_15m.geojson"),
+            ("20m", "building_change_buffer_20m.geojson"),
+        ):
+            artifact_path = _artifact_path_for_milestone(project_dir, milestone.release_identifier, filename)
+            if not artifact_path.is_file():
+                logger.info(
+                    "TEMPORAL_OUTPUT_ARTIFACT_MISSING projectId=%s releaseIdentifier=%s artifactKey=building_change_buffer_%s reason=no_artifact_path path=%s",
+                    project.project_id,
+                    milestone.release_identifier,
+                    key,
+                    artifact_path,
+                )
+                continue
+            try:
+                payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                logger.info(
+                    "TEMPORAL_OUTPUT_ARTIFACT_MISSING projectId=%s releaseIdentifier=%s artifactKey=building_change_buffer_%s reason=invalid_geojson path=%s error=%s",
+                    project.project_id,
+                    milestone.release_identifier,
+                    key,
+                    artifact_path,
+                    exc.__class__.__name__,
+                )
+                continue
+            if _has_features(payload):
+                existing_layers[key] = payload
+                logger.info(
+                    "TEMPORAL_OUTPUT_ARTIFACT_FOUND projectId=%s releaseIdentifier=%s artifactKey=building_change_buffer_%s source=milestone_file path=%s featureCount=%s",
+                    project.project_id,
+                    milestone.release_identifier,
+                    key,
+                    artifact_path,
+                    len(payload.get("features", [])),
+                )
+        if existing_layers:
+            milestone.buffer_layers_geojson = existing_layers
+            continue
+
+        additions = milestone.additions_geojson
+        if not _has_features(additions):
+            logger.info(
+                "TEMPORAL_OUTPUT_ARTIFACT_MISSING projectId=%s releaseIdentifier=%s artifactKey=building_change_buffer reason=%s",
+                project.project_id,
+                milestone.release_identifier,
+                "unsupported_for_baseline" if milestone == project.milestones[0] else "empty_geojson",
+            )
+            continue
+
+        previous_index = max(project.milestones.index(milestone) - 1, 0)
+        previous_milestone = project.milestones[previous_index] if project.milestones else milestone
+        try:
+            built_layers = build_change_buffer_layers(
+                additions,
+                distances_m=[10, 15, 20],
+                context=VectorizationContext(
+                    release_t1=previous_milestone.release_identifier,
+                    release_t2=milestone.release_identifier,
+                    src_date_t1=previous_milestone.release_date,
+                    src_date_t2=milestone.release_date,
+                ),
+                keep_disjoint_parts_separate=True,
+            )
+        except Exception as exc:
+            logger.warning(
+                "TEMPORAL_OUTPUT_ARTIFACT_MISSING projectId=%s releaseIdentifier=%s artifactKey=building_change_buffer reason=buffer_generation_failed error=%s",
+                project.project_id,
+                milestone.release_identifier,
+                exc,
+            )
+            continue
+
+        generated_layers: dict[str, dict[str, Any]] = {}
+        for key, (_, payload) in built_layers.items():
+            if not _has_features(payload):
+                logger.info(
+                    "TEMPORAL_OUTPUT_ARTIFACT_MISSING projectId=%s releaseIdentifier=%s artifactKey=building_change_buffer_%s reason=empty_geojson",
+                    project.project_id,
+                    milestone.release_identifier,
+                    key,
+                )
+                continue
+            filename = f"building_change_buffer_{key}.geojson"
+            artifact_path = _artifact_path_for_milestone(project_dir, milestone.release_identifier, filename)
+            _write_geojson(artifact_path, payload)
+            generated_layers[key] = payload
+            logger.info(
+                "TEMPORAL_OUTPUT_ARTIFACT_FOUND projectId=%s releaseIdentifier=%s artifactKey=building_change_buffer_%s source=generated_from_additions path=%s featureCount=%s",
+                project.project_id,
+                milestone.release_identifier,
+                key,
+                artifact_path,
+                len(payload.get("features", [])),
+            )
+        if generated_layers:
+            milestone.buffer_layers_geojson = generated_layers
+
+    logger.info(
+        "TEMPORAL_OUTPUT_LAYER_AVAILABILITY_BUILT projectId=%s milestoneCount=%s",
+        project.project_id,
+        len(project.milestones),
+    )
     return project
 
 
@@ -716,6 +1299,9 @@ def _refresh_project_bundle(project: TemporalProject, settings: Settings) -> Tem
             ("additions.geojson", "Effective additions since previous milestone", milestone.additions_geojson),
             ("effective_building_blocks.geojson", "Grouped blocks built from effective additions", milestone.effective_building_blocks_geojson),
             ("effective_footprint.geojson", "Effective footprint at this milestone", milestone.effective_footprint_geojson),
+            ("building_change_buffer_10m.geojson", "Building-change buffer 10 m", milestone.buffer_layers_geojson.get("10m")),
+            ("building_change_buffer_15m.geojson", "Building-change buffer 15 m", milestone.buffer_layers_geojson.get("15m")),
+            ("building_change_buffer_20m.geojson", "Building-change buffer 20 m", milestone.buffer_layers_geojson.get("20m")),
             ("cumulative_union.geojson", "Cumulative union up to this milestone", milestone.cumulative_union_geojson),
             ("cumulative_convex_hull.geojson", "Convex hull of cumulative union up to this milestone", milestone.cumulative_convex_hull_geojson),
             ("cumulative_growth_blocks.geojson", "Grouped blocks built from cumulative union", milestone.cumulative_growth_blocks_geojson),
@@ -1368,6 +1954,7 @@ def _load_project(
     if project.project_dir is None:
         project.project_dir = str(path.parent)
     project = _sort_temporal_milestones(project)
+    initial_project_payload = json.dumps(project.model_dump(mode="json"), sort_keys=True)
     should_compact_project_json = _strip_redundant_reference_imagery_data_urls(project) if write_side_effects else False
     if refresh_derived_layers:
         for milestone in project.milestones:
@@ -1381,8 +1968,12 @@ def _load_project(
         project = _hydrate_milestone_buffer_layers(project, settings)
     if refresh_derived_layers:
         project = _ensure_temporal_derived_geometry_layers(project)
-    if write_side_effects and (should_compact_project_json or stripped_fields):
+    final_project_payload = json.dumps(project.model_dump(mode="json"), sort_keys=True)
+    if write_side_effects and (should_compact_project_json or stripped_fields or final_project_payload != initial_project_payload):
         path.write_text(json.dumps(project.model_dump(mode="json"), indent=2))
+        manifest_path = path.with_name("project_manifest.json")
+        if manifest_path.exists():
+            manifest_path.write_text(json.dumps(project.model_dump(mode="json"), indent=2))
     if write_side_effects:
         try:
             _write_project_summary(project, path)
@@ -2263,9 +2854,9 @@ def get_temporal_project(project_id: str, settings: Settings) -> TemporalProject
             settings,
             project_id,
             hydrate_reference_imagery=False,
-            hydrate_buffer_layers=False,
-            refresh_derived_layers=False,
-            write_side_effects=False,
+            hydrate_buffer_layers=True,
+            refresh_derived_layers=True,
+            write_side_effects=True,
         )
     except FileNotFoundError:
         if project_id.startswith("run-"):
@@ -2499,6 +3090,22 @@ def run_temporal_project(
         settings = backend.configure_settings(settings)
         remote_patch_budget_enabled = backend.enforce_remote_patch_budget()
         request_hash_context = backend.request_hash_context(settings)
+    logger.info("EFFECTIVE_INFERENCE_BACKEND value=%s projectId=%s", settings.inference_backend, project.project_id)
+    logger.info(
+        "EFFECTIVE_CHECKPOINT_PATH value=%s projectId=%s",
+        request_hash_context.get("bandon_checkpoint_path") if request_hash_context else None,
+        project.project_id,
+    )
+    logger.info(
+        "EFFECTIVE_CHECKPOINT_SHA256 value=%s projectId=%s",
+        request_hash_context.get("bandon_checkpoint_sha256") if request_hash_context else None,
+        project.project_id,
+    )
+    logger.info(
+        "EFFECTIVE_THRESHOLD value=%s projectId=%s",
+        request_hash_context.get("change_threshold") if request_hash_context else None,
+        project.project_id,
+    )
     validation = validate_temporal_project(
         project,
         settings=settings,

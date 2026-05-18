@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from functools import partial
+import hashlib
 from pathlib import Path
 from typing import Literal
 
@@ -16,6 +17,16 @@ from src.domain.local_inference import LocalInferenceConfig, probe_local_runtime
 ModelBackendMode = Literal["sam3", "bandon_mps"]
 SegmentationBackendMode = Literal["public_zerogpu", "local", "huggingface_gpu"]
 BackendProbeMode = Literal["public_zerogpu", "local", "huggingface_gpu", "bandon_mps"]
+
+
+def _sha256_file_or_none(path: Path | None) -> str | None:
+    if path is None or not path.is_file():
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 class PublicZeroGpuBackendConfig(BaseModel):
@@ -324,6 +335,16 @@ class BandonMpsDetectionBackend(DetectionBackend):
 
     def request_hash_context(self, settings: Settings) -> dict[str, object]:
         configured = self.configure_settings(settings)
+        checkpoint_path = configured.bandon_checkpoint_path.expanduser()
+        if not checkpoint_path.is_absolute():
+            checkpoint_path = (configured.project_root / checkpoint_path).resolve()
+        else:
+            checkpoint_path = checkpoint_path.resolve()
+        config_path = configured.bandon_config_path.expanduser()
+        if not config_path.is_absolute():
+            config_path = (configured.bandon_repo_dir / config_path).resolve()
+        else:
+            config_path = config_path.resolve()
         return {
             "model_backend": self.model_backend,
             "backend_mode": self.probe_mode,
@@ -331,11 +352,13 @@ class BandonMpsDetectionBackend(DetectionBackend):
             "bandon_processing_version": 3,
             "bandon_repo_dir": str(configured.bandon_repo_dir),
             "bandon_env_prefix": str(configured.bandon_env_prefix),
-            "bandon_config_path": str(configured.bandon_config_path),
-            "bandon_checkpoint_path": str(configured.bandon_checkpoint_path),
+            "bandon_config_path": str(config_path),
+            "bandon_checkpoint_path": str(checkpoint_path),
+            "bandon_checkpoint_sha256": _sha256_file_or_none(checkpoint_path) or "",
             "bandon_device": configured.bandon_device,
             "bandon_allow_mps_fallback": configured.bandon_allow_mps_fallback,
             "change_threshold": configured.default_change_threshold,
+            "semantic_threshold": configured.default_semantic_threshold,
         }
 
 

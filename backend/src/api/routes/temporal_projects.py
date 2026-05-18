@@ -7,8 +7,8 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Request, Response, status
 from fastapi import File, Form, UploadFile
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict
+from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel, ConfigDict, Field
 
 from src.api.deps import get_app_settings
 from src.api.errors import raise_api_error
@@ -20,12 +20,17 @@ from src.core_api import (
     save_temporal_project_api,
     validate_temporal_project_api,
 )
-from src.services.temporal_projects import create_temporal_project_bundle, temporal_project_response_payload
+from src.services.temporal_projects import (
+    create_temporal_project_bundle,
+    repair_temporal_project_reference_imagery,
+    temporal_project_response_payload,
+    temporal_reference_imagery_layers,
+)
 from src.services.temporal_exports import build_temporal_results_kml, build_temporal_results_workbook
 from src.services.temporal_reference_imagery import (
     build_reference_tilejson_payload_cached,
+    ensure_reference_tile_png_cached_on_disk,
     reference_imagery_version_token,
-    render_reference_tile_png_cached,
     resolve_temporal_reference_cog_cached,
 )
 from src.services.reference_layers import (
@@ -59,6 +64,28 @@ class TemporalProjectOverrideBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     override_geojson: dict[str, Any]
+
+
+class ReferenceTileCoordinate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    z: int = Field(ge=0, le=30)
+    x: int = Field(ge=0)
+    y: int = Field(ge=0)
+
+
+class ReferenceTilePrewarmRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tiles: list[ReferenceTileCoordinate] = Field(min_length=1)
+
+
+def _validate_xyz_bounds(z: int, x: int, y: int) -> None:
+    if z < 0 or x < 0 or y < 0:
+        raise_api_error(status.HTTP_400_BAD_REQUEST, "invalid_tile", "Tile coordinates must be non-negative.")
+    max_coord = (2**z) - 1
+    if x > max_coord or y > max_coord:
+        raise_api_error(status.HTTP_400_BAD_REQUEST, "invalid_tile", "Tile coordinates exceed the selected zoom bounds.")
 
 
 def _resolve_milestone_reference_imagery(
@@ -304,23 +331,18 @@ def get_reference_tile(
     settings=Depends(get_app_settings),
 ) -> Response:
     started_at = time.perf_counter()
-    if z < 0 or x < 0 or y < 0:
-        raise_api_error(status.HTTP_400_BAD_REQUEST, "invalid_tile", "Tile coordinates must be non-negative.")
+    _validate_xyz_bounds(z, x, y)
     metadata_started_at = time.perf_counter()
     _, cog_info = _resolve_milestone_reference_imagery(project_id, release_identifier, settings=settings)
     metadata_ms = round((time.perf_counter() - metadata_started_at) * 1000, 2)
-    result = render_reference_tile_png_cached(
+    tile_cache = ensure_reference_tile_png_cached_on_disk(
+        cache_root=settings.reference_tile_cache_dir,
         project_id=project_id,
         release_identifier=release_identifier,
         cog_info=cog_info,
         z=z,
         x=x,
         y=y,
-    )
-    response = Response(
-        content=result.content,
-        media_type="image/png",
-        headers={"Cache-Control": "public, max-age=31536000, immutable"},
     )
     logger.info(
         "TILE_METADATA_LOOKUP_MS projectId=%s releaseIdentifier=%s z=%s x=%s y=%s value=%s",
@@ -330,6 +352,43 @@ def get_reference_tile(
         x,
         y,
         metadata_ms,
+    )
+    if tile_cache.cache_hit:
+        duration_ms = round((time.perf_counter() - started_at) * 1000, 2)
+        logger.info(
+            "TILE_CACHE_HIT projectId=%s releaseIdentifier=%s z=%s x=%s y=%s durationMs=%s cachePath=%s",
+            project_id,
+            release_identifier,
+            z,
+            x,
+            y,
+            duration_ms,
+            tile_cache.cache_path,
+        )
+        logger.info(
+            "TILE_SERVED projectId=%s releaseIdentifier=%s z=%s x=%s y=%s durationMs=%s cacheHeaders=%s cachePath=%s cacheHit=true",
+            project_id,
+            release_identifier,
+            z,
+            x,
+            y,
+            duration_ms,
+            "public, max-age=31536000, immutable",
+            tile_cache.cache_path,
+        )
+        return FileResponse(
+            tile_cache.cache_path,
+            media_type="image/png",
+            headers={"Cache-Control": "public, max-age=31536000, immutable"},
+        )
+
+    result = tile_cache.render_result
+    if result is None:
+        raise_api_error(status.HTTP_500_INTERNAL_SERVER_ERROR, "tile_render_failed", "Reference tile rendering failed.")
+    response = Response(
+        content=result.content,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
     )
     logger.info(
         "TILE_COG_OPEN_MS projectId=%s releaseIdentifier=%s z=%s x=%s y=%s value=%s",
@@ -376,6 +435,16 @@ def get_reference_tile(
         y,
         result.timings_ms.get("encode", 0.0),
     )
+    if tile_cache.cache_write_succeeded:
+        logger.info(
+            "TILE_CACHE_WRITE projectId=%s releaseIdentifier=%s z=%s x=%s y=%s cachePath=%s",
+            project_id,
+            release_identifier,
+            z,
+            x,
+            y,
+            tile_cache.cache_path,
+        )
     logger.info(
         "TILE_TOTAL_MS projectId=%s releaseIdentifier=%s z=%s x=%s y=%s value=%s",
         project_id,
@@ -386,13 +455,14 @@ def get_reference_tile(
         round((time.perf_counter() - started_at) * 1000, 2),
     )
     logger.info(
-        "TILE_CACHE_%s projectId=%s releaseIdentifier=%s z=%s x=%s y=%s",
-        "HIT" if result.cache_hit else "MISS",
+        "TILE_CACHE_MISS projectId=%s releaseIdentifier=%s z=%s x=%s y=%s durationMs=%s cachePath=%s",
         project_id,
         release_identifier,
         z,
         x,
         y,
+        round((time.perf_counter() - started_at) * 1000, 2),
+        tile_cache.cache_path,
     )
     logger.info(
         (
@@ -427,11 +497,110 @@ def get_reference_tile(
     return response
 
 
+@router.post("/{project_id}/milestones/{release_identifier}/reference/prewarm")
+def prewarm_reference_tiles(
+    project_id: str,
+    release_identifier: str,
+    body: ReferenceTilePrewarmRequest,
+    settings=Depends(get_app_settings),
+) -> dict[str, int | float]:
+    started_at = time.perf_counter()
+    if len(body.tiles) > settings.reference_tile_prewarm_max_tiles:
+        raise_api_error(
+            status.HTTP_400_BAD_REQUEST,
+            "too_many_tiles",
+            f"Reference tile prewarm accepts at most {settings.reference_tile_prewarm_max_tiles} tiles.",
+        )
+    for tile in body.tiles:
+        _validate_xyz_bounds(tile.z, tile.x, tile.y)
+    logger.info(
+        "REFERENCE_TILE_PREWARM_START projectId=%s releaseIdentifier=%s requested=%s",
+        project_id,
+        release_identifier,
+        len(body.tiles),
+    )
+    _, cog_info = _resolve_milestone_reference_imagery(project_id, release_identifier, settings=settings)
+    hits = 0
+    misses = 0
+    generated = 0
+    failed = 0
+    for tile in body.tiles:
+        try:
+            result = ensure_reference_tile_png_cached_on_disk(
+                cache_root=settings.reference_tile_cache_dir,
+                project_id=project_id,
+                release_identifier=release_identifier,
+                cog_info=cog_info,
+                z=tile.z,
+                x=tile.x,
+                y=tile.y,
+            )
+            if result.cache_hit:
+                hits += 1
+            else:
+                misses += 1
+                generated += 1
+                if result.cache_write_succeeded:
+                    logger.info(
+                        "TILE_CACHE_WRITE projectId=%s releaseIdentifier=%s z=%s x=%s y=%s cachePath=%s prewarm=true",
+                        project_id,
+                        release_identifier,
+                        tile.z,
+                        tile.x,
+                        tile.y,
+                        result.cache_path,
+                    )
+        except Exception as exc:  # noqa: BLE001
+            failed += 1
+            logger.warning(
+                "REFERENCE_TILE_PREWARM_TILE_FAILED projectId=%s releaseIdentifier=%s z=%s x=%s y=%s error=%s",
+                project_id,
+                release_identifier,
+                tile.z,
+                tile.x,
+                tile.y,
+                exc,
+            )
+    duration_ms = round((time.perf_counter() - started_at) * 1000, 2)
+    logger.info(
+        "REFERENCE_TILE_PREWARM_DONE projectId=%s releaseIdentifier=%s requested=%s hits=%s misses=%s generated=%s failed=%s durationMs=%s",
+        project_id,
+        release_identifier,
+        len(body.tiles),
+        hits,
+        misses,
+        generated,
+        failed,
+        duration_ms,
+    )
+    return {
+        "requested": len(body.tiles),
+        "hits": hits,
+        "misses": misses,
+        "generated": generated,
+        "failed": failed,
+        "durationMs": duration_ms,
+    }
+
+
 @router.get("/{project_id}/reference-layers")
 def list_project_reference_layers(project_id: str, settings=Depends(get_app_settings)) -> list[ReferenceLayer]:
     started_at = time.perf_counter()
     try:
         layers = list_reference_layers(project_id, settings)
+        if not layers:
+            logger.info("REFERENCE_LAYERS_REPAIR_START projectId=%s reason=empty_reference_layer_registry", project_id)
+            repaired_project, repaired_count = repair_temporal_project_reference_imagery(project_id, settings)
+            temporal_layers = temporal_reference_imagery_layers(repaired_project)
+            if temporal_layers:
+                layers = temporal_layers
+                logger.info(
+                    "REFERENCE_LAYERS_REPAIRED projectId=%s count=%s repairedCount=%s durationMs=%s",
+                    project_id,
+                    len(layers),
+                    repaired_count,
+                    round((time.perf_counter() - started_at) * 1000, 2),
+                )
         logger.info(
             "REFERENCE_LAYERS_LISTED projectId=%s count=%s durationMs=%s",
             project_id,

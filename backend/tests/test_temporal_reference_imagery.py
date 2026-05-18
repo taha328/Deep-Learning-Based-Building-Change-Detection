@@ -19,8 +19,10 @@ from rasterio.transform import from_origin
 from src.api.deps import get_app_settings
 from src.api.main import app
 from src.config import Settings
+from src.domain.tiling import tile_range_for_bbox
 from src.schemas import TemporalProject, TemporalReferenceImagery
 from src.services.temporal_projects import get_temporal_project, save_temporal_project
+from src.utils.geometry import bounds_dict, parse_aoi_geometry
 import src.services.temporal_reference_imagery as reference_imagery_service
 from src.services.temporal_reference_imagery import (
     TemporalReferenceSource,
@@ -29,8 +31,11 @@ from src.services.temporal_reference_imagery import (
     clear_reference_tilejson_cache,
     clear_reference_tile_cache,
     ensure_reference_imagery_cog,
+    reference_imagery_version_token,
+    reference_tile_cache_path,
     render_reference_tile_png_cached,
     render_reference_tile_png,
+    resolve_temporal_reference_cog_cached,
     resolve_temporal_reference_cog,
 )
 
@@ -138,6 +143,49 @@ def _write_temporal_project_with_reference(
     )
     (project_dir / "project.json").write_text(json.dumps(project.model_dump(mode="json"), indent=2))
     return cog_path
+
+
+def _test_aoi(offset: float = 0.0) -> dict:
+    return {
+        "type": "Polygon",
+        "coordinates": [
+            [
+                [-7.0000 + offset, 33.0000 + offset],
+                [-6.9900 + offset, 33.0000 + offset],
+                [-6.9900 + offset, 33.0100 + offset],
+                [-7.0000 + offset, 33.0100 + offset],
+                [-7.0000 + offset, 33.0000 + offset],
+            ]
+        ],
+    }
+
+
+def _write_temporal_project_without_reference(
+    settings: Settings,
+    project_id: str,
+    *,
+    selected_release: str = "WB_2024_R02",
+    aoi_geojson: dict | None = None,
+) -> Path:
+    project_dir = settings.temporal_projects_dir / project_id
+    project_dir.mkdir(parents=True, exist_ok=True)
+    project = TemporalProject(
+        project_id=project_id,
+        name="Temporal reference missing",
+        project_dir=str(project_dir),
+        aoi_geojson=aoi_geojson,
+        created_at="2026-01-01T00:00:00Z",
+        updated_at="2026-01-01T00:00:00Z",
+        milestones=[
+            {
+                "release_identifier": selected_release,
+                "release_date": "2024-06-01",
+                "additions_geojson": {"type": "FeatureCollection", "features": []},
+            },
+        ],
+    )
+    (project_dir / "project.json").write_text(json.dumps(project.model_dump(mode="json"), indent=2))
+    return project_dir
 
 
 def _write_reference_layers_metadata(project_dir: Path, *, count: int = 1) -> None:
@@ -469,7 +517,227 @@ def test_reference_layers_listing_does_not_hydrate_reference_cogs(monkeypatch, t
         _clear_dependency_overrides()
 
     assert response.status_code == 200
+    payload = response.json()
+    assert len(payload) == 1
+    assert payload[0]["layer_id"] == "temporal-reference-WB_2024_R02"
+    assert payload[0]["storage_strategy"] == "raster_tiles"
+
+
+def test_reference_layers_repair_reuses_matching_project_cog(tmp_path: Path) -> None:
+    settings = Settings(runtime_cache_dir=tmp_path / "runtime")
+    selected_release = "WB_2024_R02"
+    source_project_id = "temporal-source-reference"
+    target_project_id = "temporal-target-reference"
+    shared_aoi = _test_aoi()
+
+    source_cog = _write_temporal_project_with_reference(settings, source_project_id, selected_release=selected_release)
+    source_payload_path = settings.temporal_projects_dir / source_project_id / "project.json"
+    source_payload = json.loads(source_payload_path.read_text())
+    source_payload["aoi_geojson"] = shared_aoi
+    source_payload_path.write_text(json.dumps(source_payload, indent=2))
+    _write_temporal_project_without_reference(
+        settings,
+        target_project_id,
+        selected_release=selected_release,
+        aoi_geojson=shared_aoi,
+    )
+
+    client = _client_with_settings(settings)
+    try:
+        response = client.get(f"/api/temporal-projects/{target_project_id}/reference-layers")
+    finally:
+        _clear_dependency_overrides()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload) == 1
+    assert payload[0]["layer_id"] == f"temporal-reference-{selected_release}"
+    assert payload[0]["tilejson_url"]
+    assert payload[0]["tiles_url_template"]
+    target_cog = settings.temporal_projects_dir / target_project_id / "milestones" / selected_release / "reference_imagery_cog.tif"
+    assert target_cog.is_file()
+    assert target_cog.stat().st_size == source_cog.stat().st_size
+
+    repaired_project = get_temporal_project(target_project_id, settings)
+    assert repaired_project.milestones[0].reference_imagery is not None
+    assert repaired_project.milestones[0].reference_imagery.cog_path == str(target_cog)
+
+
+def test_reference_layers_repair_does_not_reuse_different_aoi(tmp_path: Path) -> None:
+    settings = Settings(runtime_cache_dir=tmp_path / "runtime")
+    selected_release = "WB_2024_R02"
+    source_project_id = "temporal-source-different-aoi"
+    target_project_id = "temporal-target-different-aoi"
+
+    _write_temporal_project_with_reference(settings, source_project_id, selected_release=selected_release)
+    source_payload_path = settings.temporal_projects_dir / source_project_id / "project.json"
+    source_payload = json.loads(source_payload_path.read_text())
+    source_payload["aoi_geojson"] = _test_aoi()
+    source_payload_path.write_text(json.dumps(source_payload, indent=2))
+    _write_temporal_project_without_reference(
+        settings,
+        target_project_id,
+        selected_release=selected_release,
+        aoi_geojson=_test_aoi(offset=0.1),
+    )
+
+    client = _client_with_settings(settings)
+    try:
+        response = client.get(f"/api/temporal-projects/{target_project_id}/reference-layers")
+    finally:
+        _clear_dependency_overrides()
+
+    assert response.status_code == 200
     assert response.json() == []
+    target_cog = settings.temporal_projects_dir / target_project_id / "milestones" / selected_release / "reference_imagery_cog.tif"
+    assert not target_cog.exists()
+
+
+def test_reference_layers_repair_ignores_additions_without_reference_source(tmp_path: Path) -> None:
+    settings = Settings(runtime_cache_dir=tmp_path / "runtime")
+    project_id = "temporal-additions-only"
+    _write_temporal_project_without_reference(settings, project_id, aoi_geojson=_test_aoi())
+
+    client = _client_with_settings(settings)
+    try:
+        response = client.get(f"/api/temporal-projects/{project_id}/reference-layers")
+    finally:
+        _clear_dependency_overrides()
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_reference_layers_repair_generates_from_matching_shared_mosaic(tmp_path: Path) -> None:
+    settings = Settings(runtime_cache_dir=tmp_path / "runtime")
+    selected_release = "WB_2024_R02"
+    project_id = "temporal-shared-mosaic-reference"
+    aoi_geojson = _test_aoi()
+    _write_temporal_project_without_reference(settings, project_id, selected_release=selected_release, aoi_geojson=aoi_geojson)
+
+    mosaic_dir = settings.wayback_mosaic_cache_dir / "matching-shared-mosaic"
+    mosaic_dir.mkdir(parents=True, exist_ok=True)
+    _write_rgb_raster(mosaic_dir / "mosaic.tif")
+    _write_valid_mask_raster(mosaic_dir / "valid_mask.tif")
+    tile_range = tile_range_for_bbox(bounds_dict(parse_aoi_geometry(aoi_geojson)), settings.zoom)
+    (mosaic_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "release_identifier": selected_release,
+                "zoom": settings.zoom,
+                "tile_range": list(tile_range),
+            },
+            indent=2,
+        )
+    )
+
+    client = _client_with_settings(settings)
+    try:
+        response = client.get(f"/api/temporal-projects/{project_id}/reference-layers")
+    finally:
+        _clear_dependency_overrides()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload) == 1
+    assert payload[0]["layer_id"] == f"temporal-reference-{selected_release}"
+    target_cog = settings.temporal_projects_dir / project_id / "milestones" / selected_release / "reference_imagery_cog.tif"
+    assert target_cog.is_file()
+
+
+def test_reference_layers_repair_matches_shared_mosaic_at_metadata_zoom(tmp_path: Path) -> None:
+    settings = Settings(runtime_cache_dir=tmp_path / "runtime", zoom=18)
+    selected_release = "WB_2014_R05"
+    project_id = "temporal-baseline-shared-mosaic-reference"
+    aoi_geojson = _test_aoi()
+    _write_temporal_project_without_reference(settings, project_id, selected_release=selected_release, aoi_geojson=aoi_geojson)
+
+    mosaic_dir = settings.wayback_mosaic_cache_dir / "matching-shared-mosaic-z17"
+    mosaic_dir.mkdir(parents=True, exist_ok=True)
+    _write_rgb_raster(mosaic_dir / "mosaic.tif")
+    _write_valid_mask_raster(mosaic_dir / "valid_mask.tif")
+    metadata_zoom = 17
+    tile_range = tile_range_for_bbox(bounds_dict(parse_aoi_geometry(aoi_geojson)), metadata_zoom)
+    (mosaic_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "release_identifier": selected_release,
+                "zoom": metadata_zoom,
+                "tile_range": list(tile_range),
+            },
+            indent=2,
+        )
+    )
+
+    client = _client_with_settings(settings)
+    try:
+        response = client.get(f"/api/temporal-projects/{project_id}/reference-layers")
+    finally:
+        _clear_dependency_overrides()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload) == 1
+    target_cog = settings.temporal_projects_dir / project_id / "milestones" / selected_release / "reference_imagery_cog.tif"
+    assert target_cog.is_file()
+
+
+def test_temporal_project_load_generates_missing_buffer_layers_from_additions(tmp_path: Path) -> None:
+    settings = Settings(runtime_cache_dir=tmp_path / "runtime")
+    project_id = "temporal-buffer-discovery"
+    project_dir = settings.temporal_projects_dir / project_id
+    project_dir.mkdir(parents=True, exist_ok=True)
+    additions_geojson = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {"change_id": 1},
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [
+                        [
+                            [-7.0000, 33.0000],
+                            [-6.9995, 33.0000],
+                            [-6.9995, 33.0005],
+                            [-7.0000, 33.0005],
+                            [-7.0000, 33.0000],
+                        ]
+                    ],
+                },
+            }
+        ],
+    }
+    project = TemporalProject(
+        project_id=project_id,
+        name="Temporal buffer discovery",
+        project_dir=str(project_dir),
+        aoi_geojson=_test_aoi(),
+        created_at="2026-01-01T00:00:00Z",
+        updated_at="2026-01-01T00:00:00Z",
+        milestones=[
+            {
+                "release_identifier": "WB_2014_R05",
+                "release_date": "2014-04-30",
+                "additions_geojson": {"type": "FeatureCollection", "features": []},
+            },
+            {
+                "release_identifier": "WB_2022_R03",
+                "release_date": "2022-03-23",
+                "additions_geojson": additions_geojson,
+            },
+        ],
+    )
+    (project_dir / "project.json").write_text(json.dumps(project.model_dump(mode="json"), indent=2))
+
+    loaded = get_temporal_project(project_id, settings)
+
+    assert loaded.milestones[0].buffer_layers_geojson == {}
+    non_baseline_buffers = loaded.milestones[1].buffer_layers_geojson
+    assert set(non_baseline_buffers) == {"10m", "15m", "20m"}
+    assert all(len(payload["features"]) == 1 for payload in non_baseline_buffers.values())
+    for name in ("building_change_buffer_10m.geojson", "building_change_buffer_15m.geojson", "building_change_buffer_20m.geojson"):
+        assert (project_dir / "milestones" / "WB_2022_R03" / name).is_file()
 
 
 def test_tilejson_metadata_lookup_touches_only_selected_release(monkeypatch, tmp_path: Path) -> None:
@@ -724,6 +992,146 @@ def test_repeated_tilejson_and_tile_requests_do_not_modify_cog_mtime(tmp_path: P
         assert not [item for item in caught if issubclass(item.category, NotGeoreferencedWarning)]
     finally:
         _clear_dependency_overrides()
+
+
+def test_reference_tile_persistent_cache_miss_then_hit(monkeypatch, tmp_path: Path) -> None:
+    settings = Settings(runtime_cache_dir=tmp_path / "runtime")
+    project_id = "temporal-persistent-tile-cache"
+    selected_release = "WB_2024_R02"
+    _write_temporal_project_with_reference(settings, project_id, selected_release=selected_release)
+    tile_url = f"/api/temporal-projects/{project_id}/milestones/{selected_release}/reference/tiles/0/0/0.png"
+
+    client = _client_with_settings(settings)
+    try:
+        first = client.get(tile_url)
+        assert first.status_code == 200
+        cached_files = list((settings.reference_tile_cache_dir / project_id / selected_release).rglob("0.png"))
+        assert cached_files
+
+        def fail_render(*args, **kwargs):  # noqa: ANN002, ANN003
+            raise AssertionError("COG rendering must not run for a persistent cache hit")
+
+        monkeypatch.setattr(reference_imagery_service, "render_reference_tile_png_cached", fail_render)
+        second = client.get(tile_url)
+        assert second.status_code == 200
+        assert second.content == first.content
+    finally:
+        _clear_dependency_overrides()
+
+
+def test_reference_tile_cache_path_includes_version_and_coordinates(tmp_path: Path) -> None:
+    settings = Settings(runtime_cache_dir=tmp_path / "runtime")
+    project_id = "temporal-cache-path"
+    selected_release = "WB_2024_R02"
+    cog_path = _write_temporal_project_with_reference(settings, project_id, selected_release=selected_release)
+    imagery = TemporalReferenceImagery(cog_path=str(cog_path), tile_size=256)
+    cog_info = resolve_temporal_reference_cog_cached(
+        project_id=project_id,
+        release_identifier=selected_release,
+        reference_imagery=imagery,
+    )
+    assert cog_info is not None
+    first_version = reference_imagery_version_token(cog_info)
+    first_path = reference_tile_cache_path(
+        settings.reference_tile_cache_dir,
+        project_id=project_id,
+        release_identifier=selected_release,
+        cog_version=first_version,
+        z=18,
+        x=125498,
+        y=105102,
+    )
+    assert first_path == settings.reference_tile_cache_dir / project_id / selected_release / first_version / "18" / "125498" / "105102.png"
+
+    os.utime(cog_path, (cog_path.stat().st_atime, cog_path.stat().st_mtime + 10))
+    updated_info = resolve_temporal_reference_cog_cached(
+        project_id=project_id,
+        release_identifier=selected_release,
+        reference_imagery=imagery,
+    )
+    assert updated_info is not None
+    second_version = reference_imagery_version_token(updated_info)
+    assert second_version != first_version
+    second_path = reference_tile_cache_path(
+        settings.reference_tile_cache_dir,
+        project_id=project_id,
+        release_identifier=selected_release,
+        cog_version=second_version,
+        z=18,
+        x=125498,
+        y=105102,
+    )
+    assert second_path != first_path
+
+
+def test_reference_tile_prewarm_generates_then_hits(tmp_path: Path) -> None:
+    settings = Settings(runtime_cache_dir=tmp_path / "runtime")
+    project_id = "temporal-prewarm-cache"
+    selected_release = "WB_2024_R02"
+    _write_temporal_project_with_reference(settings, project_id, selected_release=selected_release)
+    prewarm_url = f"/api/temporal-projects/{project_id}/milestones/{selected_release}/reference/prewarm"
+    payload = {"tiles": [{"z": 0, "x": 0, "y": 0}, {"z": 1, "x": 0, "y": 0}]}
+
+    client = _client_with_settings(settings)
+    try:
+        first = client.post(prewarm_url, json=payload)
+        second = client.post(prewarm_url, json=payload)
+    finally:
+        _clear_dependency_overrides()
+
+    assert first.status_code == 200
+    assert first.json()["requested"] == 2
+    assert first.json()["hits"] == 0
+    assert first.json()["misses"] == 2
+    assert first.json()["generated"] == 2
+    assert first.json()["failed"] == 0
+    assert second.status_code == 200
+    assert second.json()["hits"] == 2
+    assert second.json()["misses"] == 0
+
+
+def test_reference_tile_prewarm_rejects_limit_and_invalid_coordinates(tmp_path: Path) -> None:
+    settings = Settings(runtime_cache_dir=tmp_path / "runtime", reference_tile_prewarm_max_tiles=1)
+    project_id = "temporal-prewarm-validation"
+    selected_release = "WB_2024_R02"
+    _write_temporal_project_with_reference(settings, project_id, selected_release=selected_release)
+    prewarm_url = f"/api/temporal-projects/{project_id}/milestones/{selected_release}/reference/prewarm"
+
+    client = _client_with_settings(settings)
+    try:
+        too_many = client.post(
+            prewarm_url,
+            json={"tiles": [{"z": 0, "x": 0, "y": 0}, {"z": 0, "x": 0, "y": 0}]},
+        )
+        invalid = client.post(prewarm_url, json={"tiles": [{"z": 1, "x": 2, "y": 0}]})
+    finally:
+        _clear_dependency_overrides()
+
+    assert too_many.status_code == 400
+    assert invalid.status_code == 400
+
+
+def test_reference_tile_cache_write_failure_falls_back_to_rendered_response(monkeypatch, caplog, tmp_path: Path) -> None:
+    settings = Settings(runtime_cache_dir=tmp_path / "runtime")
+    project_id = "temporal-cache-write-fallback"
+    selected_release = "WB_2024_R02"
+    _write_temporal_project_with_reference(settings, project_id, selected_release=selected_release)
+    tile_url = f"/api/temporal-projects/{project_id}/milestones/{selected_release}/reference/tiles/0/0/0.png"
+
+    def fail_write(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise OSError("read-only cache")
+
+    monkeypatch.setattr(reference_imagery_service, "_write_tile_cache_atomic", fail_write)
+    client = _client_with_settings(settings)
+    try:
+        with caplog.at_level("WARNING"):
+            response = client.get(tile_url)
+    finally:
+        _clear_dependency_overrides()
+
+    assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "public, max-age=31536000, immutable"
+    assert "TILE_CACHE_WRITE_FAILED" in caplog.text
 
 
 def test_client_log_relay_accepts_temporal_reference_events(caplog, tmp_path: Path) -> None:

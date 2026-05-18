@@ -1,5 +1,3 @@
-import bbox from "@turf/bbox";
-import turfBuffer from "@turf/buffer";
 import { featureCollection } from "@turf/helpers";
 import type { Feature, FeatureCollection, GeoJsonProperties, MultiPolygon, Polygon } from "geojson";
 import maplibregl, { type GeoJSONSource, type Map as MapLibreMap } from "maplibre-gl";
@@ -15,6 +13,7 @@ import { buildBackendFileUrl } from "@/lib/backend-files";
 import { relayClientLog } from "@/lib/client-log-relay";
 import { cn } from "@/lib/utils";
 import type {
+  TemporalAddedOverlayPresentation,
   ReferenceLayerPresentation,
   TemporalMapPresentation,
   TemporalReferenceImageryPresentation,
@@ -110,7 +109,16 @@ type ReferenceLayerGeoJsonData = Record<string, FeatureCollection>;
 
 type TemporalReferenceSourceLifecycleMode = "create" | "reuse" | "recreate";
 type TemporalReferenceSwitchMode = TemporalReferenceSourceLifecycleMode | "ready_wait";
-type TemporalReferenceReadinessSource = "idle" | "sourcedata" | "already_loaded" | "render_frame" | "timeout_fallback";
+type TemporalReferenceReadinessSource =
+  | "idle"
+  | "sourcedata"
+  | "already_loaded"
+  | "already_registered"
+  | "source_reuse"
+  | "layer_reuse"
+  | "render_frame"
+  | "timeout_fallback"
+  | "missing_layer_fallback";
 
 type TemporalReferenceVisualReadyResult = {
   visualReadyMs: number;
@@ -133,6 +141,40 @@ type TemporalReferenceTilejsonPayload = {
   bounds?: [number, number, number, number];
 };
 
+type TemporalAddedLayerKind =
+  | "additions"
+  | "buffer10m"
+  | "buffer15m"
+  | "buffer20m"
+  | "cumulativeBuffer10m"
+  | "cumulativeBuffer15m"
+  | "cumulativeBuffer20m"
+  | "automated"
+  | "automatedBuildingBlocks"
+  | "effectiveBuildingBlocks"
+  | "convexHull"
+  | "cumulative"
+  | "cumulativeGrowthBlocks"
+  | "cumulativeGrowthEnvelope"
+  | "manualOverride";
+
+type TemporalAddedLayerDefinition = {
+  kind: TemporalAddedLayerKind;
+  toggleKey: LayerToggleKey;
+  paint: maplibregl.FillLayerSpecification["paint"];
+  data: (overlay: TemporalAddedOverlayPresentation) => FeatureCollection;
+};
+
+type TemporalAddedLayerLifecycle = {
+  sourceId: string;
+  layerId: string;
+  signature: string;
+  previousSignature: string | null;
+  mode: "create" | "reuse" | "update";
+  featureCount: number;
+  payloadBytes: number;
+};
+
 let pmtilesProtocolRegistered = false;
 let pmtilesProtocol: Protocol | null = null;
 const DEV_LOGGING = import.meta.env.DEV;
@@ -141,7 +183,11 @@ function devLog(event: string, payload: Record<string, unknown>) {
   if (!DEV_LOGGING) {
     return;
   }
-  if (event.startsWith("TEMPORAL_REFERENCE_")) {
+  if (
+    event.startsWith("TEMPORAL_REFERENCE_") ||
+    event.startsWith("TEMPORAL_ADDED_") ||
+    event.startsWith("TEMPORAL_OUTPUT_")
+  ) {
     relayClientLog(event, payload);
     return;
   }
@@ -313,56 +359,6 @@ function getRawAdditionFeatures(features: FeatureCollection["features"]): Featur
 function buildRawAdditionFeatureCollection(source: FeatureCollection | null | undefined): FeatureCollection {
   const normalized = ensureFeatureCollection(source);
   return featureCollection(getRawAdditionFeatures(normalized.features)) as FeatureCollection;
-}
-
-function normalizeBufferedFeatureCollection(
-  value: Feature<Polygon | MultiPolygon> | FeatureCollection<Polygon | MultiPolygon> | undefined,
-): FeatureCollection {
-  if (!value) {
-    return EMPTY_FEATURE_COLLECTION;
-  }
-  if (value.type === "FeatureCollection") {
-    return value as FeatureCollection;
-  }
-  return featureCollection([value]) as FeatureCollection;
-}
-
-function buildNonCumulativeAdditionBuffer(
-  additions: FeatureCollection,
-  distanceMeters: 10 | 15 | 20,
-): FeatureCollection {
-  const rawAdditions = getRawAdditionFeatures(additions.features);
-  if (rawAdditions.length === 0) {
-    if (import.meta.env.DEV) {
-      console.debug("[temporal-buffer] empty raw additions", {
-        distanceMeters,
-        rawAdditionCount: 0,
-        bufferFeatureCount: 0,
-        rawAdditionBBox: null,
-        bufferBBox: null,
-        sampleRawAdditionProperties: [],
-      });
-    }
-    return EMPTY_FEATURE_COLLECTION;
-  }
-
-  const rawAdditionCollection = featureCollection(rawAdditions) as FeatureCollection<Polygon | MultiPolygon>;
-  const buffered = normalizeBufferedFeatureCollection(
-    turfBuffer(rawAdditionCollection, distanceMeters, { units: "meters" }),
-  );
-
-  if (import.meta.env.DEV) {
-    console.debug("[temporal-buffer] generated non-cumulative buffer", {
-      distanceMeters,
-      rawAdditionCount: rawAdditionCollection.features.length,
-      bufferFeatureCount: buffered.features.length,
-      rawAdditionBBox: bbox(rawAdditionCollection),
-      bufferBBox: buffered.features.length > 0 ? bbox(buffered) : null,
-      sampleRawAdditionProperties: rawAdditionCollection.features.slice(0, 3).map((feature) => feature.properties ?? {}),
-    });
-  }
-
-  return buffered;
 }
 
 function sourceData(map: maplibregl.Map, sourceId: string, data: FeatureCollection) {
@@ -563,19 +559,266 @@ function visibleTileCoordinates(
   return coords;
 }
 
-function tileUrlFromTemplate(template: string, coord: { z: number; x: number; y: number }): string {
-  return template
-    .replace("{z}", String(coord.z))
-    .replace("{x}", String(coord.x))
-    .replace("{y}", String(coord.y));
+function temporalReferenceSourceId(projectId: string | null, releaseIdentifier: string): string {
+  return `temporal-reference-source-${sanitizeMapLibreId(projectId ?? "unknown")}-${sanitizeMapLibreId(releaseIdentifier)}`;
 }
 
-function temporalReferenceSourceId(releaseIdentifier: string): string {
-  return `temporal-reference-imagery-${sanitizeMapLibreId(releaseIdentifier)}`;
+function temporalReferenceLayerId(projectId: string | null, releaseIdentifier: string): string {
+  return `temporal-reference-layer-${sanitizeMapLibreId(projectId ?? "unknown")}-${sanitizeMapLibreId(releaseIdentifier)}`;
 }
 
-function temporalReferenceLayerId(releaseIdentifier: string): string {
-  return `${temporalReferenceSourceId(releaseIdentifier)}-layer`;
+function temporalAddedSourceId(projectId: string | null, releaseIdentifier: string, kind: TemporalAddedLayerKind): string {
+  return `temporal-added-source-${sanitizeMapLibreId(projectId ?? "unknown")}-${sanitizeMapLibreId(releaseIdentifier)}-${kind}`;
+}
+
+function temporalAddedLayerId(projectId: string | null, releaseIdentifier: string, kind: TemporalAddedLayerKind): string {
+  return `temporal-added-layer-${sanitizeMapLibreId(projectId ?? "unknown")}-${sanitizeMapLibreId(releaseIdentifier)}-${kind}`;
+}
+
+const TEMPORAL_ADDED_LAYER_DEFINITIONS: TemporalAddedLayerDefinition[] = [
+  {
+    kind: "additions",
+    toggleKey: "temporalAdditions",
+    paint: { "fill-color": "#dc2626", "fill-opacity": 0.9 },
+    data: (overlay) => buildRawAdditionFeatureCollection(overlay.additions),
+  },
+  {
+    kind: "buffer10m",
+    toggleKey: "buffer10m",
+    paint: { "fill-color": BUILDING_CHANGE_BUFFER_FILL_COLORS["10m"], "fill-opacity": NON_CUMULATIVE_BUFFER_FILL_OPACITY },
+    data: (overlay) => ensureFeatureCollection(overlay.buffer10m),
+  },
+  {
+    kind: "buffer15m",
+    toggleKey: "buffer15m",
+    paint: { "fill-color": BUILDING_CHANGE_BUFFER_FILL_COLORS["15m"], "fill-opacity": NON_CUMULATIVE_BUFFER_FILL_OPACITY },
+    data: (overlay) => ensureFeatureCollection(overlay.buffer15m),
+  },
+  {
+    kind: "buffer20m",
+    toggleKey: "buffer20m",
+    paint: { "fill-color": BUILDING_CHANGE_BUFFER_FILL_COLORS["20m"], "fill-opacity": NON_CUMULATIVE_BUFFER_FILL_OPACITY },
+    data: (overlay) => ensureFeatureCollection(overlay.buffer20m),
+  },
+  {
+    kind: "cumulativeBuffer10m",
+    toggleKey: "temporalCumulativeBuffer10m",
+    paint: { "fill-color": BUILDING_CHANGE_BUFFER_FILL_COLORS["10m"], "fill-opacity": 1 },
+    data: (overlay) => ensureFeatureCollection(overlay.cumulativeBuffer10m),
+  },
+  {
+    kind: "cumulativeBuffer15m",
+    toggleKey: "temporalCumulativeBuffer15m",
+    paint: { "fill-color": BUILDING_CHANGE_BUFFER_FILL_COLORS["15m"], "fill-opacity": 1 },
+    data: (overlay) => ensureFeatureCollection(overlay.cumulativeBuffer15m),
+  },
+  {
+    kind: "cumulativeBuffer20m",
+    toggleKey: "temporalCumulativeBuffer20m",
+    paint: { "fill-color": BUILDING_CHANGE_BUFFER_FILL_COLORS["20m"], "fill-opacity": 1 },
+    data: (overlay) => ensureFeatureCollection(overlay.cumulativeBuffer20m),
+  },
+  {
+    kind: "automated",
+    toggleKey: "temporalAutomated",
+    paint: { "fill-color": "#1d4ed8", "fill-opacity": 0.9 },
+    data: (overlay) => ensureFeatureCollection(overlay.automatedCandidate),
+  },
+  {
+    kind: "automatedBuildingBlocks",
+    toggleKey: "temporalAutomatedBuildingBlocks",
+    paint: { "fill-color": "#2563eb", "fill-opacity": 0.9 },
+    data: (overlay) => ensureFeatureCollection(overlay.automatedBuildingBlocks),
+  },
+  {
+    kind: "effectiveBuildingBlocks",
+    toggleKey: "temporalEffectiveBuildingBlocks",
+    paint: { "fill-color": "#eab308", "fill-opacity": 0.9 },
+    data: (overlay) => ensureFeatureCollection(overlay.effectiveBuildingBlocks),
+  },
+  {
+    kind: "convexHull",
+    toggleKey: "temporalConvexHull",
+    paint: { "fill-color": "#f59e0b", "fill-opacity": 0.45, "fill-outline-color": "#b45309" },
+    data: (overlay) => ensureFeatureCollection(overlay.cumulativeConvexHull),
+  },
+  {
+    kind: "cumulative",
+    toggleKey: "temporalCumulative",
+    paint: { "fill-color": "#dc2626", "fill-opacity": 0.9 },
+    data: (overlay) => ensureFeatureCollection(overlay.cumulativeUnion),
+  },
+  {
+    kind: "cumulativeGrowthBlocks",
+    toggleKey: "temporalCumulativeGrowthBlocks",
+    paint: { "fill-color": "#2563eb", "fill-opacity": 0.9 },
+    data: (overlay) => ensureFeatureCollection(overlay.cumulativeGrowthBlocks),
+  },
+  {
+    kind: "cumulativeGrowthEnvelope",
+    toggleKey: "temporalCumulativeGrowthEnvelope",
+    paint: { "fill-color": "#1d4ed8", "fill-opacity": 0.9 },
+    data: (overlay) => ensureFeatureCollection(overlay.cumulativeGrowthEnvelope),
+  },
+  {
+    kind: "manualOverride",
+    toggleKey: "temporalManualOverride",
+    paint: { "fill-color": "#dc2626", "fill-opacity": 0.9 },
+    data: (overlay) => ensureFeatureCollection(overlay.manualOverride),
+  },
+];
+
+function temporalAddedDataStats(data: FeatureCollection): { featureCount: number; payloadBytes: number; signature: string } {
+  const serialized = JSON.stringify(data);
+  return {
+    featureCount: data.features.length,
+    payloadBytes: new Blob([serialized]).size,
+    signature: `${data.features.length}:${serialized.length}:${hashString(serialized)}`,
+  };
+}
+
+function hashString(value: string): string {
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash * 31 + value.charCodeAt(index)) | 0;
+  }
+  return String(hash >>> 0);
+}
+
+function ensureTemporalAddedLayer(
+  map: MapLibreMap,
+  projectId: string,
+  overlay: TemporalAddedOverlayPresentation,
+  definition: TemporalAddedLayerDefinition,
+  sourceSignatures: Record<string, string>,
+): TemporalAddedLayerLifecycle {
+  const sourceId = temporalAddedSourceId(projectId, overlay.releaseIdentifier, definition.kind);
+  const layerId = temporalAddedLayerId(projectId, overlay.releaseIdentifier, definition.kind);
+  const data = definition.data(overlay);
+  const { featureCount, payloadBytes, signature } = temporalAddedDataStats(data);
+  const previousSignature = sourceSignatures[sourceId] ?? null;
+  const existingSource = map.getSource(sourceId) as GeoJSONSource | undefined;
+  let mode: TemporalAddedLayerLifecycle["mode"] = "reuse";
+
+  devLog("TEMPORAL_ADDED_DATA_FETCH_START", {
+    projectId,
+    releaseIdentifier: overlay.releaseIdentifier,
+    kind: definition.kind,
+    sourceId,
+    source: "inline_project_payload",
+  });
+  devLog("TEMPORAL_ADDED_DATA_FETCH_DONE", {
+    projectId,
+    releaseIdentifier: overlay.releaseIdentifier,
+    kind: definition.kind,
+    sourceId,
+    featureCount,
+    payloadBytes,
+    fetchMs: 0,
+    parseMs: 0,
+  });
+
+  if (!existingSource) {
+    mode = "create";
+    devLog("TEMPORAL_ADDED_SOURCE_CREATE", {
+      projectId,
+      releaseIdentifier: overlay.releaseIdentifier,
+      kind: definition.kind,
+      sourceId,
+      layerId,
+      featureCount,
+      payloadBytes,
+    });
+    const setDataStartedAt = performance.now();
+    devLog("TEMPORAL_ADDED_SETDATA_START", {
+      projectId,
+      releaseIdentifier: overlay.releaseIdentifier,
+      kind: definition.kind,
+      sourceId,
+      layerId,
+      featureCount,
+      payloadBytes,
+      reason: "source_create",
+    });
+    map.addSource(sourceId, { type: "geojson", data });
+    devLog("TEMPORAL_ADDED_SETDATA_DONE", {
+      projectId,
+      releaseIdentifier: overlay.releaseIdentifier,
+      kind: definition.kind,
+      sourceId,
+      layerId,
+      featureCount,
+      payloadBytes,
+      setDataMs: Math.round(performance.now() - setDataStartedAt),
+    });
+    sourceSignatures[sourceId] = signature;
+  } else if (previousSignature !== signature) {
+    mode = "update";
+    const setDataStartedAt = performance.now();
+    devLog("TEMPORAL_ADDED_SETDATA_START", {
+      projectId,
+      releaseIdentifier: overlay.releaseIdentifier,
+      kind: definition.kind,
+      sourceId,
+      layerId,
+      featureCount,
+      payloadBytes,
+      reason: "signature_changed",
+    });
+    existingSource.setData(data);
+    devLog("TEMPORAL_ADDED_SETDATA_DONE", {
+      projectId,
+      releaseIdentifier: overlay.releaseIdentifier,
+      kind: definition.kind,
+      sourceId,
+      layerId,
+      featureCount,
+      payloadBytes,
+      setDataMs: Math.round(performance.now() - setDataStartedAt),
+    });
+    sourceSignatures[sourceId] = signature;
+  } else {
+    devLog("TEMPORAL_ADDED_SOURCE_REUSE", {
+      projectId,
+      releaseIdentifier: overlay.releaseIdentifier,
+      kind: definition.kind,
+      sourceId,
+      layerId,
+      featureCount,
+      payloadBytes,
+    });
+  }
+
+  if (!map.getLayer(layerId)) {
+    map.addLayer({
+      id: layerId,
+      type: "fill",
+      source: sourceId,
+      paint: definition.paint,
+      layout: { visibility: "none" },
+    });
+    devLog("TEMPORAL_ADDED_LAYER_CREATE", {
+      projectId,
+      releaseIdentifier: overlay.releaseIdentifier,
+      kind: definition.kind,
+      sourceId,
+      layerId,
+      featureCount,
+      payloadBytes,
+    });
+  } else {
+    devLog("TEMPORAL_ADDED_LAYER_REUSE", {
+      projectId,
+      releaseIdentifier: overlay.releaseIdentifier,
+      kind: definition.kind,
+      sourceId,
+      layerId,
+      featureCount,
+      payloadBytes,
+    });
+  }
+
+  return { sourceId, layerId, signature, previousSignature, mode, featureCount, payloadBytes };
 }
 
 function temporalReferenceSourceSignature(
@@ -617,8 +860,8 @@ function ensureTemporalReferenceRasterLayer(
     resolvedTilejson?: TemporalReferenceTilejsonPayload | null;
   },
 ): TemporalReferenceLayerLifecycle {
-  const sourceId = temporalReferenceSourceId(imagery.releaseIdentifier);
-  const layerId = temporalReferenceLayerId(imagery.releaseIdentifier);
+  const sourceId = temporalReferenceSourceId(options?.projectId ?? null, imagery.releaseIdentifier);
+  const layerId = temporalReferenceLayerId(options?.projectId ?? null, imagery.releaseIdentifier);
   const nextSignature = options
     ? temporalReferenceSourceSignature(options.projectId, imagery)
     : null;
@@ -737,6 +980,19 @@ function ensureTemporalReferenceRasterLayer(
       },
       getTemporalReferenceInsertionLayerId(map),
     );
+    devLog("TEMPORAL_REFERENCE_LAYER_CREATE", {
+      projectId: options?.projectId ?? null,
+      releaseIdentifier: imagery.releaseIdentifier,
+      sourceId,
+      layerId,
+    });
+  } else {
+    devLog("TEMPORAL_REFERENCE_LAYER_REUSE", {
+      projectId: options?.projectId ?? null,
+      releaseIdentifier: imagery.releaseIdentifier,
+      sourceId,
+      layerId,
+    });
   }
   return {
     layerId,
@@ -752,8 +1008,8 @@ function ensureTemporalReferenceImageLayer(
   imagery: TemporalReferenceImageryPresentation,
   options?: { projectId: string | null; sourceSignatures: Record<string, string> },
 ): TemporalReferenceLayerLifecycle {
-  const sourceId = temporalReferenceSourceId(imagery.releaseIdentifier);
-  const layerId = temporalReferenceLayerId(imagery.releaseIdentifier);
+  const sourceId = temporalReferenceSourceId(options?.projectId ?? null, imagery.releaseIdentifier);
+  const layerId = temporalReferenceLayerId(options?.projectId ?? null, imagery.releaseIdentifier);
   const nextSignature = options
     ? temporalReferenceSourceSignature(options.projectId, imagery)
     : null;
@@ -774,7 +1030,7 @@ function ensureTemporalReferenceImageLayer(
       tilesUrlTemplate: imagery.tilesUrlTemplate,
       cogUrl: imagery.cogUrl,
     });
-    removeTemporalReferenceLayer(map, imagery.releaseIdentifier);
+    removeTemporalReferenceLayer(map, options?.projectId ?? null, imagery.releaseIdentifier);
   }
   syncImageOverlay(
     map,
@@ -866,9 +1122,9 @@ function setTemporalReferenceLayerVisibility(map: MapLibreMap, layerId: string, 
   }
 }
 
-function removeTemporalReferenceLayer(map: MapLibreMap, releaseIdentifier: string) {
-  const layerId = temporalReferenceLayerId(releaseIdentifier);
-  const sourceId = temporalReferenceSourceId(releaseIdentifier);
+function removeTemporalReferenceLayer(map: MapLibreMap, projectId: string | null, releaseIdentifier: string) {
+  const layerId = temporalReferenceLayerId(projectId, releaseIdentifier);
+  const sourceId = temporalReferenceSourceId(projectId, releaseIdentifier);
   devLog("TEMPORAL_REFERENCE_SOURCE_REMOVE", {
     releaseIdentifier,
     sourceId,
@@ -1345,21 +1601,11 @@ function syncMapPresentation(
   sourceData(map, "detected-polygons", params.detectedPolygons);
   sourceData(map, "building-blocks", params.buildingBlocks);
   sourceData(map, "buffer-layers", params.bufferLayers);
-  sourceData(map, "buffer-10m", params.pairwiseBuffers.buffer10m);
-  sourceData(map, "buffer-15m", params.pairwiseBuffers.buffer15m);
-  sourceData(map, "buffer-20m", params.pairwiseBuffers.buffer20m);
-  sourceData(map, "temporal-additions", params.temporalVectors.temporalAdditions);
-  sourceData(map, "temporal-cumulative-buffer-20m", params.temporalVectors.temporalCumulativeBuffer20m);
-  sourceData(map, "temporal-cumulative-buffer-15m", params.temporalVectors.temporalCumulativeBuffer15m);
-  sourceData(map, "temporal-cumulative-buffer-10m", params.temporalVectors.temporalCumulativeBuffer10m);
-  sourceData(map, "temporal-automated", params.temporalVectors.temporalAutomated);
-  sourceData(map, "temporal-automated-building-blocks", params.temporalVectors.temporalAutomatedBuildingBlocks);
-  sourceData(map, "temporal-effective-building-blocks", params.temporalVectors.temporalEffectiveBuildingBlocks);
-  sourceData(map, "temporal-convex-hull", params.temporalVectors.temporalConvexHull);
-  sourceData(map, "temporal-cumulative", params.temporalVectors.temporalCumulative);
-  sourceData(map, "temporal-cumulative-growth-blocks", params.temporalVectors.temporalCumulativeGrowthBlocks);
-  sourceData(map, "temporal-cumulative-growth-envelope", params.temporalVectors.temporalCumulativeGrowthEnvelope);
-  sourceData(map, "temporal-manual-override", params.temporalVectors.temporalManualOverride);
+  if (params.workflowMode === "pairwise") {
+    sourceData(map, "buffer-10m", params.pairwiseBuffers.buffer10m);
+    sourceData(map, "buffer-15m", params.pairwiseBuffers.buffer15m);
+    sourceData(map, "buffer-20m", params.pairwiseBuffers.buffer20m);
+  }
   syncReferenceLayers(map, params.referenceLayers, params.referenceLayerData);
 
   if (params.workflowMode === "temporal") {
@@ -1422,27 +1668,27 @@ function syncMapPresentation(
   setLayerVisibility(map, "building-blocks-line", params.layerState.buildingBlocks);
   setLayerVisibility(map, "buffer-layers-fill", params.layerState.buffers);
   setLayerVisibility(map, "buffer-layers-line", params.layerState.buffers);
-  setLayerVisibility(map, "buffer-10m-fill", params.layerState.buffer10m);
-  setLayerVisibility(map, "buffer-10m-line", params.layerState.buffer10m);
-  setLayerVisibility(map, "buffer-15m-fill", params.layerState.buffer15m);
-  setLayerVisibility(map, "buffer-15m-line", params.layerState.buffer15m);
-  setLayerVisibility(map, "buffer-20m-fill", params.layerState.buffer20m);
-  setLayerVisibility(map, "buffer-20m-line", params.layerState.buffer20m);
-  setLayerVisibility(map, "temporal-additions-fill", params.layerState.temporalAdditions);
-  setLayerVisibility(map, "temporal-cumulative-buffer-20m-fill", params.layerState.temporalCumulativeBuffer20m);
-  setLayerVisibility(map, "temporal-cumulative-buffer-15m-fill", params.layerState.temporalCumulativeBuffer15m);
-  setLayerVisibility(map, "temporal-cumulative-buffer-10m-fill", params.layerState.temporalCumulativeBuffer10m);
-  setLayerVisibility(map, "temporal-automated-fill", params.layerState.temporalAutomated);
-  setLayerVisibility(map, "temporal-automated-building-blocks-fill", params.layerState.temporalAutomatedBuildingBlocks);
-  setLayerVisibility(map, "temporal-effective-building-blocks-fill", params.layerState.temporalEffectiveBuildingBlocks);
-  setLayerVisibility(map, "temporal-convex-hull-fill", params.layerState.temporalConvexHull);
-  setLayerVisibility(map, "temporal-cumulative-fill", params.layerState.temporalCumulative);
-  setLayerVisibility(map, "temporal-cumulative-growth-blocks-fill", params.layerState.temporalCumulativeGrowthBlocks);
-  setLayerVisibility(map, "temporal-cumulative-growth-envelope-fill", params.layerState.temporalCumulativeGrowthEnvelope);
-  setLayerVisibility(map, "temporal-manual-override-fill", params.layerState.temporalManualOverride);
+  setLayerVisibility(map, "buffer-10m-fill", params.workflowMode === "pairwise" && params.layerState.buffer10m);
+  setLayerVisibility(map, "buffer-10m-line", params.workflowMode === "pairwise" && params.layerState.buffer10m);
+  setLayerVisibility(map, "buffer-15m-fill", params.workflowMode === "pairwise" && params.layerState.buffer15m);
+  setLayerVisibility(map, "buffer-15m-line", params.workflowMode === "pairwise" && params.layerState.buffer15m);
+  setLayerVisibility(map, "buffer-20m-fill", params.workflowMode === "pairwise" && params.layerState.buffer20m);
+  setLayerVisibility(map, "buffer-20m-line", params.workflowMode === "pairwise" && params.layerState.buffer20m);
+  setLayerVisibility(map, "temporal-additions-fill", false);
+  setLayerVisibility(map, "temporal-cumulative-buffer-20m-fill", false);
+  setLayerVisibility(map, "temporal-cumulative-buffer-15m-fill", false);
+  setLayerVisibility(map, "temporal-cumulative-buffer-10m-fill", false);
+  setLayerVisibility(map, "temporal-automated-fill", false);
+  setLayerVisibility(map, "temporal-automated-building-blocks-fill", false);
+  setLayerVisibility(map, "temporal-effective-building-blocks-fill", false);
+  setLayerVisibility(map, "temporal-convex-hull-fill", false);
+  setLayerVisibility(map, "temporal-cumulative-fill", false);
+  setLayerVisibility(map, "temporal-cumulative-growth-blocks-fill", false);
+  setLayerVisibility(map, "temporal-cumulative-growth-envelope-fill", false);
+  setLayerVisibility(map, "temporal-manual-override-fill", false);
 }
 
-function applyLayerVisibilityState(map: MapLibreMap, layerState: LayerToggleState) {
+function applyLayerVisibilityState(map: MapLibreMap, layerState: LayerToggleState, workflowMode: WorkflowMode = "pairwise") {
   applyLabelVisibility(map, layerState.labels);
   setLayerVisibility(map, "overlay-t1-preview-layer", layerState.t1Preview);
   setLayerVisibility(map, "overlay-t2-preview-layer", layerState.t2Preview);
@@ -1453,24 +1699,24 @@ function applyLayerVisibilityState(map: MapLibreMap, layerState: LayerToggleStat
   setLayerVisibility(map, "building-blocks-line", layerState.buildingBlocks);
   setLayerVisibility(map, "buffer-layers-fill", layerState.buffers);
   setLayerVisibility(map, "buffer-layers-line", layerState.buffers);
-  setLayerVisibility(map, "buffer-10m-fill", layerState.buffer10m);
-  setLayerVisibility(map, "buffer-10m-line", layerState.buffer10m);
-  setLayerVisibility(map, "buffer-15m-fill", layerState.buffer15m);
-  setLayerVisibility(map, "buffer-15m-line", layerState.buffer15m);
-  setLayerVisibility(map, "buffer-20m-fill", layerState.buffer20m);
-  setLayerVisibility(map, "buffer-20m-line", layerState.buffer20m);
-  setLayerVisibility(map, "temporal-additions-fill", layerState.temporalAdditions);
-  setLayerVisibility(map, "temporal-cumulative-buffer-20m-fill", layerState.temporalCumulativeBuffer20m);
-  setLayerVisibility(map, "temporal-cumulative-buffer-15m-fill", layerState.temporalCumulativeBuffer15m);
-  setLayerVisibility(map, "temporal-cumulative-buffer-10m-fill", layerState.temporalCumulativeBuffer10m);
-  setLayerVisibility(map, "temporal-automated-fill", layerState.temporalAutomated);
-  setLayerVisibility(map, "temporal-automated-building-blocks-fill", layerState.temporalAutomatedBuildingBlocks);
-  setLayerVisibility(map, "temporal-effective-building-blocks-fill", layerState.temporalEffectiveBuildingBlocks);
-  setLayerVisibility(map, "temporal-convex-hull-fill", layerState.temporalConvexHull);
-  setLayerVisibility(map, "temporal-cumulative-fill", layerState.temporalCumulative);
-  setLayerVisibility(map, "temporal-cumulative-growth-blocks-fill", layerState.temporalCumulativeGrowthBlocks);
-  setLayerVisibility(map, "temporal-cumulative-growth-envelope-fill", layerState.temporalCumulativeGrowthEnvelope);
-  setLayerVisibility(map, "temporal-manual-override-fill", layerState.temporalManualOverride);
+  setLayerVisibility(map, "buffer-10m-fill", workflowMode === "pairwise" && layerState.buffer10m);
+  setLayerVisibility(map, "buffer-10m-line", workflowMode === "pairwise" && layerState.buffer10m);
+  setLayerVisibility(map, "buffer-15m-fill", workflowMode === "pairwise" && layerState.buffer15m);
+  setLayerVisibility(map, "buffer-15m-line", workflowMode === "pairwise" && layerState.buffer15m);
+  setLayerVisibility(map, "buffer-20m-fill", workflowMode === "pairwise" && layerState.buffer20m);
+  setLayerVisibility(map, "buffer-20m-line", workflowMode === "pairwise" && layerState.buffer20m);
+  setLayerVisibility(map, "temporal-additions-fill", false);
+  setLayerVisibility(map, "temporal-cumulative-buffer-20m-fill", false);
+  setLayerVisibility(map, "temporal-cumulative-buffer-15m-fill", false);
+  setLayerVisibility(map, "temporal-cumulative-buffer-10m-fill", false);
+  setLayerVisibility(map, "temporal-automated-fill", false);
+  setLayerVisibility(map, "temporal-automated-building-blocks-fill", false);
+  setLayerVisibility(map, "temporal-effective-building-blocks-fill", false);
+  setLayerVisibility(map, "temporal-convex-hull-fill", false);
+  setLayerVisibility(map, "temporal-cumulative-fill", false);
+  setLayerVisibility(map, "temporal-cumulative-growth-blocks-fill", false);
+  setLayerVisibility(map, "temporal-cumulative-growth-envelope-fill", false);
+  setLayerVisibility(map, "temporal-manual-override-fill", false);
 }
 
 function defaultLayerState(workflowMode: WorkflowMode, hasPairResult: boolean): LayerToggleState {
@@ -1641,14 +1887,22 @@ export function MapView({
   const temporalReferenceLayerIdsRef = useRef<Set<string>>(new Set());
   const temporalReferenceSourceIdsRef = useRef<Set<string>>(new Set());
   const temporalReferenceSourceSignaturesRef = useRef<Record<string, string>>({});
+  const temporalAddedLayerIdsRef = useRef<Set<string>>(new Set());
+  const temporalAddedSourceIdsRef = useRef<Set<string>>(new Set());
+  const temporalAddedSourceSignaturesRef = useRef<Record<string, string>>({});
+  const temporalAddedRegistrationKeyRef = useRef<string | null>(null);
+  const temporalAddedRegistrationStatsRef = useRef<Record<string, { featureCount: number; payloadBytes: number }>>({});
+  const activeTemporalAddedProjectIdRef = useRef<string | null>(null);
+  const activeTemporalAddedReleaseIdentifierRef = useRef<string | null>(null);
+  const activeTemporalAddedSwitchKeyRef = useRef<string | null>(null);
   const temporalReferenceLoadedLayerIdsRef = useRef<Set<string>>(new Set());
   const temporalReferenceTilejsonCacheRef = useRef<Partial<Record<string, TemporalReferenceTilejsonPayload>>>({});
   const temporalReferenceTilejsonPendingRef = useRef<
     Partial<Record<string, Promise<TemporalReferenceTilejsonPayload | null>>>
   >({});
   const temporalReferencePrefetchedViewportKeysRef = useRef<Set<string>>(new Set());
+  const temporalReferencePrewarmAbortRef = useRef<AbortController | null>(null);
   const preloadedImageUrlsRef = useRef<Set<string>>(new Set());
-  const preloadedReferenceKeysRef = useRef<Set<string>>(new Set());
   const temporalLayerStateByProjectRef = useRef<Record<string, LayerToggleState>>({});
   const activeLayerStateScopeRef = useRef<string | null>(null);
   const activeTemporalReferenceLayerIdRef = useRef<string | null>(null);
@@ -1687,9 +1941,17 @@ export function MapView({
   const stopDrawing = useAppStore((state) => state.stopDrawing);
   const updateDraftVertex = useAppStore((state) => state.updateDraftVertex);
   const result = useAppStore((state) => state.result);
+  const temporalAddedOverlayTimeline =
+    workflowMode === "temporal" ? temporalPresentation?.addedOverlayTimeline ?? [] : [];
+  const activeTemporalAddedOverlay =
+    workflowMode === "temporal" && temporalPresentation?.selectedReleaseIdentifier
+      ? temporalAddedOverlayTimeline.find(
+          (overlay) => overlay.releaseIdentifier === temporalPresentation.selectedReleaseIdentifier,
+        ) ?? null
+      : null;
   const temporalRawAdditions = useMemo(
-    () => buildRawAdditionFeatureCollection(temporalPresentation?.additions),
-    [temporalPresentation?.additions],
+    () => buildRawAdditionFeatureCollection(activeTemporalAddedOverlay?.additions ?? temporalPresentation?.additions),
+    [activeTemporalAddedOverlay?.additions, temporalPresentation?.additions],
   );
   const temporalVectors = useMemo<TemporalVectorSources>(
     () => ({
@@ -1739,17 +2001,17 @@ export function MapView({
       buffer10m:
         workflowMode === "pairwise"
           ? bufferFeatureCollection(result?.buffer_layers_geojson, "10m")
-          : buildNonCumulativeAdditionBuffer(temporalRawAdditions, 10),
+          : ensureFeatureCollection(activeTemporalAddedOverlay?.buffer10m),
       buffer15m:
         workflowMode === "pairwise"
           ? bufferFeatureCollection(result?.buffer_layers_geojson, "15m")
-          : buildNonCumulativeAdditionBuffer(temporalRawAdditions, 15),
+          : ensureFeatureCollection(activeTemporalAddedOverlay?.buffer15m),
       buffer20m:
         workflowMode === "pairwise"
           ? bufferFeatureCollection(result?.buffer_layers_geojson, "20m")
-          : buildNonCumulativeAdditionBuffer(temporalRawAdditions, 20),
+          : ensureFeatureCollection(activeTemporalAddedOverlay?.buffer20m),
     }),
-    [result?.buffer_layers_geojson, temporalRawAdditions, workflowMode],
+    [activeTemporalAddedOverlay, result?.buffer_layers_geojson, workflowMode],
   );
   const temporalReferenceImagery =
     workflowMode === "temporal" ? temporalPresentation?.referenceImagery ?? null : null;
@@ -1831,7 +2093,7 @@ export function MapView({
             ? (updater as (value: LayerToggleState) => LayerToggleState)(current)
             : { ...current, ...updater };
         if (mapRef.current) {
-          applyLayerVisibilityState(mapRef.current, next);
+          applyLayerVisibilityState(mapRef.current, next, workflowMode);
         }
         if (workflowMode === "temporal" && temporalProjectId) {
           temporalLayerStateByProjectRef.current[temporalProjectId] = next;
@@ -1901,8 +2163,9 @@ export function MapView({
       temporalReferenceTilejsonCacheRef.current = {};
       temporalReferenceTilejsonPendingRef.current = {};
       temporalReferencePrefetchedViewportKeysRef.current.clear();
+      temporalReferencePrewarmAbortRef.current?.abort();
+      temporalReferencePrewarmAbortRef.current = null;
       preloadedImageUrlsRef.current.clear();
-      preloadedReferenceKeysRef.current.clear();
       activeTemporalReferenceLayerIdRef.current = null;
       activeTemporalReferenceReleaseIdentifierRef.current = null;
       activeTemporalReferenceSwitchKeyRef.current = null;
@@ -1932,6 +2195,74 @@ export function MapView({
 
     activeTemporalProjectIdRef.current = projectId;
 
+    const timelineByRelease = new Map(
+      temporalReferenceImageryTimeline.map((item) => [item.releaseIdentifier, item] as const),
+    );
+    const prevRelease =
+      temporalSelectedMilestoneIndex > 0 ? temporalAvailableMilestoneIds[temporalSelectedMilestoneIndex - 1] ?? null : null;
+    const nextRelease =
+      temporalSelectedMilestoneIndex >= 0 && temporalSelectedMilestoneIndex + 1 < temporalAvailableMilestoneIds.length
+        ? temporalAvailableMilestoneIds[temporalSelectedMilestoneIndex + 1] ?? null
+        : null;
+    const registrationCandidates =
+      temporalReferenceImageryTimeline.length <= 5
+        ? temporalReferenceImageryTimeline
+        : [temporalReferenceImagery, timelineByRelease.get(prevRelease ?? "") ?? null, timelineByRelease.get(nextRelease ?? "") ?? null]
+            .filter((value): value is TemporalReferenceImageryPresentation => value !== null);
+    if (registrationCandidates.length) {
+      const registerStartedAt = performance.now();
+      let created = 0;
+      let reused = 0;
+      devLog("TEMPORAL_REFERENCE_LAYERS_REGISTER_START", {
+        projectId,
+        requested: registrationCandidates.length,
+        milestoneCount: temporalReferenceImageryTimeline.length,
+      });
+      for (const imagery of registrationCandidates) {
+        if (!imagery) {
+          continue;
+        }
+        try {
+          const lifecycle =
+            imagery.storageStrategy === "image_overlay" && imagery.imageUrl && imagery.bounds
+              ? ensureTemporalReferenceImageLayer(map, imagery, {
+                  projectId,
+                  sourceSignatures: temporalReferenceSourceSignaturesRef.current,
+                })
+              : ensureTemporalReferenceRasterLayer(map, imagery, {
+                  projectId,
+                  sourceSignatures: temporalReferenceSourceSignaturesRef.current,
+                });
+          temporalReferenceLayerIdsRef.current.add(lifecycle.layerId);
+          temporalReferenceSourceIdsRef.current.add(lifecycle.sourceId);
+          temporalReferenceLoadedLayerIdsRef.current.add(lifecycle.layerId);
+          setTemporalReferenceLayerVisibility(
+            map,
+            lifecycle.layerId,
+            layerState.temporalReferenceImagery && imagery.releaseIdentifier === temporalReferenceImagery?.releaseIdentifier,
+          );
+          if (lifecycle.mode === "create" || lifecycle.mode === "recreate") {
+            created += 1;
+          } else {
+            reused += 1;
+          }
+        } catch (error) {
+          devLog("TEMPORAL_REFERENCE_LAYER_REGISTER_FAILED", {
+            projectId,
+            releaseIdentifier: imagery.releaseIdentifier,
+            reason: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+      devLog("TEMPORAL_REFERENCE_LAYERS_REGISTER_DONE", {
+        projectId,
+        requested: registrationCandidates.length,
+        created,
+        reused,
+        durationMs: Math.round(performance.now() - registerStartedAt),
+      });
+    }
+
     const hideTrackedLayers = (exceptLayerId: string | null = null) => {
       for (const layerId of temporalReferenceLayerIdsRef.current) {
         setTemporalReferenceLayerVisibility(map, layerId, layerId === exceptLayerId && layerState.temporalReferenceImagery);
@@ -1946,8 +2277,8 @@ export function MapView({
       return;
     }
 
-    const selectedLayerId = temporalReferenceLayerId(temporalReferenceImagery.releaseIdentifier);
-    const selectedSourceId = temporalReferenceSourceId(temporalReferenceImagery.releaseIdentifier);
+    const selectedLayerId = temporalReferenceLayerId(projectId, temporalReferenceImagery.releaseIdentifier);
+    const selectedSourceId = temporalReferenceSourceId(projectId, temporalReferenceImagery.releaseIdentifier);
     const selectedSignature = temporalReferenceSourceSignature(projectId, temporalReferenceImagery);
     const selectedSwitchKey = `${projectId}:${temporalReferenceImagery.releaseIdentifier}:${selectedSignature}`;
     const selectedTileVersion =
@@ -2060,8 +2391,8 @@ export function MapView({
       switchKey: string,
     ): Promise<TemporalReferenceVisualReadyResult | null> => {
       const visualStartedAt = performance.now();
-      const sourceId = temporalReferenceSourceId(releaseIdentifier);
-      const layerId = temporalReferenceLayerId(releaseIdentifier);
+      const sourceId = temporalReferenceSourceId(projectId, releaseIdentifier);
+      const layerId = temporalReferenceLayerId(projectId, releaseIdentifier);
 
       const emitVisualReady = (readinessSource: TemporalReferenceReadinessSource): TemporalReferenceVisualReadyResult | null => {
         if (activeTemporalReferenceSwitchKeyRef.current !== switchKey) {
@@ -2311,6 +2642,8 @@ export function MapView({
       pendingTemporalReferenceReadyCleanupRef.current = null;
       devLog("TEMPORAL_REFERENCE_SWITCH_COMMITTED", {
         projectId,
+        previousReleaseIdentifier,
+        nextReleaseIdentifier: releaseIdentifier,
         releaseIdentifier,
         switchKey: selectedSwitchKey,
         sourceId,
@@ -2318,9 +2651,10 @@ export function MapView({
         signature,
         mode,
         tileVersion: selectedTileVersion,
-        previousReleaseIdentifier,
         visibility: "visible",
         readinessSource: result.readinessSource,
+        sourceExists: Boolean(map.getSource(sourceId)),
+        layerExists: Boolean(map.getLayer(layerId)),
         totalSwitchMs: Math.round(performance.now() - switchStartedAt),
         visualReadyMs: result.visualReadyMs,
       });
@@ -2434,10 +2768,10 @@ export function MapView({
             resolvedTilejson,
           });
           temporalReferenceLayerIdsRef.current.add(lifecycle.layerId);
-          temporalReferenceSourceIdsRef.current.add(temporalReferenceSourceId(imagery.releaseIdentifier));
+          temporalReferenceSourceIdsRef.current.add(temporalReferenceSourceId(projectId, imagery.releaseIdentifier));
           if (!temporalReferenceLoadedLayerIdsRef.current.has(lifecycle.layerId) || !map.getLayer(lifecycle.layerId)) {
-            firstTileMs = await waitForFirstTile(temporalReferenceSourceId(imagery.releaseIdentifier));
-            await waitForTemporalRasterSource(map, temporalReferenceSourceId(imagery.releaseIdentifier));
+            firstTileMs = await waitForFirstTile(temporalReferenceSourceId(projectId, imagery.releaseIdentifier));
+            await waitForTemporalRasterSource(map, temporalReferenceSourceId(projectId, imagery.releaseIdentifier));
             if (activeTemporalReferenceSwitchKeyRef.current !== selectedSwitchKey) {
               return null;
             }
@@ -2448,7 +2782,7 @@ export function MapView({
           devLog("TEMPORAL_REFERENCE_READY", {
             projectId,
             releaseIdentifier: imagery.releaseIdentifier,
-            sourceId: temporalReferenceSourceId(imagery.releaseIdentifier),
+            sourceId: temporalReferenceSourceId(projectId, imagery.releaseIdentifier),
             layerId: lifecycle.layerId,
           });
           devLog("MAP_SELECTED_REFERENCE_VISIBLE", {
@@ -2481,13 +2815,13 @@ export function MapView({
             sourceSignatures: temporalReferenceSourceSignaturesRef.current,
           });
           temporalReferenceLayerIdsRef.current.add(lifecycle.layerId);
-          temporalReferenceSourceIdsRef.current.add(temporalReferenceSourceId(imagery.releaseIdentifier));
+          temporalReferenceSourceIdsRef.current.add(temporalReferenceSourceId(projectId, imagery.releaseIdentifier));
           temporalReferenceLoadedLayerIdsRef.current.add(lifecycle.layerId);
           moveReferenceOverlaysAboveTemporalImagery(map, lifecycle.layerId, referenceLayers);
           devLog("TEMPORAL_REFERENCE_READY", {
             projectId,
             releaseIdentifier: imagery.releaseIdentifier,
-            sourceId: temporalReferenceSourceId(imagery.releaseIdentifier),
+            sourceId: temporalReferenceSourceId(projectId, imagery.releaseIdentifier),
             layerId: lifecycle.layerId,
           });
           devLog("MAP_SELECTED_REFERENCE_VISIBLE", {
@@ -2515,86 +2849,84 @@ export function MapView({
         return;
       }
       const neighborIds = imageryItems.map((item) => item.releaseIdentifier);
-      devLog("ADJACENT_PRELOAD_SCHEDULED", {
+      devLog("TEMPORAL_REFERENCE_PREWARM_START", {
         projectId,
         selectedReleaseIdentifier: temporalReferenceImagery.releaseIdentifier,
         neighbors: neighborIds,
+        reason: "scheduled_after_switch",
       });
       const onIdle = () => {
         const cancelIdle = scheduleIdle(() => {
+          temporalReferencePrewarmAbortRef.current?.abort();
+          const controller = new AbortController();
+          temporalReferencePrewarmAbortRef.current = controller;
+          const baseZoom = Math.floor(map.getZoom());
           for (const imagery of imageryItems) {
-            const zoom = Math.max(
-              imagery.minzoom ?? 0,
-              Math.min(imagery.maxzoom ?? 22, Math.floor(map.getZoom())),
-            );
-            const key = `${projectId}:${imagery.releaseIdentifier}:${zoom}`;
-            if (preloadedReferenceKeysRef.current.has(key)) {
-              continue;
-            }
-            devLog("ADJACENT_PRELOAD_STARTED", {
-              projectId,
-              releaseIdentifier: imagery.releaseIdentifier,
+            const minZoom = imagery.minzoom ?? 0;
+            const maxZoom = imagery.maxzoom ?? 22;
+            const zooms = Array.from(new Set([baseZoom, baseZoom - 1, baseZoom + 1]))
+              .filter((zoom) => zoom >= minZoom && zoom <= maxZoom)
+              .sort((a, b) => a - b);
+            const tiles = zooms.flatMap((zoom) => visibleTileCoordinates(map, zoom, 64));
+            const missingTiles = tiles.filter((tile) => {
+              const key = `${projectId}:${imagery.releaseIdentifier}:${tile.z}:${tile.x}:${tile.y}`;
+              if (temporalReferencePrefetchedViewportKeysRef.current.has(key)) {
+                return false;
+              }
+              temporalReferencePrefetchedViewportKeysRef.current.add(key);
+              return true;
             });
-            const cacheKey = tilejsonCacheKeyFor(imagery);
-            const preload = async () => {
-              let tileTemplate = imagery.tilesUrlTemplate;
-              const tilejsonUrl = imagery.tilejsonUrl;
-              if (!tileTemplate && tilejsonUrl) {
-                devLog("TEMPORAL_REFERENCE_TILEJSON_START", {
-                  projectId,
-                  releaseIdentifier: imagery.releaseIdentifier,
-                  tilejsonUrl,
-                  preload: true,
-                });
-                const tilejsonStartedAt = performance.now();
-                let payload: TemporalReferenceTilejsonPayload | null | undefined =
-                  temporalReferenceTilejsonCacheRef.current[cacheKey];
-                if (!payload) {
-                  const pendingRequest = temporalReferenceTilejsonPendingRef.current[cacheKey];
-                  if (pendingRequest) {
-                    payload = await pendingRequest;
-                  } else {
-                    const response = await fetch(tilejsonUrl);
-                    if (!response.ok) {
-                      throw new Error(`TileJSON preload failed: ${response.status}`);
-                    }
-                    payload = (await response.json()) as TemporalReferenceTilejsonPayload;
-                    temporalReferenceTilejsonCacheRef.current[cacheKey] = payload;
-                  }
-                }
-                tileTemplate =
-                  payload && Array.isArray(payload.tiles) && typeof payload.tiles[0] === "string"
-                    ? payload.tiles[0]
-                    : null;
-                devLog("TEMPORAL_REFERENCE_TILEJSON_DONE", {
-                  projectId,
-                  releaseIdentifier: imagery.releaseIdentifier,
-                  tilejsonUrl,
-                  preload: true,
-                  tilejsonMs: Math.round(performance.now() - tilejsonStartedAt),
-                });
-              }
-              if (!tileTemplate) {
-                return;
-              }
-              const viewportPreloadKey = `${key}:${tileTemplate}`;
-              if (temporalReferencePrefetchedViewportKeysRef.current.has(viewportPreloadKey)) {
-                return;
-              }
-              const coords = visibleTileCoordinates(map, zoom);
-              await Promise.allSettled(
-                coords.map((coord) => fetch(tileUrlFromTemplate(tileTemplate as string, coord), { cache: "force-cache" })),
-              );
-              temporalReferencePrefetchedViewportKeysRef.current.add(viewportPreloadKey);
-              preloadedReferenceKeysRef.current.add(key);
-            };
-            void preload().catch((error) => {
-              devLog("ADJACENT_PRELOAD_SKIPPED", {
+            if (!missingTiles.length) {
+              devLog("TEMPORAL_REFERENCE_PREWARM_SKIPPED", {
                 projectId,
                 releaseIdentifier: imagery.releaseIdentifier,
-                reason: error instanceof Error ? error.message : String(error),
+                reason: "already_warmed",
+                zValues: zooms,
+                tileCount: 0,
               });
-            });
+              continue;
+            }
+            const prewarmStartedAt = performance.now();
+            const prewarmUrl = `${backendUrl.replace(/\/$/, "")}/api/temporal-projects/${encodeURIComponent(
+              projectId,
+            )}/milestones/${encodeURIComponent(imagery.releaseIdentifier)}/reference/prewarm`;
+            void fetch(prewarmUrl, {
+              method: "POST",
+              signal: controller.signal,
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ tiles: missingTiles }),
+            })
+              .then(async (response) => {
+                if (!response.ok) {
+                  throw new Error(`Prewarm failed with HTTP ${response.status}`);
+                }
+                const payload = (await response.json()) as {
+                  hits?: number;
+                  misses?: number;
+                  generated?: number;
+                  failed?: number;
+                };
+                devLog("TEMPORAL_REFERENCE_PREWARM_DONE", {
+                  projectId,
+                  releaseIdentifier: imagery.releaseIdentifier,
+                  zValues: zooms,
+                  tileCount: missingTiles.length,
+                  durationMs: Math.round(performance.now() - prewarmStartedAt),
+                  hits: payload.hits ?? 0,
+                  misses: payload.misses ?? 0,
+                  generated: payload.generated ?? 0,
+                  failed: payload.failed ?? 0,
+                });
+              })
+              .catch((error) => {
+                devLog("TEMPORAL_REFERENCE_PREWARM_SKIPPED", {
+                  projectId,
+                  releaseIdentifier: imagery.releaseIdentifier,
+                  reason: error instanceof Error ? error.message : String(error),
+                  zValues: zooms,
+                  tileCount: missingTiles.length,
+                });
+              });
           }
         }, 2000);
         void cancelIdle;
@@ -2602,19 +2934,21 @@ export function MapView({
       map.once("idle", onIdle);
     };
 
-    const timelineByRelease = new Map(
-      temporalReferenceImageryTimeline.map((item) => [item.releaseIdentifier, item] as const),
-    );
-    const prevRelease =
-      temporalSelectedMilestoneIndex > 0 ? temporalAvailableMilestoneIds[temporalSelectedMilestoneIndex - 1] ?? null : null;
-    const nextRelease =
-      temporalSelectedMilestoneIndex >= 0 && temporalSelectedMilestoneIndex + 1 < temporalAvailableMilestoneIds.length
-        ? temporalAvailableMilestoneIds[temporalSelectedMilestoneIndex + 1] ?? null
-        : null;
-    const neighborImagery = [prevRelease, nextRelease]
-      .filter((releaseIdentifier): releaseIdentifier is string => Boolean(releaseIdentifier))
-      .map((releaseIdentifier) => timelineByRelease.get(releaseIdentifier) ?? null)
-      .filter((value): value is TemporalReferenceImageryPresentation => value !== null);
+    const neighborImagery =
+      temporalReferenceImageryTimeline.length <= 5
+        ? [
+            temporalReferenceImagery,
+            ...temporalReferenceImageryTimeline.filter(
+              (imagery) => imagery.releaseIdentifier !== temporalReferenceImagery.releaseIdentifier,
+            ),
+          ]
+        : [
+            temporalReferenceImagery,
+            ...[prevRelease, nextRelease]
+              .filter((releaseIdentifier): releaseIdentifier is string => Boolean(releaseIdentifier))
+              .map((releaseIdentifier) => timelineByRelease.get(releaseIdentifier) ?? null)
+              .filter((value): value is TemporalReferenceImageryPresentation => value !== null),
+          ];
 
     if (
       selectedSignatureMatches &&
@@ -2640,22 +2974,26 @@ export function MapView({
       activeTemporalReferenceReleaseIdentifierRef.current = temporalReferenceImagery.releaseIdentifier;
       moveReferenceOverlaysAboveTemporalImagery(map, selectedLayerId, referenceLayers);
       setTemporalReferenceLoading(false);
-      void waitForVisualReady(
-        temporalReferenceImagery,
-        temporalReferenceImagery.releaseIdentifier,
-        "reuse",
-        0,
-        selectedSwitchKey,
-      ).then((result) => {
-        commitTemporalReferenceSwitch(
-          temporalReferenceImagery.releaseIdentifier,
-          selectedSourceId,
-          selectedLayerId,
-          selectedSignature,
-          "reuse",
-          previousReleaseIdentifier,
-          result,
-        );
+      committedTemporalReferenceSwitchKeysRef.current.add(selectedSwitchKey);
+      committedTemporalReferenceSwitchKeyRef.current = selectedSwitchKey;
+      activeTemporalReferenceSwitchKeyRef.current = null;
+      pendingTemporalReferenceReadyCleanupRef.current = null;
+      devLog("TEMPORAL_REFERENCE_SWITCH_COMMITTED", {
+        projectId,
+        previousReleaseIdentifier,
+        nextReleaseIdentifier: temporalReferenceImagery.releaseIdentifier,
+        releaseIdentifier: temporalReferenceImagery.releaseIdentifier,
+        switchKey: selectedSwitchKey,
+        sourceId: selectedSourceId,
+        layerId: selectedLayerId,
+        signature: selectedSignature,
+        mode: "reuse",
+        tileVersion: selectedTileVersion,
+        visibility: "visible",
+        readinessSource: "already_registered",
+        sourceExists: Boolean(map.getSource(selectedSourceId)),
+        layerExists: Boolean(map.getLayer(selectedLayerId)),
+        totalSwitchMs: Math.round(performance.now() - switchStartedAt),
       });
       preloadNeighbors(neighborImagery);
       return;
@@ -2715,6 +3053,211 @@ export function MapView({
     temporalSelectedMilestoneIndex,
     temporalReferenceImageryTimeline,
     temporalHydratingProject,
+  ]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    const projectId = temporalProjectId;
+
+    const clearTemporalAddedLayers = () => {
+      if (map) {
+        for (const layerId of temporalAddedLayerIdsRef.current) {
+          if (map.getLayer(layerId)) {
+            map.removeLayer(layerId);
+          }
+        }
+        for (const sourceId of temporalAddedSourceIdsRef.current) {
+          if (map.getSource(sourceId)) {
+            map.removeSource(sourceId);
+          }
+        }
+      }
+      temporalAddedLayerIdsRef.current.clear();
+      temporalAddedSourceIdsRef.current.clear();
+      temporalAddedSourceSignaturesRef.current = {};
+      temporalAddedRegistrationKeyRef.current = null;
+      temporalAddedRegistrationStatsRef.current = {};
+      activeTemporalAddedProjectIdRef.current = null;
+      activeTemporalAddedReleaseIdentifierRef.current = null;
+      activeTemporalAddedSwitchKeyRef.current = null;
+    };
+
+    if (!map || !map.isStyleLoaded()) {
+      return;
+    }
+    if (workflowMode !== "temporal" || !projectId || !temporalPresentation) {
+      clearTemporalAddedLayers();
+      return;
+    }
+    if (activeTemporalAddedProjectIdRef.current && activeTemporalAddedProjectIdRef.current !== projectId) {
+      clearTemporalAddedLayers();
+    }
+    activeTemporalAddedProjectIdRef.current = projectId;
+
+    const selectedReleaseIdentifier = temporalPresentation.selectedReleaseIdentifier;
+    if (!selectedReleaseIdentifier) {
+      for (const layerId of temporalAddedLayerIdsRef.current) {
+        setLayerVisibility(map, layerId, false);
+      }
+      activeTemporalAddedReleaseIdentifierRef.current = null;
+      return;
+    }
+
+    const timelineByRelease = new Map(
+      temporalAddedOverlayTimeline.map((overlay) => [overlay.releaseIdentifier, overlay] as const),
+    );
+    const prevRelease =
+      temporalSelectedMilestoneIndex > 0 ? temporalAvailableMilestoneIds[temporalSelectedMilestoneIndex - 1] ?? null : null;
+    const nextRelease =
+      temporalSelectedMilestoneIndex >= 0 && temporalSelectedMilestoneIndex + 1 < temporalAvailableMilestoneIds.length
+        ? temporalAvailableMilestoneIds[temporalSelectedMilestoneIndex + 1] ?? null
+        : null;
+    const selectedOverlay = timelineByRelease.get(selectedReleaseIdentifier) ?? null;
+    const registrationCandidates =
+      temporalAddedOverlayTimeline.length <= 5
+        ? temporalAddedOverlayTimeline
+        : [selectedOverlay, timelineByRelease.get(prevRelease ?? "") ?? null, timelineByRelease.get(nextRelease ?? "") ?? null]
+            .filter((value): value is TemporalAddedOverlayPresentation => value !== null);
+
+    let createdSources = 0;
+    let reusedSources = 0;
+    let updatedSources = 0;
+    let createdLayers = 0;
+    let reusedLayers = 0;
+    let totalFeatureCount = 0;
+    let totalPayloadBytes = 0;
+    const registrationKey = JSON.stringify({
+      projectId,
+      projectUpdatedAt: temporalPresentation.projectUpdatedAt,
+      releases: registrationCandidates.map((overlay) => overlay.releaseIdentifier),
+      definitions: TEMPORAL_ADDED_LAYER_DEFINITIONS.map((definition) => definition.kind),
+    });
+    const expectedLayerIds = registrationCandidates.flatMap((overlay) =>
+      TEMPORAL_ADDED_LAYER_DEFINITIONS.map((definition) =>
+        temporalAddedLayerId(projectId, overlay.releaseIdentifier, definition.kind),
+      ),
+    );
+    const registrationAlreadyReady =
+      temporalAddedRegistrationKeyRef.current === registrationKey &&
+      expectedLayerIds.length > 0 &&
+      expectedLayerIds.every((layerId) => Boolean(map.getLayer(layerId)));
+
+    if (registrationAlreadyReady) {
+      reusedLayers = expectedLayerIds.length;
+      reusedSources = expectedLayerIds.length;
+      const stats = temporalAddedRegistrationStatsRef.current[registrationKey];
+      totalFeatureCount = stats?.featureCount ?? 0;
+      totalPayloadBytes = stats?.payloadBytes ?? 0;
+    } else {
+      for (const overlay of registrationCandidates) {
+        for (const definition of TEMPORAL_ADDED_LAYER_DEFINITIONS) {
+          const beforeLayerExists = Boolean(map.getLayer(temporalAddedLayerId(projectId, overlay.releaseIdentifier, definition.kind)));
+          const lifecycle = ensureTemporalAddedLayer(
+            map,
+            projectId,
+            overlay,
+            definition,
+            temporalAddedSourceSignaturesRef.current,
+          );
+          temporalAddedSourceIdsRef.current.add(lifecycle.sourceId);
+          temporalAddedLayerIdsRef.current.add(lifecycle.layerId);
+          totalFeatureCount += lifecycle.featureCount;
+          totalPayloadBytes += lifecycle.payloadBytes;
+          if (lifecycle.mode === "create") {
+            createdSources += 1;
+          } else if (lifecycle.mode === "update") {
+            updatedSources += 1;
+          } else {
+            reusedSources += 1;
+          }
+          if (beforeLayerExists) {
+            reusedLayers += 1;
+          } else {
+            createdLayers += 1;
+          }
+        }
+      }
+      temporalAddedRegistrationKeyRef.current = registrationKey;
+      temporalAddedRegistrationStatsRef.current[registrationKey] = {
+        featureCount: totalFeatureCount,
+        payloadBytes: totalPayloadBytes,
+      };
+    }
+
+    const previousReleaseIdentifier = activeTemporalAddedReleaseIdentifierRef.current;
+    const switchStartedAt = performance.now();
+    const switchKey = `${projectId}:${selectedReleaseIdentifier}:${temporalPresentation.projectUpdatedAt ?? "unknown"}`;
+    activeTemporalAddedSwitchKeyRef.current = switchKey;
+    devLog("TEMPORAL_ADDED_LAYER_SWITCH_START", {
+      projectId,
+      previousReleaseIdentifier,
+      releaseIdentifier: selectedReleaseIdentifier,
+      switchKey,
+      registeredLayerCount: temporalAddedLayerIdsRef.current.size,
+      createdSources,
+      reusedSources,
+      updatedSources,
+      createdLayers,
+      reusedLayers,
+      featureCount: totalFeatureCount,
+      payloadBytes: totalPayloadBytes,
+    });
+
+    for (const layerId of temporalAddedLayerIdsRef.current) {
+      const visible = TEMPORAL_ADDED_LAYER_DEFINITIONS.some((definition) => {
+        const expectedLayerId = temporalAddedLayerId(projectId, selectedReleaseIdentifier, definition.kind);
+        return layerId === expectedLayerId && layerState[definition.toggleKey];
+      });
+      setLayerVisibility(map, layerId, visible);
+      if (visible && map.getLayer(layerId)) {
+        map.moveLayer(layerId);
+      }
+    }
+
+    activeTemporalAddedReleaseIdentifierRef.current = selectedReleaseIdentifier;
+    const totalSwitchMs = Math.round(performance.now() - switchStartedAt);
+    devLog("TEMPORAL_ADDED_VISIBILITY_COMMITTED", {
+      projectId,
+      previousReleaseIdentifier,
+      releaseIdentifier: selectedReleaseIdentifier,
+      switchKey,
+      totalSwitchMs,
+      sourceCreationCountDuringSwitch: 0,
+      layerCreationCountDuringSwitch: 0,
+      setDataCountDuringSwitch: 0,
+      dataFetchCountDuringSwitch: 0,
+      readinessSource: "already_registered",
+    });
+
+    const visualStartedAt = performance.now();
+    requestAnimationFrame(() => {
+      if (activeTemporalAddedSwitchKeyRef.current !== switchKey) {
+        return;
+      }
+      requestAnimationFrame(() => {
+        if (activeTemporalAddedSwitchKeyRef.current !== switchKey) {
+          return;
+        }
+        devLog("TEMPORAL_ADDED_VISUAL_READY", {
+          projectId,
+          releaseIdentifier: selectedReleaseIdentifier,
+          switchKey,
+          renderReadyMs: Math.round(performance.now() - visualStartedAt),
+          totalSwitchMs,
+          featureCount: totalFeatureCount,
+          payloadBytes: totalPayloadBytes,
+          readinessSource: "render_frame",
+        });
+      });
+    });
+  }, [
+    layerState,
+    temporalAddedOverlayTimeline,
+    temporalAvailableMilestoneIds,
+    temporalPresentation,
+    temporalProjectId,
+    temporalSelectedMilestoneIndex,
+    workflowMode,
   ]);
 
   useEffect(() => {
@@ -3344,6 +3887,47 @@ export function MapView({
             },
           ] satisfies LayerEntry[])
       : ([] satisfies LayerEntry[]);
+  useEffect(() => {
+    if (!hasTemporalMosaicLayerContext || !temporalPresentation?.selectedReleaseIdentifier) {
+      return;
+    }
+    for (const entry of analysisSectionEntries) {
+      const enabled = entry.enabled;
+      const reason = enabled
+        ? "available"
+        : !selectedTemporalMilestoneReady
+          ? "unsupported_for_baseline"
+          : "empty_geojson";
+      devLog("TEMPORAL_OUTPUT_LAYER_AVAILABILITY", {
+        projectId: temporalPresentation.projectId,
+        releaseIdentifier: temporalPresentation.selectedReleaseIdentifier,
+        layerKey: entry.key,
+        enabled,
+        reason,
+      });
+      devLog(enabled ? "TEMPORAL_OUTPUT_LAYER_ENABLED" : "TEMPORAL_OUTPUT_LAYER_DISABLED", {
+        projectId: temporalPresentation.projectId,
+        releaseIdentifier: temporalPresentation.selectedReleaseIdentifier,
+        layerKey: entry.key,
+        reason,
+      });
+    }
+  }, [
+    hasTemporalMosaicLayerContext,
+    selectedTemporalMilestoneReady,
+    temporalPresentation?.projectId,
+    temporalPresentation?.selectedReleaseIdentifier,
+    temporalVectors.temporalAdditions.features.length,
+    temporalVectors.temporalConvexHull.features.length,
+    temporalVectors.temporalCumulative.features.length,
+    temporalVectors.temporalCumulativeBuffer10m.features.length,
+    temporalVectors.temporalCumulativeBuffer15m.features.length,
+    temporalVectors.temporalCumulativeBuffer20m.features.length,
+    temporalVectors.temporalCumulativeGrowthEnvelope.features.length,
+    pairwiseBuffers.buffer10m.features.length,
+    pairwiseBuffers.buffer15m.features.length,
+    pairwiseBuffers.buffer20m.features.length,
+  ]);
   const showLayerPanel = hasPairwiseLayerContext || hasTemporalMosaicLayerContext || referenceLayers.length > 0;
   const renderLayerEntry = (entry: LayerEntry) => (
     <label

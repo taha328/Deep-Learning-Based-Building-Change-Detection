@@ -199,7 +199,13 @@ def resolve_artifact_path(request_dir: Path, artifact: dict[str, Any]) -> Path:
     return (request_dir / path).resolve()
 
 
-def build_manifest(run_id: str, request_dir: Path, artifacts: list[dict[str, Any]]) -> dict[str, Any]:
+def build_manifest(
+    run_id: str,
+    request_dir: Path,
+    artifacts: list[dict[str, Any]],
+    *,
+    run_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     request_dir = request_dir.resolve()
     tmp_dir = _tmp_dir_for_run(request_dir, run_id)
     entries: dict[str, dict[str, Any]] = {}
@@ -287,11 +293,14 @@ def build_manifest(run_id: str, request_dir: Path, artifacts: list[dict[str, Any
                 run_id=run_id,
             )
 
-    return {
+    manifest = {
         "run_id": run_id,
         "request_dir": str(request_dir),
         "artifacts": list(entries.values()),
     }
+    if run_metadata:
+        manifest.update(run_metadata)
+    return manifest
 
 
 def iter_artifacts_by_type(request_dir: Path, artifact_type: str) -> list[Path]:

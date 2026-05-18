@@ -19,6 +19,26 @@ export interface TemporalReferenceImageryPresentation {
   tileSize: number;
 }
 
+export interface TemporalAddedOverlayPresentation {
+  releaseIdentifier: string;
+  status: "pending" | "validated" | "complete" | "error" | null;
+  additions: FeatureCollection;
+  buffer10m: FeatureCollection;
+  buffer15m: FeatureCollection;
+  buffer20m: FeatureCollection;
+  cumulativeBuffer10m: FeatureCollection;
+  cumulativeBuffer15m: FeatureCollection;
+  cumulativeBuffer20m: FeatureCollection;
+  automatedCandidate: FeatureCollection;
+  automatedBuildingBlocks: FeatureCollection;
+  effectiveBuildingBlocks: FeatureCollection;
+  cumulativeConvexHull: FeatureCollection;
+  cumulativeUnion: FeatureCollection;
+  cumulativeGrowthBlocks: FeatureCollection;
+  cumulativeGrowthEnvelope: FeatureCollection;
+  manualOverride: FeatureCollection;
+}
+
 export interface TemporalMapPresentation {
   projectId: string | null;
   projectUpdatedAt: string | null;
@@ -30,6 +50,7 @@ export interface TemporalMapPresentation {
   milestoneCount: number;
   referenceImagery: TemporalReferenceImageryPresentation | null;
   referenceImageryTimeline: TemporalReferenceImageryPresentation[];
+  addedOverlayTimeline: TemporalAddedOverlayPresentation[];
   referenceImageryUrl: string | null;
   referenceImageryBounds: [number, number, number, number] | null;
   automatedCandidate: FeatureCollection;

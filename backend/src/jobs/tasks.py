@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from time import perf_counter
 from typing import Any
 
@@ -21,6 +22,9 @@ from src.repositories.job_repository import (
 )
 from src.repositories.run_repository import get_latest_detection_run_id, get_latest_temporal_run_id
 from src.schemas import RunRequest, RunResponse, TemporalProjectRunResponse
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class JobCancelledError(RuntimeError):
@@ -54,6 +58,19 @@ def _resolve_settings(settings_payload: dict[str, Any] | None = None) -> Setting
 def _build_execution_config(request: RunRequest, settings: Settings) -> PipelineExecutionConfig:
     del request
     return resolve_configured_inference_execution_config(settings)
+
+
+def _log_worker_effective_backend(*, job_id: str, job_kind: str, settings: Settings) -> None:
+    checkpoint_path = settings.s2looking_checkpoint_path if settings.inference_backend == "mtgcdnet_s2looking_mps" else settings.bandon_checkpoint_path
+    threshold = settings.s2looking_change_threshold if settings.inference_backend == "mtgcdnet_s2looking_mps" else settings.default_change_threshold
+    LOGGER.info(
+        "CELERY_EFFECTIVE_INFERENCE_BACKEND jobId=%s jobKind=%s value=%s checkpointPath=%s threshold=%s",
+        job_id,
+        job_kind,
+        settings.inference_backend,
+        checkpoint_path,
+        threshold,
+    )
 
 
 def _cancel_if_requested(job_id: str, settings: Settings) -> None:
@@ -161,6 +178,7 @@ def _latest_temporal_run_id(project_id: str, settings: Settings) -> str | None:
 @celery_app.task(bind=True, name="building_change.run_temporal_project")
 def run_temporal_project_job(self, job_id: str, project_id: str, settings_payload: dict[str, Any] | None = None) -> dict[str, Any]:
     settings = _resolve_settings(settings_payload)
+    _log_worker_effective_backend(job_id=job_id, job_kind="temporal_project", settings=settings)
     timer = StageTimer()
     try:
         skipped_result = _prepare_job_for_execution(job_id, settings)
@@ -212,6 +230,7 @@ def run_temporal_project_job(self, job_id: str, project_id: str, settings_payloa
 @celery_app.task(bind=True, name="building_change.run_detection")
 def run_detection_job(self, job_id: str, request_payload: dict[str, Any], settings_payload: dict[str, Any] | None = None) -> dict[str, Any]:
     settings = _resolve_settings(settings_payload)
+    _log_worker_effective_backend(job_id=job_id, job_kind="detection", settings=settings)
     timer = StageTimer()
     try:
         request = RunRequest.model_validate(request_payload)

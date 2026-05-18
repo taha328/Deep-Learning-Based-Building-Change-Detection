@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 
 from src.config import Settings
 from src.core_api import probe_backends_api, run_detection_api, validate_request_api
+from src.domain.wayback import WaybackRelease
 from src.execution_profiles import PipelineExecutionConfig, resolve_backend
 from src.domain.local_inference import LocalRuntimeProbe
+from src.services.validation import validate_request
 from src.schemas import RunRequest, ValidationRequest
 
 
@@ -27,6 +31,27 @@ def _sample_request() -> ValidationRequest:
             "mode": "full_run",
         }
     )
+
+
+def _sample_releases(settings: Settings) -> list[WaybackRelease]:
+    return [
+        WaybackRelease(
+            identifier="WB_2023_R01",
+            release_date=date(2023, 1, 1),
+            label="2023-01-01 | WB_2023_R01",
+            release_num=1,
+            tile_matrix_sets=(settings.tile_matrix_set,),
+            resource_url_template="https://example.com/{TileMatrixSet}/{TileMatrix}/{TileRow}/{TileCol}.png",
+        ),
+        WaybackRelease(
+            identifier="WB_2026_R03",
+            release_date=date(2026, 3, 1),
+            label="2026-03-01 | WB_2026_R03",
+            release_num=2,
+            tile_matrix_sets=(settings.tile_matrix_set,),
+            resource_url_template="https://example.com/{TileMatrixSet}/{TileMatrix}/{TileRow}/{TileCol}.png",
+        ),
+    ]
 
 
 def test_hugging_face_gpu_backend_requires_spaces() -> None:
@@ -134,3 +159,78 @@ def test_bandon_backend_returns_backend_unavailable_when_runtime_missing(monkeyp
     response = run_detection_api(request, settings=Settings(), execution_config=config)
     assert response.success is False
     assert response.error_code == "backend_unavailable"
+
+
+def test_bandon_request_hash_context_separates_effective_backend_checkpoint_and_threshold(tmp_path) -> None:
+    bandon_checkpoint = tmp_path / "bandon.pth"
+    s2_checkpoint = tmp_path / "s2looking.pth"
+    bandon_checkpoint.write_bytes(b"bandon-checkpoint")
+    s2_checkpoint.write_bytes(b"s2looking-checkpoint")
+    backend = resolve_backend(PipelineExecutionConfig(model_backend="bandon_mps"), settings=Settings())
+
+    bandon_settings = Settings(
+        inference_backend="bandon_mps",
+        bandon_checkpoint_path=bandon_checkpoint,
+        default_change_threshold=0.35,
+    )
+    s2_settings = Settings(
+        inference_backend="mtgcdnet_s2looking_mps",
+        bandon_checkpoint_path=bandon_checkpoint,
+        s2looking_checkpoint_path=s2_checkpoint,
+        s2looking_change_threshold=0.50,
+    )
+    threshold_settings = Settings(
+        inference_backend="bandon_mps",
+        bandon_checkpoint_path=bandon_checkpoint,
+        default_change_threshold=0.45,
+    )
+
+    bandon_context = backend.request_hash_context(bandon_settings)
+    s2_context = backend.request_hash_context(s2_settings)
+    threshold_context = backend.request_hash_context(threshold_settings)
+
+    assert bandon_context["effective_backend"] == "bandon_mps"
+    assert s2_context["effective_backend"] == "mtgcdnet_s2looking_mps"
+    assert bandon_context["bandon_checkpoint_sha256"] != s2_context["bandon_checkpoint_sha256"]
+    assert bandon_context["change_threshold"] != threshold_context["change_threshold"]
+
+
+def test_prepared_request_hash_changes_when_backend_identity_changes(tmp_path) -> None:
+    bandon_checkpoint = tmp_path / "bandon.pth"
+    s2_checkpoint = tmp_path / "s2looking.pth"
+    bandon_checkpoint.write_bytes(b"bandon-checkpoint")
+    s2_checkpoint.write_bytes(b"s2looking-checkpoint")
+    backend = resolve_backend(PipelineExecutionConfig(model_backend="bandon_mps"), settings=Settings())
+    request = _sample_request()
+
+    bandon_settings = Settings(
+        inference_backend="bandon_mps",
+        bandon_checkpoint_path=bandon_checkpoint,
+        full_limits={"name": "full_run", "label": "Full Run", "max_area_m2": 2_000_000.0, "max_scene_tiles": 400, "max_remote_patches_per_scene": 1},
+    )
+    s2_settings = Settings(
+        inference_backend="mtgcdnet_s2looking_mps",
+        bandon_checkpoint_path=bandon_checkpoint,
+        s2looking_checkpoint_path=s2_checkpoint,
+        s2looking_change_threshold=0.50,
+        full_limits={"name": "full_run", "label": "Full Run", "max_area_m2": 2_000_000.0, "max_scene_tiles": 400, "max_remote_patches_per_scene": 1},
+    )
+
+    _, bandon_prepared = validate_request(
+        request,
+        releases=_sample_releases(bandon_settings),
+        settings=backend.configure_settings(bandon_settings),
+        remote_patch_budget_enabled=False,
+        request_hash_context=backend.request_hash_context(bandon_settings),
+    )
+    _, s2_prepared = validate_request(
+        request,
+        releases=_sample_releases(s2_settings),
+        settings=backend.configure_settings(s2_settings),
+        remote_patch_budget_enabled=False,
+        request_hash_context=backend.request_hash_context(s2_settings),
+    )
+
+    assert bandon_prepared is not None
+    assert s2_prepared is not None
+    assert bandon_prepared.request_hash != s2_prepared.request_hash

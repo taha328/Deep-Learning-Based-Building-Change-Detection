@@ -68,6 +68,7 @@ import { downloadFileFromUrl } from "@/lib/download";
 import { useI18n } from "@/lib/i18n";
 import { getProjectDisplayName } from "@/lib/project-summary";
 import { createActiveRunProgress, createCompletedRunProgress, createErrorRunProgress } from "@/lib/run-progress";
+import { relayClientLog } from "@/lib/client-log-relay";
 import { AOIImportModal } from "@/features/aoi/AOIImportModal";
 import { RunProgressPanel } from "@/features/results/RunProgressPanel";
 import { GeometryImportModal } from "@/features/temporal/GeometryImportModal";
@@ -403,6 +404,10 @@ function hasMilestoneBufferFeatures(milestone: TemporalMilestone): boolean {
   );
 }
 
+function isTemporalMilestoneReferenceLayer(layer: ReferenceLayer): boolean {
+  return layer.storage_strategy === "raster_tiles" && layer.layer_id.startsWith("temporal-reference-");
+}
+
 function hasValidRasterBounds(bounds: number[] | null | undefined): bounds is [number, number, number, number] {
   return Array.isArray(bounds) && bounds.length >= 4 && bounds.every((value) => Number.isFinite(value));
 }
@@ -528,6 +533,9 @@ export function TemporalMosaicPanel({
   const setIsRunning = useAppStore((state) => state.setIsRunning);
   const previousAoiRef = useRef<Polygon | null>(aoi);
   const latestProjectLoadRef = useRef<string | null>(null);
+  const referenceRepairReloadRef = useRef<string | null>(null);
+  const referenceRepairAttemptedRef = useRef<Set<string>>(new Set());
+  const referenceRepairAbortRef = useRef<AbortController | null>(null);
 
   const { t, language } = useI18n();
   const locale = language === "fr" ? "fr-FR" : "en-GB";
@@ -543,7 +551,25 @@ export function TemporalMosaicPanel({
 
   const referenceLayersQuery = useQuery({
     queryKey: ["reference-layers", project?.project_id],
-    queryFn: () => listReferenceLayers(project?.project_id ?? ""),
+    queryFn: async ({ signal }) => {
+      const projectId = project?.project_id ?? "";
+      const startedAt = performance.now();
+      const milestoneCount = project?.milestones.length ?? 0;
+      const milestoneReferenceImageryCount = project?.milestones.filter((milestone) => Boolean(milestone.reference_imagery)).length ?? 0;
+      relayClientLog("TEMPORAL_REFERENCE_LAYERS_FETCH_START", {
+        projectId,
+        reason: "query",
+        milestoneCount,
+        milestoneReferenceImageryCount,
+      });
+      const layers = await listReferenceLayers(projectId, { signal });
+      relayClientLog("TEMPORAL_REFERENCE_LAYERS_FETCH_DONE", {
+        projectId,
+        count: layers.length,
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+      return layers;
+    },
     enabled: Boolean(project?.project_id),
   });
 
@@ -650,6 +676,7 @@ export function TemporalMosaicPanel({
       setProgressMetricsVisible(true);
       setProject(response.project);
       setValidation(null);
+      void queryClient.invalidateQueries({ queryKey: ["reference-layers", response.project.project_id] });
       void queryClient.invalidateQueries({ queryKey: ["temporal-projects"] });
     },
     onError: (error) => {
@@ -801,16 +828,273 @@ export function TemporalMosaicPanel({
     () => project?.milestones.find((item) => item.release_identifier === selectedMilestoneId) ?? null,
     [project, selectedMilestoneId],
   );
+  const milestoneCount = project?.milestones.length ?? 0;
+  const milestoneReferenceImageryCount = useMemo(
+    () => project?.milestones.filter((milestone) => Boolean(milestone.reference_imagery)).length ?? 0,
+    [project?.milestones],
+  );
+  const completedMilestoneCount = useMemo(
+    () => project?.milestones.filter((milestone) => milestone.status === "complete").length ?? 0,
+    [project?.milestones],
+  );
 
   const referenceLayers = referenceLayersQuery.data ?? [];
+  const temporalReferenceLayers = useMemo(() => referenceLayers.filter(isTemporalMilestoneReferenceLayer), [referenceLayers]);
+  const manualReferenceLayers = useMemo(
+    () => referenceLayers.filter((layer) => !isTemporalMilestoneReferenceLayer(layer)),
+    [referenceLayers],
+  );
+
+  useEffect(() => {
+    if (!project?.project_id || !referenceLayersQuery.isSuccess) {
+      return;
+    }
+    relayClientLog("REFERENCE_LAYER_PANEL_FILTERED_TEMPORAL_REFERENCES", {
+      projectId: project.project_id,
+      totalReferenceLayers: referenceLayers.length,
+      userImportedCount: manualReferenceLayers.length,
+      temporalReferenceFilteredCount: temporalReferenceLayers.length,
+    });
+  }, [
+    manualReferenceLayers.length,
+    project?.project_id,
+    referenceLayers.length,
+    referenceLayersQuery.isSuccess,
+    temporalReferenceLayers.length,
+  ]);
+
+  useEffect(() => {
+    if (!project?.project_id || !referenceLayersQuery.isSuccess) {
+      return;
+    }
+    const repairedReferenceLayerCount = temporalReferenceLayers.length;
+    if (repairedReferenceLayerCount <= 0) {
+      return;
+    }
+    if (milestoneReferenceImageryCount >= repairedReferenceLayerCount) {
+      relayClientLog("TEMPORAL_REFERENCE_UI_ENABLED", {
+        projectId: project.project_id,
+        referenceLayerCount: repairedReferenceLayerCount,
+        source: "project_payload",
+      });
+      return;
+    }
+    const reloadKey = `${project.project_id}:${repairedReferenceLayerCount}:${project.updated_at ?? ""}`;
+    if (referenceRepairReloadRef.current === reloadKey) {
+      return;
+    }
+    referenceRepairReloadRef.current = reloadKey;
+    relayClientLog("TEMPORAL_REFERENCE_LAYERS_REPAIRED", {
+      projectId: project.project_id,
+      referenceLayerCount: repairedReferenceLayerCount,
+      milestoneReferenceImageryCount,
+    });
+    void getTemporalProject(project.project_id)
+      .then((loadedProject) => {
+        const hydratedProject = {
+          ...loadedProject,
+          milestones: [...loadedProject.milestones].sort(
+            (left, right) => Date.parse(left.release_date ?? "") - Date.parse(right.release_date ?? ""),
+          ),
+        };
+        setProject(hydratedProject);
+        if (!hydratedProject.milestones.some((milestone) => milestone.release_identifier === selectedMilestoneId)) {
+          setSelectedMilestoneId(preferredMilestoneId(hydratedProject));
+        }
+        relayClientLog("TEMPORAL_REFERENCE_UI_ENABLED", {
+          projectId: hydratedProject.project_id,
+          referenceLayerCount: hydratedProject.milestones.filter((milestone) => Boolean(milestone.reference_imagery)).length,
+          source: "reloaded_project",
+        });
+      })
+      .catch((error: unknown) => {
+        relayClientLog("TEMPORAL_REFERENCE_LAYERS_UNAVAILABLE", {
+          projectId: project.project_id,
+          reason: "project_reload_failed_after_reference_repair",
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+  }, [
+    project?.project_id,
+    project?.updated_at,
+    milestoneReferenceImageryCount,
+    referenceLayersQuery.isSuccess,
+    selectedMilestoneId,
+    setProject,
+    temporalReferenceLayers.length,
+  ]);
+
+  useEffect(() => {
+    if (!project?.project_id || milestoneCount === 0 || completedMilestoneCount === 0) {
+      return;
+    }
+    if (milestoneReferenceImageryCount >= milestoneCount) {
+      return;
+    }
+
+    const projectId = project.project_id;
+    const attemptKey = `${projectId}:${project.updated_at ?? ""}:${completedMilestoneCount}:${milestoneReferenceImageryCount}`;
+    if (referenceRepairAttemptedRef.current.has(attemptKey)) {
+      return;
+    }
+    referenceRepairAttemptedRef.current.add(attemptKey);
+
+    referenceRepairAbortRef.current?.abort();
+    const abortController = new AbortController();
+    referenceRepairAbortRef.current = abortController;
+    const startedAt = performance.now();
+
+    relayClientLog("TEMPORAL_REFERENCE_LAYERS_FETCH_START", {
+      projectId,
+      reason: "missing_milestone_reference_imagery",
+      milestoneCount,
+      milestoneReferenceImageryCount,
+    });
+
+    void queryClient
+      .fetchQuery({
+        queryKey: ["reference-layers", projectId],
+        staleTime: 0,
+        queryFn: () => listReferenceLayers(projectId, { signal: abortController.signal }),
+      })
+      .then((layers) => {
+        if (abortController.signal.aborted || projectId !== project?.project_id) {
+          return;
+        }
+        const durationMs = Math.round(performance.now() - startedAt);
+        const temporalLayerCount = layers.filter(isTemporalMilestoneReferenceLayer).length;
+        relayClientLog("TEMPORAL_REFERENCE_LAYERS_FETCH_DONE", {
+          projectId,
+          count: layers.length,
+          durationMs,
+        });
+        if (temporalLayerCount <= 0) {
+          relayClientLog("TEMPORAL_REFERENCE_LAYERS_UNAVAILABLE", {
+            projectId,
+            reason: "reference_layers_repair_returned_empty",
+            milestoneCount,
+            milestoneReferenceImageryCount,
+          });
+          return;
+        }
+
+        relayClientLog("TEMPORAL_REFERENCE_LAYERS_REPAIRED", {
+          projectId,
+          referenceLayerCount: temporalLayerCount,
+          milestoneReferenceImageryCount,
+          source: "reference_layers_repair",
+        });
+
+        void getTemporalProject(projectId)
+          .then((loadedProject) => {
+            if (abortController.signal.aborted || loadedProject.project_id !== projectId) {
+              return;
+            }
+            const hydratedProject = {
+              ...loadedProject,
+              milestones: [...loadedProject.milestones].sort(
+                (left, right) => Date.parse(left.release_date ?? "") - Date.parse(right.release_date ?? ""),
+              ),
+            };
+            const nextMilestoneReferenceImageryCount = hydratedProject.milestones.filter((milestone) =>
+              Boolean(milestone.reference_imagery),
+            ).length;
+            setProject(hydratedProject);
+            relayClientLog("TEMPORAL_REFERENCE_UI_ENABLED", {
+              projectId,
+              referenceLayerCount: temporalLayerCount,
+              milestoneReferenceImageryCount: nextMilestoneReferenceImageryCount,
+              source: "reference_layers_repair",
+            });
+          })
+          .catch((error: unknown) => {
+            if (abortController.signal.aborted) {
+              return;
+            }
+            relayClientLog("TEMPORAL_REFERENCE_LAYERS_UNAVAILABLE", {
+              projectId,
+              reason: "project_reload_failed_after_reference_repair",
+              error: error instanceof Error ? error.message : String(error),
+            });
+          });
+      })
+      .catch((error: unknown) => {
+        if (abortController.signal.aborted || (error instanceof DOMException && error.name === "AbortError")) {
+          return;
+        }
+        relayClientLog("TEMPORAL_REFERENCE_LAYERS_UNAVAILABLE", {
+          projectId,
+          reason: "reference_layers_fetch_failed",
+          error: error instanceof Error ? error.message : String(error),
+        });
+      })
+      .finally(() => {
+        if (referenceRepairAbortRef.current === abortController) {
+          referenceRepairAbortRef.current = null;
+        }
+      });
+
+    return () => {
+      if (referenceRepairAbortRef.current === abortController) {
+        referenceRepairAbortRef.current = null;
+        referenceRepairAttemptedRef.current.delete(attemptKey);
+        abortController.abort();
+      }
+    };
+  }, [
+    completedMilestoneCount,
+    milestoneCount,
+    milestoneReferenceImageryCount,
+    project?.project_id,
+    project?.updated_at,
+    queryClient,
+    setProject,
+  ]);
+
   const referenceLayerPresentation = useMemo(
     () =>
-      referenceLayers.map((layer) => ({
+      manualReferenceLayers.map((layer) => ({
         ...layer,
         resolvedDisplayUrl: layer.display_url ? new URL(layer.display_url, backendUrl).toString() : null,
         resolvedPmtilesUrl: layer.pmtiles_url ? new URL(layer.pmtiles_url, backendUrl).toString() : null,
       })),
-    [backendUrl, referenceLayers],
+    [backendUrl, manualReferenceLayers],
+  );
+
+  const addedOverlayTimeline = useMemo(
+    () =>
+      project?.milestones.map((milestone, index) => ({
+        releaseIdentifier: milestone.release_identifier,
+        status: milestone.status,
+        additions: ensureFeatureCollection(milestone.additions_geojson),
+        buffer10m: ensureFeatureCollection(milestone.buffer_layers_geojson?.["10m"]),
+        buffer15m: ensureFeatureCollection(milestone.buffer_layers_geojson?.["15m"]),
+        buffer20m: ensureFeatureCollection(milestone.buffer_layers_geojson?.["20m"]),
+        cumulativeBuffer10m: mergeFeatureCollections(
+          project.milestones
+            .slice(0, index + 1)
+            .map((item) => ensureFeatureCollection(item.buffer_layers_geojson?.["10m"])),
+        ),
+        cumulativeBuffer15m: mergeFeatureCollections(
+          project.milestones
+            .slice(0, index + 1)
+            .map((item) => ensureFeatureCollection(item.buffer_layers_geojson?.["15m"])),
+        ),
+        cumulativeBuffer20m: mergeFeatureCollections(
+          project.milestones
+            .slice(0, index + 1)
+            .map((item) => ensureFeatureCollection(item.buffer_layers_geojson?.["20m"])),
+        ),
+        automatedCandidate: ensureFeatureCollection(milestone.automated_candidate_footprint_geojson),
+        automatedBuildingBlocks: ensureFeatureCollection(milestone.automated_building_blocks_geojson),
+        effectiveBuildingBlocks: ensureFeatureCollection(milestone.effective_building_blocks_geojson),
+        cumulativeConvexHull: ensureFeatureCollection(milestone.cumulative_convex_hull_geojson),
+        cumulativeUnion: ensureFeatureCollection(milestone.cumulative_union_geojson),
+        cumulativeGrowthBlocks: ensureFeatureCollection(milestone.cumulative_growth_blocks_geojson),
+        cumulativeGrowthEnvelope: ensureFeatureCollection(milestone.cumulative_growth_envelope_geojson),
+        manualOverride: ensureFeatureCollection(milestone.manual_override_geojson),
+      })) ?? [],
+    [project?.milestones],
   );
 
   useEffect(() => {
@@ -903,21 +1187,8 @@ export function TemporalMosaicPanel({
     const selectedMilestoneIndex = project.milestones.findIndex(
       (milestone) => milestone.release_identifier === selectedMilestone.release_identifier,
     );
-    const cumulativeBuffer10m = mergeFeatureCollections(
-      project.milestones
-        .slice(0, selectedMilestoneIndex + 1)
-        .map((milestone) => ensureFeatureCollection(milestone.buffer_layers_geojson?.["10m"])),
-    );
-    const cumulativeBuffer15m = mergeFeatureCollections(
-      project.milestones
-        .slice(0, selectedMilestoneIndex + 1)
-        .map((milestone) => ensureFeatureCollection(milestone.buffer_layers_geojson?.["15m"])),
-    );
-    const cumulativeBuffer20m = mergeFeatureCollections(
-      project.milestones
-        .slice(0, selectedMilestoneIndex + 1)
-        .map((milestone) => ensureFeatureCollection(milestone.buffer_layers_geojson?.["20m"])),
-    );
+    const selectedAddedOverlay =
+      addedOverlayTimeline.find((item) => item.releaseIdentifier === selectedMilestone.release_identifier) ?? null;
     const referenceImageryTimeline = project.milestones
       .filter((milestone) => milestone.reference_imagery)
       .map((milestone) => toReferenceImageryPresentation(milestone));
@@ -933,6 +1204,7 @@ export function TemporalMosaicPanel({
       milestoneCount: project.milestones.length,
       referenceImagery: referenceImagery ? toReferenceImageryPresentation(selectedMilestone) : null,
       referenceImageryTimeline,
+      addedOverlayTimeline,
       referenceImageryUrl,
       referenceImageryBounds,
       automatedCandidate: ensureFeatureCollection(selectedMilestone.automated_candidate_footprint_geojson),
@@ -944,9 +1216,9 @@ export function TemporalMosaicPanel({
         "15m": ensureFeatureCollection(selectedMilestone.buffer_layers_geojson?.["15m"]),
         "20m": ensureFeatureCollection(selectedMilestone.buffer_layers_geojson?.["20m"]),
       },
-      cumulativeBuffer10m,
-      cumulativeBuffer15m,
-      cumulativeBuffer20m,
+      cumulativeBuffer10m: selectedAddedOverlay?.cumulativeBuffer10m ?? EMPTY_FEATURE_COLLECTION,
+      cumulativeBuffer15m: selectedAddedOverlay?.cumulativeBuffer15m ?? EMPTY_FEATURE_COLLECTION,
+      cumulativeBuffer20m: selectedAddedOverlay?.cumulativeBuffer20m ?? EMPTY_FEATURE_COLLECTION,
       cumulativeUnion: ensureFeatureCollection(selectedMilestone.cumulative_union_geojson),
       cumulativeConvexHull: ensureFeatureCollection(selectedMilestone.cumulative_convex_hull_geojson),
       cumulativeGrowthBlocks: ensureFeatureCollection(selectedMilestone.cumulative_growth_blocks_geojson),
@@ -954,7 +1226,7 @@ export function TemporalMosaicPanel({
       manualOverride: ensureFeatureCollection(selectedMilestone.manual_override_geojson),
       referenceLayers: referenceLayerPresentation,
     });
-  }, [backendUrl, project, selectedMilestone, onMapPresentationChange, referenceLayerPresentation]);
+  }, [addedOverlayTimeline, backendUrl, project, selectedMilestone, onMapPresentationChange, referenceLayerPresentation]);
 
   const releasesById = useMemo(
     () => new Map(releases.map((release) => [release.identifier, release])),
@@ -1680,7 +1952,7 @@ export function TemporalMosaicPanel({
                       </Button>
                     </div>
 
-                    {referenceLayers.length ? (
+                    {manualReferenceLayers.length ? (
                       <Card className="border-sidebar-border bg-sidebar shadow-panel">
                         <CardContent className="space-y-3 p-4">
                           <div>
@@ -1688,7 +1960,7 @@ export function TemporalMosaicPanel({
                             <p className="text-caption text-muted-foreground">{t("reference_layer.layers_help")}</p>
                           </div>
                           <div className="space-y-3">
-                            {referenceLayers.map((layer) => (
+                            {manualReferenceLayers.map((layer) => (
                               <div key={layer.layer_id} className="rounded-lg border border-sidebar-border bg-card px-3 py-3">
                                 <div className="flex items-start justify-between gap-3">
                                   <div className="min-w-0">

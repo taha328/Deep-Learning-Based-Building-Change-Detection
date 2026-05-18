@@ -196,11 +196,12 @@ def write_run_manifest(
     artifacts: list[ArtifactEntry],
     *,
     extra_artifacts: list[dict[str, object]] | None = None,
+    run_metadata: dict[str, object] | None = None,
 ) -> Path:
     manifest_artifacts = [artifact.model_dump(mode="json") for artifact in artifacts]
     if extra_artifacts:
         manifest_artifacts.extend(extra_artifacts)
-    manifest = build_manifest(result_dir.name, result_dir, manifest_artifacts)
+    manifest = build_manifest(result_dir.name, result_dir, manifest_artifacts, run_metadata=run_metadata)
     return write_manifest_atomic(result_dir, manifest)
 
 

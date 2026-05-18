@@ -9,7 +9,7 @@ from shapely.ops import unary_union
 
 from src.config import Settings
 from src.domain.cache import save_cached_response
-from src.execution_profiles import PipelineExecutionConfig
+from src.execution_profiles import PipelineExecutionConfig, resolve_backend
 from src.schemas import PreviewImages, RunRequest, RunResponse, SummaryStats, TemporalMilestone, TemporalOverrideRequest, TemporalProject
 from src.domain.vectorize import build_temporal_growth_blocks, build_temporal_growth_envelope
 from src.services.releases import list_releases
@@ -91,22 +91,14 @@ def _bandon_pair_response(
     releases: list[WaybackRelease],
     geojson: dict,
 ) -> RunResponse:
+    backend = resolve_backend(PipelineExecutionConfig(model_backend="bandon_mps"), settings=settings)
+    configured_settings = backend.configure_settings(settings)
     validation, prepared = validate_request(
         request,
         releases=releases,
-        settings=settings,
+        settings=configured_settings,
         remote_patch_budget_enabled=False,
-        request_hash_context={
-            "model_backend": "bandon_mps",
-            "backend_mode": "bandon_mps",
-            "bandon_processing_version": 2,
-            "bandon_repo_dir": str(settings.bandon_repo_dir),
-            "bandon_env_prefix": str(settings.bandon_env_prefix),
-            "bandon_config_path": str(settings.bandon_config_path),
-            "bandon_checkpoint_path": str(settings.bandon_checkpoint_path),
-            "bandon_device": settings.bandon_device,
-            "bandon_allow_mps_fallback": settings.bandon_allow_mps_fallback,
-        },
+        request_hash_context=backend.request_hash_context(configured_settings),
     )
     assert prepared is not None
     assert not validation.blocking_errors
