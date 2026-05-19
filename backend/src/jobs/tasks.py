@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from time import perf_counter
 from typing import Any
 
@@ -63,6 +64,10 @@ def _build_execution_config(request: RunRequest, settings: Settings) -> Pipeline
 def _log_worker_effective_backend(*, job_id: str, job_kind: str, settings: Settings) -> None:
     checkpoint_path = settings.s2looking_checkpoint_path if settings.inference_backend == "mtgcdnet_s2looking_mps" else settings.bandon_checkpoint_path
     threshold = settings.s2looking_change_threshold if settings.inference_backend == "mtgcdnet_s2looking_mps" else settings.default_change_threshold
+    LOGGER.info("CELERY_PROCESS_PID=%s jobId=%s jobKind=%s", os.getpid(), job_id, job_kind)
+    LOGGER.info("CELERY_EFFECTIVE_INFERENCE_BACKEND=%s jobId=%s jobKind=%s", settings.inference_backend, job_id, job_kind)
+    LOGGER.info("CELERY_EFFECTIVE_CHECKPOINT_PATH=%s jobId=%s jobKind=%s", checkpoint_path, job_id, job_kind)
+    LOGGER.info("CELERY_EFFECTIVE_THRESHOLD=%s jobId=%s jobKind=%s", threshold, job_id, job_kind)
     LOGGER.info(
         "CELERY_EFFECTIVE_INFERENCE_BACKEND jobId=%s jobKind=%s value=%s checkpointPath=%s threshold=%s",
         job_id,

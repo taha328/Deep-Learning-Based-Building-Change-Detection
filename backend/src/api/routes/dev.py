@@ -13,7 +13,13 @@ from src.api.deps import get_app_settings
 router = APIRouter()
 logger = logging.getLogger(__name__)
 _MAX_RELAY_PAYLOAD_BYTES = 20_000
-_ALLOWED_EVENT_PREFIX = "TEMPORAL_REFERENCE_"
+_ALLOWED_EVENT_PREFIXES = (
+    "TEMPORAL_REFERENCE_",
+    "TEMPORAL_ADDED_",
+    "TEMPORAL_OUTPUT_",
+    "TEMPORAL_ACTIVE_",
+    "REFERENCE_LAYER_PANEL_",
+)
 
 
 class ClientLogRelayBody(BaseModel):
@@ -39,7 +45,7 @@ def relay_client_log(
 ) -> Response:
     if not getattr(settings, "enable_client_log_relay", True):
         return Response(status_code=status.HTTP_404_NOT_FOUND)
-    if not body.event.startswith(_ALLOWED_EVENT_PREFIX):
+    if not body.event.startswith(_ALLOWED_EVENT_PREFIXES):
         return Response(status_code=status.HTTP_204_NO_CONTENT)
     logger.info(
         "CLIENT_LOG event=%s payload=%s",

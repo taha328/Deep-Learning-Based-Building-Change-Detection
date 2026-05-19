@@ -175,6 +175,13 @@ type TemporalAddedLayerLifecycle = {
   payloadBytes: number;
 };
 
+type TemporalOutputLayerSyncResult = {
+  appliedCount: number;
+  hiddenCount: number;
+  skippedCount: number;
+  missingLayerCount: number;
+};
+
 let pmtilesProtocolRegistered = false;
 let pmtilesProtocol: Protocol | null = null;
 const DEV_LOGGING = import.meta.env.DEV;
@@ -186,8 +193,12 @@ function devLog(event: string, payload: Record<string, unknown>) {
   if (
     event.startsWith("TEMPORAL_REFERENCE_") ||
     event.startsWith("TEMPORAL_ADDED_") ||
-    event.startsWith("TEMPORAL_OUTPUT_")
+    event.startsWith("TEMPORAL_OUTPUT_") ||
+    event.startsWith("TEMPORAL_ACTIVE_")
   ) {
+    if (event.startsWith("TEMPORAL_OUTPUT_") || event.startsWith("TEMPORAL_ACTIVE_")) {
+      console.debug(event, payload);
+    }
     relayClientLog(event, payload);
     return;
   }
@@ -821,6 +832,272 @@ function ensureTemporalAddedLayer(
   return { sourceId, layerId, signature, previousSignature, mode, featureCount, payloadBytes };
 }
 
+function syncTemporalOutputLayers(params: {
+  map: MapLibreMap | null;
+  projectId: string | null;
+  activeReleaseIdentifier: string | null;
+  availableReleaseIdentifiers: string[];
+  layerState: LayerToggleState;
+  registeredLayerIds: Set<string>;
+}): TemporalOutputLayerSyncResult {
+  const { map, projectId, activeReleaseIdentifier, availableReleaseIdentifiers, layerState, registeredLayerIds } = params;
+  const emptyResult = { appliedCount: 0, hiddenCount: 0, skippedCount: registeredLayerIds.size, missingLayerCount: 0 };
+  const styleLoaded = Boolean(map?.isStyleLoaded());
+  const styleReady = isMapStyleReadyForLayerMutation(map);
+  const layerStateKeys = Object.keys(layerState);
+  const enabledLayerKeys = TEMPORAL_ADDED_LAYER_DEFINITIONS.filter((definition) => layerState[definition.toggleKey]).map(
+    (definition) => definition.toggleKey,
+  );
+  const temporalLayerCount = registeredLayerIds.size;
+  const expectedOutputLayerCount = availableReleaseIdentifiers.length * TEMPORAL_ADDED_LAYER_DEFINITIONS.length;
+  const expectedActiveLayerIds =
+    projectId && activeReleaseIdentifier
+      ? TEMPORAL_ADDED_LAYER_DEFINITIONS.map((definition) =>
+          temporalAddedLayerId(projectId, activeReleaseIdentifier, definition.kind),
+        )
+      : [];
+  const missingLayerIds = expectedActiveLayerIds.filter((layerId) => !registeredLayerIds.has(layerId));
+  const startPayload = {
+    projectId,
+    activeReleaseIdentifier,
+    releaseIdentifier: activeReleaseIdentifier,
+    hasMap: Boolean(map),
+    styleLoaded,
+    styleReady,
+    layerStateKeys,
+    enabledLayerKeys,
+    temporalLayerCount,
+    expectedOutputLayerCount,
+    missingLayerIds,
+  };
+  if (DEV_LOGGING) {
+    console.debug("TEMPORAL_OUTPUT_LAYER_SYNC_START", startPayload);
+  }
+  devLog("TEMPORAL_OUTPUT_LAYER_SYNC_START", startPayload);
+
+  if (!map) {
+    const skippedPayload = {
+      projectId,
+      activeReleaseIdentifier,
+      releaseIdentifier: activeReleaseIdentifier,
+      reason: "missing_map",
+      hasMap: false,
+      styleLoaded,
+      styleReady,
+      temporalLayerCount,
+      expectedOutputLayerCount,
+      missingLayerIds,
+    };
+    if (DEV_LOGGING) {
+      console.debug("TEMPORAL_OUTPUT_LAYER_SYNC_SKIPPED", skippedPayload);
+    }
+    devLog("TEMPORAL_OUTPUT_LAYER_SYNC_SKIPPED", skippedPayload);
+    return emptyResult;
+  }
+  if (!styleReady) {
+    const skippedPayload = {
+      projectId,
+      activeReleaseIdentifier,
+      releaseIdentifier: activeReleaseIdentifier,
+      reason: "style_not_loaded",
+      hasMap: true,
+      styleLoaded,
+      styleReady: false,
+      temporalLayerCount,
+      expectedOutputLayerCount,
+      missingLayerIds,
+    };
+    if (DEV_LOGGING) {
+      console.debug("TEMPORAL_OUTPUT_LAYER_SYNC_SKIPPED", skippedPayload);
+    }
+    devLog("TEMPORAL_OUTPUT_LAYER_SYNC_SKIPPED", skippedPayload);
+    return emptyResult;
+  }
+  if (!projectId) {
+    const skippedPayload = {
+      projectId,
+      activeReleaseIdentifier,
+      releaseIdentifier: activeReleaseIdentifier,
+      reason: "missing_project",
+      hasMap: true,
+      styleLoaded,
+      styleReady,
+      temporalLayerCount,
+      expectedOutputLayerCount,
+      missingLayerIds,
+    };
+    if (DEV_LOGGING) {
+      console.debug("TEMPORAL_OUTPUT_LAYER_SYNC_SKIPPED", skippedPayload);
+    }
+    devLog("TEMPORAL_OUTPUT_LAYER_SYNC_SKIPPED", skippedPayload);
+    return emptyResult;
+  }
+  if (!activeReleaseIdentifier) {
+    const skippedPayload = {
+      projectId,
+      activeReleaseIdentifier,
+      releaseIdentifier: activeReleaseIdentifier,
+      reason: "missing_active_release",
+      hasMap: true,
+      styleLoaded,
+      styleReady,
+      temporalLayerCount,
+      expectedOutputLayerCount,
+      missingLayerIds,
+    };
+    if (DEV_LOGGING) {
+      console.debug("TEMPORAL_OUTPUT_LAYER_SYNC_SKIPPED", skippedPayload);
+    }
+    devLog("TEMPORAL_OUTPUT_LAYER_SYNC_SKIPPED", skippedPayload);
+    return emptyResult;
+  }
+  if (temporalLayerCount === 0) {
+    const skippedPayload = {
+      projectId,
+      activeReleaseIdentifier,
+      releaseIdentifier: activeReleaseIdentifier,
+      reason: "no_temporal_output_layers",
+      hasMap: true,
+      styleLoaded,
+      styleReady,
+      temporalLayerCount,
+      expectedOutputLayerCount,
+      enabledLayerKeys,
+      missingLayerIds,
+    };
+    if (DEV_LOGGING) {
+      console.debug("TEMPORAL_OUTPUT_LAYER_SYNC_SKIPPED", skippedPayload);
+    }
+    devLog("TEMPORAL_OUTPUT_LAYER_SYNC_SKIPPED", skippedPayload);
+    return emptyResult;
+  }
+  if (enabledLayerKeys.length === 0) {
+    devLog("TEMPORAL_OUTPUT_LAYER_SYNC_SKIPPED", {
+      projectId,
+      activeReleaseIdentifier,
+      releaseIdentifier: activeReleaseIdentifier,
+      reason: "no_enabled_layer_keys",
+      hasMap: true,
+      styleLoaded,
+      styleReady,
+      temporalLayerCount,
+      expectedOutputLayerCount,
+      missingLayerIds,
+    });
+  }
+  if (missingLayerIds.length > 0) {
+    devLog("TEMPORAL_OUTPUT_LAYER_SYNC_SKIPPED", {
+      projectId,
+      activeReleaseIdentifier,
+      releaseIdentifier: activeReleaseIdentifier,
+      reason: "missing_layer_ids",
+      hasMap: true,
+      styleLoaded,
+      styleReady,
+      temporalLayerCount,
+      expectedOutputLayerCount,
+      missingLayerIds,
+    });
+  }
+
+  let appliedCount = 0;
+  let hiddenCount = 0;
+  let skippedCount = 0;
+  let missingLayerCount = 0;
+  const visibleLayerIds: string[] = [];
+  const hiddenLayerIds: string[] = [];
+  for (const layerId of registeredLayerIds) {
+    const activeDefinition = TEMPORAL_ADDED_LAYER_DEFINITIONS.find(
+      (definition) => layerId === temporalAddedLayerId(projectId, activeReleaseIdentifier, definition.kind),
+    );
+    const matchingReleaseIdentifier =
+      activeReleaseIdentifier && activeDefinition
+        ? activeReleaseIdentifier
+        : availableReleaseIdentifiers.find((releaseIdentifier) =>
+            TEMPORAL_ADDED_LAYER_DEFINITIONS.some(
+              (definition) => layerId === temporalAddedLayerId(projectId, releaseIdentifier, definition.kind),
+            ),
+          );
+    const mapLayerExists = Boolean(map.getLayer(layerId));
+    const visible = Boolean(mapLayerExists && activeDefinition && layerState[activeDefinition.toggleKey]);
+
+    if (!mapLayerExists) {
+      skippedCount += 1;
+      missingLayerCount += 1;
+      devLog("TEMPORAL_OUTPUT_LAYER_SYNC_APPLY", {
+        projectId,
+        releaseIdentifier: matchingReleaseIdentifier ?? activeReleaseIdentifier,
+        layerId,
+        visible: false,
+        reason: "missing_layer",
+      });
+      continue;
+    }
+
+    setLayerVisibility(map, layerId, visible);
+    appliedCount += 1;
+    if (!visible) {
+      hiddenCount += 1;
+      hiddenLayerIds.push(layerId);
+    } else {
+      visibleLayerIds.push(layerId);
+    }
+
+    if (activeDefinition) {
+      devLog("TEMPORAL_OUTPUT_LAYER_FILTER_APPLIED", {
+        projectId,
+        layerId,
+        layerKey: activeDefinition.toggleKey,
+        releaseIdentifier: activeReleaseIdentifier,
+        filter: { mode: "separate_release_layer", releaseIdentifier: activeReleaseIdentifier },
+        visible,
+      });
+    } else {
+      devLog("TEMPORAL_OUTPUT_LAYER_FILTER_APPLIED", {
+        projectId,
+        layerId,
+        releaseIdentifier: matchingReleaseIdentifier ?? "unknown",
+        activeReleaseIdentifier,
+        filter: { mode: "hide_non_active_release", releaseIdentifier: matchingReleaseIdentifier ?? "unknown" },
+        visible: false,
+      });
+    }
+
+    devLog("TEMPORAL_OUTPUT_LAYER_SYNC_APPLY", {
+      projectId,
+      releaseIdentifier: matchingReleaseIdentifier ?? activeReleaseIdentifier,
+      layerKey: activeDefinition?.toggleKey ?? "non_active_release",
+      layerId,
+      visible,
+      reason: activeDefinition ? "active_release_state" : "non_active_release",
+    });
+
+    if (visible) {
+      map.moveLayer(layerId);
+    }
+  }
+
+  map.triggerRepaint();
+  const donePayload = {
+    projectId,
+    activeReleaseIdentifier,
+    releaseIdentifier: activeReleaseIdentifier,
+    appliedCount,
+    hiddenCount,
+    skippedCount,
+    registeredLayerCount: registeredLayerIds.size,
+    enabledLayerKeys,
+    visibleLayerIds,
+    hiddenLayerIds,
+    missingLayerIds,
+  };
+  if (DEV_LOGGING) {
+    console.debug("TEMPORAL_OUTPUT_LAYER_SYNC_DONE", donePayload);
+  }
+  devLog("TEMPORAL_OUTPUT_LAYER_SYNC_DONE", donePayload);
+  return { appliedCount, hiddenCount, skippedCount, missingLayerCount };
+}
+
 function temporalReferenceSourceSignature(
   projectId: string | null,
   imagery: TemporalReferenceImageryPresentation,
@@ -1242,6 +1519,17 @@ function setLayerVisibility(map: MapLibreMap, layerId: string, visible: boolean)
     return;
   }
   map.setLayoutProperty(layerId, "visibility", visible ? "visible" : "none");
+}
+
+function isMapStyleReadyForLayerMutation(map: MapLibreMap | null): boolean {
+  if (!map) {
+    return false;
+  }
+  try {
+    return Array.isArray(map.getStyle()?.layers);
+  } catch {
+    return false;
+  }
 }
 
 function referenceSourceId(layerId: string) {
@@ -1873,6 +2161,7 @@ export function MapView({
   const mapRef = useRef<maplibregl.Map | null>(null);
   const markersRef = useRef<maplibregl.Marker[]>([]);
   const [mapError, setMapError] = useState<string | null>(null);
+  const [mapStyleRevision, setMapStyleRevision] = useState(0);
   const [layersOpen, setLayersOpen] = useState(false);
   const [layerState, setLayerState] = useState<LayerToggleState>(() => defaultLayerState("pairwise", false));
   const [searchValue, setSearchValue] = useState("");
@@ -1892,6 +2181,7 @@ export function MapView({
   const temporalAddedSourceSignaturesRef = useRef<Record<string, string>>({});
   const temporalAddedRegistrationKeyRef = useRef<string | null>(null);
   const temporalAddedRegistrationStatsRef = useRef<Record<string, { featureCount: number; payloadBytes: number }>>({});
+  const temporalAddedSyncRetryKeyRef = useRef<string | null>(null);
   const activeTemporalAddedProjectIdRef = useRef<string | null>(null);
   const activeTemporalAddedReleaseIdentifierRef = useRef<string | null>(null);
   const activeTemporalAddedSwitchKeyRef = useRef<string | null>(null);
@@ -2024,6 +2314,29 @@ export function MapView({
   const temporalHydratingProject =
     workflowMode === "temporal" ? temporalPresentation?.isHydratingProject ?? false : false;
   const temporalProjectId = workflowMode === "temporal" ? temporalPresentation?.projectId ?? null : null;
+  const getTemporalOutputSyncLayerState = useCallback(
+    (projectIdForSync: string | null): LayerToggleState => {
+      if (!projectIdForSync) {
+        return layerState;
+      }
+      const expectedScopeKey = `temporal:${projectIdForSync}`;
+      if (activeLayerStateScopeRef.current === expectedScopeKey) {
+        return layerState;
+      }
+      const defaultTemporalState = defaultLayerState("temporal", false);
+      devLog("TEMPORAL_OUTPUT_LAYER_STATE_DEFAULTED_FOR_SYNC", {
+        projectId: projectIdForSync,
+        reason: "temporal_scope_not_initialized",
+        expectedScopeKey,
+        activeScopeKey: activeLayerStateScopeRef.current,
+        enabledLayerKeys: TEMPORAL_ADDED_LAYER_DEFINITIONS.filter((definition) => defaultTemporalState[definition.toggleKey]).map(
+          (definition) => definition.toggleKey,
+        ),
+      });
+      return defaultTemporalState;
+    },
+    [layerState],
+  );
   const overlayBounds = useMemo(() => {
     if (workflowMode === "pairwise" && hasValidRasterBounds(result?.preview_images?.raster_bounds_wgs84)) {
       return imageCoordinatesFromBBox(result.preview_images.raster_bounds_wgs84);
@@ -2658,6 +2971,21 @@ export function MapView({
         totalSwitchMs: Math.round(performance.now() - switchStartedAt),
         visualReadyMs: result.visualReadyMs,
       });
+      devLog("TEMPORAL_OUTPUT_SYNC_TRIGGER_AFTER_REFERENCE_COMMIT", {
+        projectId,
+        releaseIdentifier,
+        hasSyncFunction: true,
+        layerStateKeys: Object.keys(layerState),
+        temporalLayerCount: temporalAddedLayerIdsRef.current.size,
+      });
+      syncTemporalOutputLayers({
+        map,
+        projectId,
+        activeReleaseIdentifier: releaseIdentifier,
+        availableReleaseIdentifiers: temporalAvailableMilestoneIds,
+        layerState: getTemporalOutputSyncLayerState(projectId),
+        registeredLayerIds: temporalAddedLayerIdsRef.current,
+      });
       return true;
     };
 
@@ -2995,6 +3323,21 @@ export function MapView({
         layerExists: Boolean(map.getLayer(selectedLayerId)),
         totalSwitchMs: Math.round(performance.now() - switchStartedAt),
       });
+      devLog("TEMPORAL_OUTPUT_SYNC_TRIGGER_AFTER_REFERENCE_COMMIT", {
+        projectId,
+        releaseIdentifier: temporalReferenceImagery.releaseIdentifier,
+        hasSyncFunction: true,
+        layerStateKeys: Object.keys(layerState),
+        temporalLayerCount: temporalAddedLayerIdsRef.current.size,
+      });
+      syncTemporalOutputLayers({
+        map,
+        projectId,
+        activeReleaseIdentifier: temporalReferenceImagery.releaseIdentifier,
+        availableReleaseIdentifiers: temporalAvailableMilestoneIds,
+        layerState: getTemporalOutputSyncLayerState(projectId),
+        registeredLayerIds: temporalAddedLayerIdsRef.current,
+      });
       preloadNeighbors(neighborImagery);
       return;
     }
@@ -3044,7 +3387,9 @@ export function MapView({
 
     return;
   }, [
+    layerState,
     layerState.temporalReferenceImagery,
+    getTemporalOutputSyncLayerState,
     referenceLayers,
     temporalPresentation,
     temporalAvailableMilestoneIds,
@@ -3058,6 +3403,7 @@ export function MapView({
   useEffect(() => {
     const map = mapRef.current;
     const projectId = temporalProjectId;
+    const outputSyncLayerState = getTemporalOutputSyncLayerState(projectId);
 
     const clearTemporalAddedLayers = () => {
       if (map) {
@@ -3077,12 +3423,32 @@ export function MapView({
       temporalAddedSourceSignaturesRef.current = {};
       temporalAddedRegistrationKeyRef.current = null;
       temporalAddedRegistrationStatsRef.current = {};
+      temporalAddedSyncRetryKeyRef.current = null;
       activeTemporalAddedProjectIdRef.current = null;
       activeTemporalAddedReleaseIdentifierRef.current = null;
       activeTemporalAddedSwitchKeyRef.current = null;
     };
 
-    if (!map || !map.isStyleLoaded()) {
+    if (!map) {
+      syncTemporalOutputLayers({
+        map,
+        projectId,
+        activeReleaseIdentifier: temporalPresentation?.selectedReleaseIdentifier ?? null,
+        availableReleaseIdentifiers: temporalAvailableMilestoneIds,
+        layerState: outputSyncLayerState,
+        registeredLayerIds: temporalAddedLayerIdsRef.current,
+      });
+      return;
+    }
+    if (!isMapStyleReadyForLayerMutation(map)) {
+      syncTemporalOutputLayers({
+        map,
+        projectId,
+        activeReleaseIdentifier: temporalPresentation?.selectedReleaseIdentifier ?? null,
+        availableReleaseIdentifiers: temporalAvailableMilestoneIds,
+        layerState: outputSyncLayerState,
+        registeredLayerIds: temporalAddedLayerIdsRef.current,
+      });
       return;
     }
     if (workflowMode !== "temporal" || !projectId || !temporalPresentation) {
@@ -3096,9 +3462,14 @@ export function MapView({
 
     const selectedReleaseIdentifier = temporalPresentation.selectedReleaseIdentifier;
     if (!selectedReleaseIdentifier) {
-      for (const layerId of temporalAddedLayerIdsRef.current) {
-        setLayerVisibility(map, layerId, false);
-      }
+      syncTemporalOutputLayers({
+        map,
+        projectId,
+        activeReleaseIdentifier: null,
+        availableReleaseIdentifiers: temporalAvailableMilestoneIds,
+        layerState: outputSyncLayerState,
+        registeredLayerIds: temporalAddedLayerIdsRef.current,
+      });
       activeTemporalAddedReleaseIdentifierRef.current = null;
       return;
     }
@@ -3203,15 +3574,89 @@ export function MapView({
       payloadBytes: totalPayloadBytes,
     });
 
-    for (const layerId of temporalAddedLayerIdsRef.current) {
-      const visible = TEMPORAL_ADDED_LAYER_DEFINITIONS.some((definition) => {
-        const expectedLayerId = temporalAddedLayerId(projectId, selectedReleaseIdentifier, definition.kind);
-        return layerId === expectedLayerId && layerState[definition.toggleKey];
+    if (previousReleaseIdentifier !== selectedReleaseIdentifier) {
+      devLog("TEMPORAL_ACTIVE_MILESTONE_CHANGED", {
+        projectId,
+        previousReleaseIdentifier,
+        nextReleaseIdentifier: selectedReleaseIdentifier,
       });
-      setLayerVisibility(map, layerId, visible);
-      if (visible && map.getLayer(layerId)) {
-        map.moveLayer(layerId);
-      }
+    }
+
+    devLog("TEMPORAL_OUTPUT_REGISTRATION_DONE", {
+      projectId,
+      releaseIdentifier: selectedReleaseIdentifier,
+      registeredLayerIds: Array.from(temporalAddedLayerIdsRef.current),
+      registeredLayerCount: temporalAddedLayerIdsRef.current.size,
+      releases: registrationCandidates.map((overlay) => overlay.releaseIdentifier),
+      createdSources,
+      reusedSources,
+      updatedSources,
+      createdLayers,
+      reusedLayers,
+      featureCount: totalFeatureCount,
+      payloadBytes: totalPayloadBytes,
+    });
+    devLog("TEMPORAL_OUTPUT_LAYER_REGISTRY_SNAPSHOT", {
+      projectId,
+      activeReleaseIdentifier: selectedReleaseIdentifier,
+      layerIds: Array.from(temporalAddedLayerIdsRef.current),
+      sourceIds: Array.from(temporalAddedSourceIdsRef.current),
+      layerStateKeys: Object.keys(outputSyncLayerState),
+      enabledLayerKeys: TEMPORAL_ADDED_LAYER_DEFINITIONS.filter((definition) => outputSyncLayerState[definition.toggleKey]).map(
+        (definition) => definition.toggleKey,
+      ),
+      registeredLayerIds: Array.from(temporalAddedLayerIdsRef.current),
+      temporalLayerCount: temporalAddedLayerIdsRef.current.size,
+      expectedOutputLayerCount: temporalAvailableMilestoneIds.length * TEMPORAL_ADDED_LAYER_DEFINITIONS.length,
+    });
+
+    const syncResult = syncTemporalOutputLayers({
+      map,
+      projectId,
+      activeReleaseIdentifier: selectedReleaseIdentifier,
+      availableReleaseIdentifiers: temporalAvailableMilestoneIds,
+      layerState: outputSyncLayerState,
+      registeredLayerIds: temporalAddedLayerIdsRef.current,
+    });
+    const retryKey = `${projectId}:${selectedReleaseIdentifier}:${temporalPresentation.projectUpdatedAt ?? "unknown"}:${temporalAddedLayerIdsRef.current.size}`;
+    if ((syncResult.missingLayerCount > 0 || temporalAddedLayerIdsRef.current.size === 0) && temporalAddedSyncRetryKeyRef.current !== retryKey) {
+      temporalAddedSyncRetryKeyRef.current = retryKey;
+      devLog("TEMPORAL_OUTPUT_LAYER_SYNC_RETRY_SCHEDULED", {
+        projectId,
+        releaseIdentifier: selectedReleaseIdentifier,
+        activeReleaseIdentifier: selectedReleaseIdentifier,
+        attempt: 1,
+        reason: syncResult.missingLayerCount > 0 ? "missing_layer" : "empty_registry",
+      });
+      requestAnimationFrame(() => {
+        const retryResult = syncTemporalOutputLayers({
+          map,
+          projectId,
+          activeReleaseIdentifier: selectedReleaseIdentifier,
+          availableReleaseIdentifiers: temporalAvailableMilestoneIds,
+          layerState: outputSyncLayerState,
+          registeredLayerIds: temporalAddedLayerIdsRef.current,
+        });
+        if (retryResult.missingLayerCount > 0 || temporalAddedLayerIdsRef.current.size === 0) {
+          window.setTimeout(() => {
+            devLog("TEMPORAL_OUTPUT_LAYER_SYNC_RETRY_SCHEDULED", {
+              projectId,
+              releaseIdentifier: selectedReleaseIdentifier,
+              activeReleaseIdentifier: selectedReleaseIdentifier,
+              attempt: 2,
+              reason: retryResult.missingLayerCount > 0 ? "missing_layer" : "empty_registry",
+            });
+            syncTemporalOutputLayers({
+              map,
+              projectId,
+              activeReleaseIdentifier: selectedReleaseIdentifier,
+              availableReleaseIdentifiers: temporalAvailableMilestoneIds,
+              layerState: outputSyncLayerState,
+              registeredLayerIds: temporalAddedLayerIdsRef.current,
+            });
+          }, 150);
+        }
+      });
     }
 
     activeTemporalAddedReleaseIdentifierRef.current = selectedReleaseIdentifier;
@@ -3252,6 +3697,7 @@ export function MapView({
     });
   }, [
     layerState,
+    mapStyleRevision,
     temporalAddedOverlayTimeline,
     temporalAvailableMilestoneIds,
     temporalPresentation,
@@ -3324,6 +3770,7 @@ export function MapView({
     });
 
     map.on("load", () => {
+      setMapStyleRevision((revision) => revision + 1);
       ensureOperationalLayers(map);
       if (latestPresentationRef.current) {
         syncMapPresentation(map, latestPresentationRef.current);
@@ -3333,6 +3780,9 @@ export function MapView({
     });
 
     map.on("styledata", () => {
+      if (map.isStyleLoaded()) {
+        setMapStyleRevision((revision) => revision + 1);
+      }
       if (latestPresentationRef.current) {
         syncMapPresentation(map, latestPresentationRef.current);
       } else {

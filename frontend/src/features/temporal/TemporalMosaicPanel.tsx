@@ -98,6 +98,18 @@ const EMPTY_FEATURE_COLLECTION: FeatureCollection = {
   features: [],
 };
 
+type ResultsExportFormat = "xlsx" | "kml" | "geojson" | "topojson" | "shapefile" | "tsv" | "json";
+
+const RESULTS_EXPORT_OPTIONS: Array<{ format: ResultsExportFormat; label: string; pathSuffix: string; filenameSuffix: string }> = [
+  { format: "xlsx", label: "Excel (.xlsx)", pathSuffix: "results.xlsx", filenameSuffix: "xlsx" },
+  { format: "kml", label: "KML (.kml)", pathSuffix: "results.kml", filenameSuffix: "kml" },
+  { format: "geojson", label: "GeoJSON (.geojson)", pathSuffix: "results.geojson", filenameSuffix: "geojson" },
+  { format: "topojson", label: "TopoJSON (.topojson)", pathSuffix: "results.topojson", filenameSuffix: "topojson" },
+  { format: "shapefile", label: "ESRI Shapefile (.zip)", pathSuffix: "results_shapefile.zip", filenameSuffix: "zip" },
+  { format: "tsv", label: "Power BI (.tsv)", pathSuffix: "results.tsv", filenameSuffix: "tsv" },
+  { format: "json", label: "JSON (.json)", pathSuffix: "results.json", filenameSuffix: "json" },
+];
+
 function formatReleaseDate(value: string | undefined | null, locale: string, fallback: string): string {
   if (value === "current_basemap") {
     return "Current basemap";
@@ -404,10 +416,6 @@ function hasMilestoneBufferFeatures(milestone: TemporalMilestone): boolean {
   );
 }
 
-function isTemporalMilestoneReferenceLayer(layer: ReferenceLayer): boolean {
-  return layer.storage_strategy === "raster_tiles" && layer.layer_id.startsWith("temporal-reference-");
-}
-
 function hasValidRasterBounds(bounds: number[] | null | undefined): bounds is [number, number, number, number] {
   return Array.isArray(bounds) && bounds.length >= 4 && bounds.every((value) => Number.isFinite(value));
 }
@@ -507,7 +515,7 @@ export function TemporalMosaicPanel({
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [progressMetricsVisible, setProgressMetricsVisible] = useState(false);
   const [resultsExportMenuOpen, setResultsExportMenuOpen] = useState(false);
-  const [resultsExportBusy, setResultsExportBusy] = useState<"xlsx" | "kml" | null>(null);
+  const [resultsExportBusy, setResultsExportBusy] = useState<ResultsExportFormat | null>(null);
   const [resultsExportError, setResultsExportError] = useState<string | null>(null);
 
   const aoi = useAppStore((state) => state.aoi);
@@ -533,9 +541,6 @@ export function TemporalMosaicPanel({
   const setIsRunning = useAppStore((state) => state.setIsRunning);
   const previousAoiRef = useRef<Polygon | null>(aoi);
   const latestProjectLoadRef = useRef<string | null>(null);
-  const referenceRepairReloadRef = useRef<string | null>(null);
-  const referenceRepairAttemptedRef = useRef<Set<string>>(new Set());
-  const referenceRepairAbortRef = useRef<AbortController | null>(null);
 
   const { t, language } = useI18n();
   const locale = language === "fr" ? "fr-FR" : "en-GB";
@@ -554,16 +559,12 @@ export function TemporalMosaicPanel({
     queryFn: async ({ signal }) => {
       const projectId = project?.project_id ?? "";
       const startedAt = performance.now();
-      const milestoneCount = project?.milestones.length ?? 0;
-      const milestoneReferenceImageryCount = project?.milestones.filter((milestone) => Boolean(milestone.reference_imagery)).length ?? 0;
-      relayClientLog("TEMPORAL_REFERENCE_LAYERS_FETCH_START", {
+      relayClientLog("REFERENCE_LAYER_MANUAL_FETCH_START", {
         projectId,
-        reason: "query",
-        milestoneCount,
-        milestoneReferenceImageryCount,
+        reason: "manual_reference_layer_panel",
       });
       const layers = await listReferenceLayers(projectId, { signal });
-      relayClientLog("TEMPORAL_REFERENCE_LAYERS_FETCH_DONE", {
+      relayClientLog("REFERENCE_LAYER_MANUAL_FETCH_DONE", {
         projectId,
         count: layers.length,
         durationMs: Math.round(performance.now() - startedAt),
@@ -753,6 +754,12 @@ export function TemporalMosaicPanel({
       return;
     }
     if (project || temporalProjectBootstrap || loadProjectMutation.isPending) {
+      if (loadProjectMutation.isPending) {
+        relayClientLog("TEMPORAL_PROJECT_ROUTE_GUARD", {
+          projectId: selectedProjectId,
+          state: "loading_project",
+        });
+      }
       return;
     }
     setProgressMetricsVisible(false);
@@ -829,21 +836,8 @@ export function TemporalMosaicPanel({
     [project, selectedMilestoneId],
   );
   const milestoneCount = project?.milestones.length ?? 0;
-  const milestoneReferenceImageryCount = useMemo(
-    () => project?.milestones.filter((milestone) => Boolean(milestone.reference_imagery)).length ?? 0,
-    [project?.milestones],
-  );
-  const completedMilestoneCount = useMemo(
-    () => project?.milestones.filter((milestone) => milestone.status === "complete").length ?? 0,
-    [project?.milestones],
-  );
-
   const referenceLayers = referenceLayersQuery.data ?? [];
-  const temporalReferenceLayers = useMemo(() => referenceLayers.filter(isTemporalMilestoneReferenceLayer), [referenceLayers]);
-  const manualReferenceLayers = useMemo(
-    () => referenceLayers.filter((layer) => !isTemporalMilestoneReferenceLayer(layer)),
-    [referenceLayers],
-  );
+  const manualReferenceLayers = referenceLayers;
 
   useEffect(() => {
     if (!project?.project_id || !referenceLayersQuery.isSuccess) {
@@ -853,202 +847,23 @@ export function TemporalMosaicPanel({
       projectId: project.project_id,
       totalReferenceLayers: referenceLayers.length,
       userImportedCount: manualReferenceLayers.length,
-      temporalReferenceFilteredCount: temporalReferenceLayers.length,
+      temporalReferenceFilteredCount: 0,
+    });
+    if (manualReferenceLayers.length === 0) {
+      relayClientLog("TEMPORAL_PROJECT_ROUTE_GUARD", {
+        projectId: project.project_id,
+        state: "manual_reference_layers_absent",
+      });
+    }
+    relayClientLog("TEMPORAL_PROJECT_ROUTE_GUARD", {
+      projectId: project.project_id,
+      state: "valid_project_loaded",
     });
   }, [
     manualReferenceLayers.length,
     project?.project_id,
     referenceLayers.length,
     referenceLayersQuery.isSuccess,
-    temporalReferenceLayers.length,
-  ]);
-
-  useEffect(() => {
-    if (!project?.project_id || !referenceLayersQuery.isSuccess) {
-      return;
-    }
-    const repairedReferenceLayerCount = temporalReferenceLayers.length;
-    if (repairedReferenceLayerCount <= 0) {
-      return;
-    }
-    if (milestoneReferenceImageryCount >= repairedReferenceLayerCount) {
-      relayClientLog("TEMPORAL_REFERENCE_UI_ENABLED", {
-        projectId: project.project_id,
-        referenceLayerCount: repairedReferenceLayerCount,
-        source: "project_payload",
-      });
-      return;
-    }
-    const reloadKey = `${project.project_id}:${repairedReferenceLayerCount}:${project.updated_at ?? ""}`;
-    if (referenceRepairReloadRef.current === reloadKey) {
-      return;
-    }
-    referenceRepairReloadRef.current = reloadKey;
-    relayClientLog("TEMPORAL_REFERENCE_LAYERS_REPAIRED", {
-      projectId: project.project_id,
-      referenceLayerCount: repairedReferenceLayerCount,
-      milestoneReferenceImageryCount,
-    });
-    void getTemporalProject(project.project_id)
-      .then((loadedProject) => {
-        const hydratedProject = {
-          ...loadedProject,
-          milestones: [...loadedProject.milestones].sort(
-            (left, right) => Date.parse(left.release_date ?? "") - Date.parse(right.release_date ?? ""),
-          ),
-        };
-        setProject(hydratedProject);
-        if (!hydratedProject.milestones.some((milestone) => milestone.release_identifier === selectedMilestoneId)) {
-          setSelectedMilestoneId(preferredMilestoneId(hydratedProject));
-        }
-        relayClientLog("TEMPORAL_REFERENCE_UI_ENABLED", {
-          projectId: hydratedProject.project_id,
-          referenceLayerCount: hydratedProject.milestones.filter((milestone) => Boolean(milestone.reference_imagery)).length,
-          source: "reloaded_project",
-        });
-      })
-      .catch((error: unknown) => {
-        relayClientLog("TEMPORAL_REFERENCE_LAYERS_UNAVAILABLE", {
-          projectId: project.project_id,
-          reason: "project_reload_failed_after_reference_repair",
-          error: error instanceof Error ? error.message : String(error),
-        });
-      });
-  }, [
-    project?.project_id,
-    project?.updated_at,
-    milestoneReferenceImageryCount,
-    referenceLayersQuery.isSuccess,
-    selectedMilestoneId,
-    setProject,
-    temporalReferenceLayers.length,
-  ]);
-
-  useEffect(() => {
-    if (!project?.project_id || milestoneCount === 0 || completedMilestoneCount === 0) {
-      return;
-    }
-    if (milestoneReferenceImageryCount >= milestoneCount) {
-      return;
-    }
-
-    const projectId = project.project_id;
-    const attemptKey = `${projectId}:${project.updated_at ?? ""}:${completedMilestoneCount}:${milestoneReferenceImageryCount}`;
-    if (referenceRepairAttemptedRef.current.has(attemptKey)) {
-      return;
-    }
-    referenceRepairAttemptedRef.current.add(attemptKey);
-
-    referenceRepairAbortRef.current?.abort();
-    const abortController = new AbortController();
-    referenceRepairAbortRef.current = abortController;
-    const startedAt = performance.now();
-
-    relayClientLog("TEMPORAL_REFERENCE_LAYERS_FETCH_START", {
-      projectId,
-      reason: "missing_milestone_reference_imagery",
-      milestoneCount,
-      milestoneReferenceImageryCount,
-    });
-
-    void queryClient
-      .fetchQuery({
-        queryKey: ["reference-layers", projectId],
-        staleTime: 0,
-        queryFn: () => listReferenceLayers(projectId, { signal: abortController.signal }),
-      })
-      .then((layers) => {
-        if (abortController.signal.aborted || projectId !== project?.project_id) {
-          return;
-        }
-        const durationMs = Math.round(performance.now() - startedAt);
-        const temporalLayerCount = layers.filter(isTemporalMilestoneReferenceLayer).length;
-        relayClientLog("TEMPORAL_REFERENCE_LAYERS_FETCH_DONE", {
-          projectId,
-          count: layers.length,
-          durationMs,
-        });
-        if (temporalLayerCount <= 0) {
-          relayClientLog("TEMPORAL_REFERENCE_LAYERS_UNAVAILABLE", {
-            projectId,
-            reason: "reference_layers_repair_returned_empty",
-            milestoneCount,
-            milestoneReferenceImageryCount,
-          });
-          return;
-        }
-
-        relayClientLog("TEMPORAL_REFERENCE_LAYERS_REPAIRED", {
-          projectId,
-          referenceLayerCount: temporalLayerCount,
-          milestoneReferenceImageryCount,
-          source: "reference_layers_repair",
-        });
-
-        void getTemporalProject(projectId)
-          .then((loadedProject) => {
-            if (abortController.signal.aborted || loadedProject.project_id !== projectId) {
-              return;
-            }
-            const hydratedProject = {
-              ...loadedProject,
-              milestones: [...loadedProject.milestones].sort(
-                (left, right) => Date.parse(left.release_date ?? "") - Date.parse(right.release_date ?? ""),
-              ),
-            };
-            const nextMilestoneReferenceImageryCount = hydratedProject.milestones.filter((milestone) =>
-              Boolean(milestone.reference_imagery),
-            ).length;
-            setProject(hydratedProject);
-            relayClientLog("TEMPORAL_REFERENCE_UI_ENABLED", {
-              projectId,
-              referenceLayerCount: temporalLayerCount,
-              milestoneReferenceImageryCount: nextMilestoneReferenceImageryCount,
-              source: "reference_layers_repair",
-            });
-          })
-          .catch((error: unknown) => {
-            if (abortController.signal.aborted) {
-              return;
-            }
-            relayClientLog("TEMPORAL_REFERENCE_LAYERS_UNAVAILABLE", {
-              projectId,
-              reason: "project_reload_failed_after_reference_repair",
-              error: error instanceof Error ? error.message : String(error),
-            });
-          });
-      })
-      .catch((error: unknown) => {
-        if (abortController.signal.aborted || (error instanceof DOMException && error.name === "AbortError")) {
-          return;
-        }
-        relayClientLog("TEMPORAL_REFERENCE_LAYERS_UNAVAILABLE", {
-          projectId,
-          reason: "reference_layers_fetch_failed",
-          error: error instanceof Error ? error.message : String(error),
-        });
-      })
-      .finally(() => {
-        if (referenceRepairAbortRef.current === abortController) {
-          referenceRepairAbortRef.current = null;
-        }
-      });
-
-    return () => {
-      if (referenceRepairAbortRef.current === abortController) {
-        referenceRepairAbortRef.current = null;
-        referenceRepairAttemptedRef.current.delete(attemptKey);
-        abortController.abort();
-      }
-    };
-  }, [
-    completedMilestoneCount,
-    milestoneCount,
-    milestoneReferenceImageryCount,
-    project?.project_id,
-    project?.updated_at,
-    queryClient,
-    setProject,
   ]);
 
   const referenceLayerPresentation = useMemo(
@@ -1414,15 +1229,19 @@ export function TemporalMosaicPanel({
     await downloadFileFromUrl(buildBackendFileUrl(backendUrl, bundlePath), fileName);
   };
 
-  const handleDownloadResults = async (format: "xlsx" | "kml") => {
+  const handleDownloadResults = async (format: ResultsExportFormat) => {
     if (!project?.project_id) {
+      return;
+    }
+    const option = RESULTS_EXPORT_OPTIONS.find((item) => item.format === format);
+    if (!option) {
       return;
     }
     setResultsExportError(null);
     setResultsExportBusy(format);
     try {
-      const path = `/api/temporal-projects/${encodeURIComponent(project.project_id)}/exports/results.${format}`;
-      const filename = `resultats_${project.project_id}.${format}`;
+      const path = `/api/temporal-projects/${encodeURIComponent(project.project_id)}/exports/${option.pathSuffix}`;
+      const filename = `resultats_${project.project_id}.${option.filenameSuffix}`;
       await downloadFileFromUrl(resolveBackendUrl(backendUrl, path) ?? path, filename);
       setResultsExportMenuOpen(false);
     } catch {
@@ -1882,21 +1701,17 @@ export function TemporalMosaicPanel({
                               <ChevronDown className="ml-2 h-4 w-4" />
                             </Button>
                             {resultsExportMenuOpen ? (
-                              <div className="absolute right-0 z-20 mt-2 w-60 rounded-lg border border-sidebar-border bg-card p-1.5 shadow-panel">
-                                <button
-                                  type="button"
-                                  className="flex w-full items-center rounded-md px-3 py-2 text-left text-sm text-foreground transition hover:bg-surface"
-                                  onClick={() => void handleDownloadResults("xlsx")}
-                                >
-                                  Télécharger Excel (.xlsx)
-                                </button>
-                                <button
-                                  type="button"
-                                  className="flex w-full items-center rounded-md px-3 py-2 text-left text-sm text-foreground transition hover:bg-surface"
-                                  onClick={() => void handleDownloadResults("kml")}
-                                >
-                                  Télécharger KML (.kml)
-                                </button>
+                              <div className="absolute right-0 z-20 mt-2 w-64 rounded-lg border border-sidebar-border bg-card p-1.5 shadow-panel">
+                                {RESULTS_EXPORT_OPTIONS.map((option) => (
+                                  <button
+                                    key={option.format}
+                                    type="button"
+                                    className="flex w-full items-center rounded-md px-3 py-2 text-left text-sm text-foreground transition hover:bg-surface"
+                                    onClick={() => void handleDownloadResults(option.format)}
+                                  >
+                                    Télécharger {option.label}
+                                  </button>
+                                ))}
                               </div>
                             ) : null}
                           </div>

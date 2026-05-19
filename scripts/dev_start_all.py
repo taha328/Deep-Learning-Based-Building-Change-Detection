@@ -28,6 +28,7 @@ FRONTEND_ENV = {
 BACKEND_HEALTH_URL = "http://127.0.0.1:8000/api/health"
 BACKEND_DOCS_URL = "http://127.0.0.1:8000/docs"
 FRONTEND_URL = "http://127.0.0.1:5173/"
+PID_DIR_RELATIVE = Path("backend") / "runtime_cache" / "dev_pids"
 
 
 @dataclass
@@ -158,16 +159,57 @@ def redis_is_ready() -> bool:
     return result.returncode == 0 and result.stdout.strip() == "PONG"
 
 
-def start_redis_if_needed() -> bool:
+def write_pid_file(repo_root: Path, service: str, pid: int) -> None:
+    pid_dir = repo_root / PID_DIR_RELATIVE
+    pid_dir.mkdir(parents=True, exist_ok=True)
+    (pid_dir / f"{service}.pid").write_text(f"{pid}\n")
+
+
+def remove_pid_file(repo_root: Path, service: str) -> None:
+    try:
+        (repo_root / PID_DIR_RELATIVE / f"{service}.pid").unlink()
+    except FileNotFoundError:
+        pass
+
+
+def redis_process_id() -> int | None:
+    result = run_quiet(["redis-cli", "info", "server"])
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        if line.startswith("process_id:"):
+            value = line.split(":", 1)[1].strip()
+            if value.isdigit():
+                return int(value)
+    return None
+
+
+def start_redis_if_needed(repo_root: Path) -> bool:
     if redis_is_ready():
         print("[redis] already running", flush=True)
         return False
 
-    if shutil.which("brew") is None:
-        raise RuntimeError("Redis is not running and Homebrew was not found. Start Redis manually, then rerun this script.")
+    if shutil.which("redis-server") is None:
+        raise RuntimeError("Redis is not running and redis-server was not found. Start Redis manually, then rerun this script.")
 
-    print("[redis] starting Homebrew Redis service", flush=True)
-    result = run_quiet(["brew", "services", "start", "redis"])
+    redis_runtime_dir = repo_root / "backend" / "runtime_cache" / "redis"
+    redis_runtime_dir.mkdir(parents=True, exist_ok=True)
+    print("[redis] starting local Redis for dev stack", flush=True)
+    result = run_quiet(
+        [
+            "redis-server",
+            "--daemonize",
+            "yes",
+            "--port",
+            "6379",
+            "--dir",
+            str(redis_runtime_dir),
+            "--dbfilename",
+            "dev.rdb",
+            "--logfile",
+            str(redis_runtime_dir / "redis.log"),
+        ]
+    )
     if result.stdout.strip():
         for line in result.stdout.splitlines():
             print(f"[redis] {line}", flush=True)
@@ -177,11 +219,15 @@ def start_redis_if_needed() -> bool:
 
     for _ in range(30):
         if redis_is_ready():
+            pid = redis_process_id()
+            if pid is not None:
+                write_pid_file(repo_root, "redis", pid)
+                print(f"DEV_PROCESS_START service=redis pid={pid}", flush=True)
             print("[redis] ready", flush=True)
             return True
         time.sleep(0.5)
 
-    raise RuntimeError("Redis did not respond to redis-cli ping after starting Homebrew service.")
+    raise RuntimeError("Redis did not respond to redis-cli ping after starting the local dev Redis process.")
 
 
 def enqueue_output(prefix: str, stream: TextIO, output_queue: queue.Queue[str]) -> None:
@@ -216,9 +262,10 @@ def start_process(
     return ManagedProcess(name=name, process=process)
 
 
-def terminate_process(managed: ManagedProcess, *, timeout: float = 10.0) -> None:
+def terminate_process(managed: ManagedProcess, *, repo_root: Path, timeout: float = 10.0) -> None:
     process = managed.process
     if process.poll() is not None:
+        remove_pid_file(repo_root, managed.name)
         return
 
     print(f"[{managed.name}] stopping pid={process.pid}", flush=True)
@@ -236,11 +283,12 @@ def terminate_process(managed: ManagedProcess, *, timeout: float = 10.0) -> None
         except ProcessLookupError:
             return
         process.wait(timeout=5)
+    remove_pid_file(repo_root, managed.name)
 
 
-def stop_all(processes: list[ManagedProcess]) -> None:
+def stop_all(processes: list[ManagedProcess], *, repo_root: Path) -> None:
     for managed in reversed(processes):
-        terminate_process(managed)
+        terminate_process(managed, repo_root=repo_root)
 
 
 def run_stop_script(repo_root: Path) -> None:
@@ -268,7 +316,7 @@ def main() -> int:
     processes: list[ManagedProcess] = []
 
     print(f"[dev] repo root: {repo_root}", flush=True)
-    start_redis_if_needed()
+    start_redis_if_needed(repo_root)
 
     backend_dir = repo_root / "backend"
     frontend_dir = repo_root / "frontend"
@@ -285,6 +333,8 @@ def main() -> int:
                 output_queue=output_queue,
             )
         )
+        write_pid_file(repo_root, "backend", processes[-1].process.pid)
+        print(f"DEV_PROCESS_START service=backend pid={processes[-1].process.pid}", flush=True)
         wait_for_url(
             label="backend",
             url=BACKEND_HEALTH_URL,
@@ -316,6 +366,8 @@ def main() -> int:
                 output_queue=output_queue,
             )
         )
+        write_pid_file(repo_root, "celery", processes[-1].process.pid)
+        print(f"DEV_PROCESS_START service=celery pid={processes[-1].process.pid}", flush=True)
         processes.append(
             start_process(
                 name="frontend",
@@ -325,6 +377,8 @@ def main() -> int:
                 output_queue=output_queue,
             )
         )
+        write_pid_file(repo_root, "frontend", processes[-1].process.pid)
+        print(f"DEV_PROCESS_START service=frontend pid={processes[-1].process.pid}", flush=True)
         wait_for_url(
             label="frontend",
             url=FRONTEND_URL,
@@ -360,7 +414,7 @@ def main() -> int:
                 return_code = managed.process.poll()
                 if return_code is not None:
                     print(f"[dev] {managed.name} exited unexpectedly with code {return_code}; stopping stack", flush=True)
-                    stop_all(processes)
+                    stop_all(processes, repo_root=repo_root)
                     return return_code or 1
 
             try:
@@ -370,14 +424,14 @@ def main() -> int:
             print(line, flush=True)
     except KeyboardInterrupt:
         print("\n[dev] CTRL+C received; stopping stack", flush=True)
-        stop_all(processes)
+        stop_all(processes, repo_root=repo_root)
         run_stop_script(repo_root)
         print("[dev] stack stopped", flush=True)
         print("[dev] localhost:5173 will refuse connection until you run ./scripts/dev_start_all.sh again", flush=True)
         return 0
     except Exception as exc:  # noqa: BLE001
         print(f"[dev] error: {exc}", file=sys.stderr, flush=True)
-        stop_all(processes)
+        stop_all(processes, repo_root=repo_root)
         run_stop_script(repo_root)
         return 1
 

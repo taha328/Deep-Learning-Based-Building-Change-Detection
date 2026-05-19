@@ -20,6 +20,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 from typing import Any, Callable
 
+import orjson
 from osgeo import ogr, osr
 import rasterio
 from shapely.geometry import GeometryCollection, MultiPolygon, Polygon, mapping, shape
@@ -250,6 +251,39 @@ def temporal_project_response_payload(project: TemporalProject, settings: Settin
     payload = project.model_dump(mode="json")
     payload["has_reference_layers"] = reference_layer_count > 0
     payload["reference_layer_count"] = reference_layer_count
+    return payload
+
+
+def load_temporal_project_response_payload(project_id: str, settings: Settings) -> dict[str, Any]:
+    started_at = time.perf_counter()
+    path = _project_json_path(settings, project_id)
+    if not path.exists():
+        raise FileNotFoundError(f"Unknown temporal project: {project_id}")
+    metadata_started_at = time.perf_counter()
+    payload = orjson.loads(path.read_bytes())
+    if not isinstance(payload, dict):
+        raise ValueError(f"Invalid temporal project payload: {project_id}")
+    for field in ("has_reference_layers", "reference_layer_count"):
+        payload.pop(field, None)
+    payload.setdefault("project_id", project_id)
+    payload.setdefault("project_dir", str(path.parent))
+    milestones = payload.get("milestones")
+    if isinstance(milestones, list):
+        milestones.sort(key=lambda item: str(item.get("release_date") or "") if isinstance(item, dict) else "")
+    reference_layer_count = _reference_layer_count_for_project(project_id, settings, project_dir=payload.get("project_dir"))
+    payload["has_reference_layers"] = reference_layer_count > 0
+    payload["reference_layer_count"] = reference_layer_count
+    logger.info(
+        "PROJECT_LOAD_TIMING projectId=%s phase=metadata ms=%s",
+        project_id,
+        round((time.perf_counter() - metadata_started_at) * 1000, 2),
+    )
+    logger.info("PROJECT_LOAD_TIMING projectId=%s phase=layer_availability ms=0.0", project_id)
+    logger.info(
+        "PROJECT_LOAD_TIMING projectId=%s phase=total ms=%s",
+        project_id,
+        round((time.perf_counter() - started_at) * 1000, 2),
+    )
     return payload
 
 
@@ -1931,9 +1965,11 @@ def _load_project(
     refresh_derived_layers: bool = True,
     write_side_effects: bool = True,
 ) -> TemporalProject:
+    load_started_at = time.perf_counter()
     path = _project_json_path(settings, project_id)
     if not path.exists():
         raise FileNotFoundError(f"Unknown temporal project: {project_id}")
+    metadata_started_at = time.perf_counter()
     payload = json.loads(path.read_text())
     stripped_fields = [
         field
@@ -1954,8 +1990,14 @@ def _load_project(
     if project.project_dir is None:
         project.project_dir = str(path.parent)
     project = _sort_temporal_milestones(project)
-    initial_project_payload = json.dumps(project.model_dump(mode="json"), sort_keys=True)
+    logger.info(
+        "PROJECT_LOAD_TIMING projectId=%s phase=metadata ms=%s",
+        project_id,
+        round((time.perf_counter() - metadata_started_at) * 1000, 2),
+    )
+    initial_project_payload = json.dumps(project.model_dump(mode="json"), sort_keys=True) if write_side_effects else None
     should_compact_project_json = _strip_redundant_reference_imagery_data_urls(project) if write_side_effects else False
+    layer_availability_started_at = time.perf_counter()
     if refresh_derived_layers:
         for milestone in project.milestones:
             if milestone.cumulative_convex_hull_geojson is None and milestone.cumulative_union_geojson is not None:
@@ -1968,7 +2010,12 @@ def _load_project(
         project = _hydrate_milestone_buffer_layers(project, settings)
     if refresh_derived_layers:
         project = _ensure_temporal_derived_geometry_layers(project)
-    final_project_payload = json.dumps(project.model_dump(mode="json"), sort_keys=True)
+    logger.info(
+        "PROJECT_LOAD_TIMING projectId=%s phase=layer_availability ms=%s",
+        project_id,
+        round((time.perf_counter() - layer_availability_started_at) * 1000, 2),
+    )
+    final_project_payload = json.dumps(project.model_dump(mode="json"), sort_keys=True) if write_side_effects else None
     if write_side_effects and (should_compact_project_json or stripped_fields or final_project_payload != initial_project_payload):
         path.write_text(json.dumps(project.model_dump(mode="json"), indent=2))
         manifest_path = path.with_name("project_manifest.json")
@@ -1979,6 +2026,11 @@ def _load_project(
             _write_project_summary(project, path)
         except Exception:
             pass
+    logger.info(
+        "PROJECT_LOAD_TIMING projectId=%s phase=total ms=%s",
+        project_id,
+        round((time.perf_counter() - load_started_at) * 1000, 2),
+    )
     return project
 
 
@@ -2854,9 +2906,9 @@ def get_temporal_project(project_id: str, settings: Settings) -> TemporalProject
             settings,
             project_id,
             hydrate_reference_imagery=False,
-            hydrate_buffer_layers=True,
-            refresh_derived_layers=True,
-            write_side_effects=True,
+            hydrate_buffer_layers=False,
+            refresh_derived_layers=False,
+            write_side_effects=False,
         )
     except FileNotFoundError:
         if project_id.startswith("run-"):

@@ -5,7 +5,7 @@ from pathlib import Path
 import time
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request, Response, status
+from fastapi import APIRouter, Depends, Query, Request, Response, status
 from fastapi import File, Form, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
@@ -22,11 +22,13 @@ from src.core_api import (
 )
 from src.services.temporal_projects import (
     create_temporal_project_bundle,
-    repair_temporal_project_reference_imagery,
-    temporal_project_response_payload,
-    temporal_reference_imagery_layers,
+    load_temporal_project_response_payload,
 )
-from src.services.temporal_exports import build_temporal_results_kml, build_temporal_results_workbook
+from src.services.temporal_exports import (
+    TEMPORAL_RESULTS_EXPORT_FILENAMES,
+    TEMPORAL_RESULTS_EXPORT_MEDIA_TYPES,
+    build_temporal_results_export_file,
+)
 from src.services.temporal_reference_imagery import (
     build_reference_tilejson_payload_cached,
     ensure_reference_tile_png_cached_on_disk,
@@ -169,8 +171,7 @@ def list_projects(
 def get_project(project_id: str, settings=Depends(get_app_settings)) -> dict[str, object]:
     started_at = time.perf_counter()
     try:
-        project = get_temporal_project_api(project_id, settings=settings)
-        payload = temporal_project_response_payload(project, settings)
+        payload = load_temporal_project_response_payload(project_id, settings)
         logger.info(
             "TEMPORAL_PROJECT_LOADED projectId=%s milestoneCount=%s durationMs=%s",
             project_id,
@@ -225,32 +226,53 @@ def run_project(
         )
 
 
-@router.head("/{project_id}/exports/results.xlsx")
-@router.get("/{project_id}/exports/results.xlsx")
-def export_project_results_xlsx(project_id: str, settings=Depends(get_app_settings)) -> Response:
+def _export_project_results(project_id: str, export_format: str, settings) -> FileResponse:
+    normalized_format = export_format.lower()
+    if normalized_format == "zip":
+        normalized_format = "shapefile"
+    if normalized_format not in TEMPORAL_RESULTS_EXPORT_FILENAMES:
+        raise_api_error(
+            status.HTTP_400_BAD_REQUEST,
+            "unsupported_export_format",
+            f"Unsupported temporal results export format: {export_format}",
+        )
     try:
-        payload = build_temporal_results_workbook(project_id, settings=settings)
+        path = build_temporal_results_export_file(project_id, normalized_format, settings=settings)
     except FileNotFoundError as exc:
         raise_api_error(status.HTTP_404_NOT_FOUND, "not_found", str(exc))
-    return Response(
-        content=payload,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="resultats_{project_id}.xlsx"'},
+    except ValueError as exc:
+        raise_api_error(status.HTTP_400_BAD_REQUEST, "unsupported_export_format", str(exc))
+    except Exception as exc:  # noqa: BLE001
+        raise_api_error(status.HTTP_500_INTERNAL_SERVER_ERROR, "export_failed", f"{type(exc).__name__}: {exc}")
+    filename = TEMPORAL_RESULTS_EXPORT_FILENAMES[normalized_format]
+    return FileResponse(
+        path,
+        media_type=TEMPORAL_RESULTS_EXPORT_MEDIA_TYPES[normalized_format],
+        filename=f"resultats_{project_id}_{filename}" if normalized_format == "shapefile" else f"resultats_{project_id}.{normalized_format}",
     )
 
 
-@router.head("/{project_id}/exports/results.kml")
-@router.get("/{project_id}/exports/results.kml")
-def export_project_results_kml(project_id: str, settings=Depends(get_app_settings)) -> Response:
-    try:
-        payload = build_temporal_results_kml(project_id, settings=settings)
-    except FileNotFoundError as exc:
-        raise_api_error(status.HTTP_404_NOT_FOUND, "not_found", str(exc))
-    return Response(
-        content=payload,
-        media_type="application/vnd.google-earth.kml+xml",
-        headers={"Content-Disposition": f'attachment; filename="resultats_{project_id}.kml"'},
-    )
+@router.head("/{project_id}/exports/results.{export_format}")
+@router.get("/{project_id}/exports/results.{export_format}")
+def export_project_results(
+    project_id: str,
+    export_format: str,
+    mode: str | None = Query(default=None),
+    settings=Depends(get_app_settings),
+) -> FileResponse:
+    if export_format.lower() == "topojson" and mode is not None:
+        raise_api_error(
+            status.HTTP_400_BAD_REQUEST,
+            "unsupported_export_mode",
+            "TopoJSON export supports only the default clean mode.",
+        )
+    return _export_project_results(project_id, export_format, settings)
+
+
+@router.head("/{project_id}/exports/results_shapefile.zip")
+@router.get("/{project_id}/exports/results_shapefile.zip")
+def export_project_results_shapefile(project_id: str, settings=Depends(get_app_settings)) -> FileResponse:
+    return _export_project_results(project_id, "shapefile", settings)
 
 
 @router.post("/{project_id}/milestones/{release_identifier}/override")
@@ -587,24 +609,22 @@ def prewarm_reference_tiles(
 def list_project_reference_layers(project_id: str, settings=Depends(get_app_settings)) -> list[ReferenceLayer]:
     started_at = time.perf_counter()
     try:
+        read_started_at = time.perf_counter()
         layers = list_reference_layers(project_id, settings)
-        if not layers:
-            logger.info("REFERENCE_LAYERS_REPAIR_START projectId=%s reason=empty_reference_layer_registry", project_id)
-            repaired_project, repaired_count = repair_temporal_project_reference_imagery(project_id, settings)
-            temporal_layers = temporal_reference_imagery_layers(repaired_project)
-            if temporal_layers:
-                layers = temporal_layers
-                logger.info(
-                    "REFERENCE_LAYERS_REPAIRED projectId=%s count=%s repairedCount=%s durationMs=%s",
-                    project_id,
-                    len(layers),
-                    repaired_count,
-                    round((time.perf_counter() - started_at) * 1000, 2),
-                )
+        logger.info(
+            "REFERENCE_LAYERS_TIMING projectId=%s phase=manual_registry_read ms=%s",
+            project_id,
+            round((time.perf_counter() - read_started_at) * 1000, 2),
+        )
         logger.info(
             "REFERENCE_LAYERS_LISTED projectId=%s count=%s durationMs=%s",
             project_id,
             len(layers),
+            round((time.perf_counter() - started_at) * 1000, 2),
+        )
+        logger.info(
+            "REFERENCE_LAYERS_TIMING projectId=%s phase=response ms=%s",
+            project_id,
             round((time.perf_counter() - started_at) * 1000, 2),
         )
         return layers

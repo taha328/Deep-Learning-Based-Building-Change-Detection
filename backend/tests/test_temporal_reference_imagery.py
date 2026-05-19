@@ -21,7 +21,7 @@ from src.api.main import app
 from src.config import Settings
 from src.domain.tiling import tile_range_for_bbox
 from src.schemas import TemporalProject, TemporalReferenceImagery
-from src.services.temporal_projects import get_temporal_project, save_temporal_project
+from src.services.temporal_projects import get_temporal_project, repair_temporal_project_reference_imagery, save_temporal_project
 from src.utils.geometry import bounds_dict, parse_aoi_geometry
 import src.services.temporal_reference_imagery as reference_imagery_service
 from src.services.temporal_reference_imagery import (
@@ -517,10 +517,7 @@ def test_reference_layers_listing_does_not_hydrate_reference_cogs(monkeypatch, t
         _clear_dependency_overrides()
 
     assert response.status_code == 200
-    payload = response.json()
-    assert len(payload) == 1
-    assert payload[0]["layer_id"] == "temporal-reference-WB_2024_R02"
-    assert payload[0]["storage_strategy"] == "raster_tiles"
+    assert response.json() == []
 
 
 def test_reference_layers_repair_reuses_matching_project_cog(tmp_path: Path) -> None:
@@ -542,18 +539,12 @@ def test_reference_layers_repair_reuses_matching_project_cog(tmp_path: Path) -> 
         aoi_geojson=shared_aoi,
     )
 
-    client = _client_with_settings(settings)
-    try:
-        response = client.get(f"/api/temporal-projects/{target_project_id}/reference-layers")
-    finally:
-        _clear_dependency_overrides()
+    repaired_project, repaired_count = repair_temporal_project_reference_imagery(target_project_id, settings)
 
-    assert response.status_code == 200
-    payload = response.json()
-    assert len(payload) == 1
-    assert payload[0]["layer_id"] == f"temporal-reference-{selected_release}"
-    assert payload[0]["tilejson_url"]
-    assert payload[0]["tiles_url_template"]
+    assert repaired_count == 1
+    assert repaired_project.milestones[0].reference_imagery is not None
+    assert repaired_project.milestones[0].reference_imagery.tilejson_url
+    assert repaired_project.milestones[0].reference_imagery.tiles_url_template
     target_cog = settings.temporal_projects_dir / target_project_id / "milestones" / selected_release / "reference_imagery_cog.tif"
     assert target_cog.is_file()
     assert target_cog.stat().st_size == source_cog.stat().st_size
@@ -581,14 +572,10 @@ def test_reference_layers_repair_does_not_reuse_different_aoi(tmp_path: Path) ->
         aoi_geojson=_test_aoi(offset=0.1),
     )
 
-    client = _client_with_settings(settings)
-    try:
-        response = client.get(f"/api/temporal-projects/{target_project_id}/reference-layers")
-    finally:
-        _clear_dependency_overrides()
+    repaired_project, repaired_count = repair_temporal_project_reference_imagery(target_project_id, settings)
 
-    assert response.status_code == 200
-    assert response.json() == []
+    assert repaired_count == 0
+    assert repaired_project.milestones[0].reference_imagery is None
     target_cog = settings.temporal_projects_dir / target_project_id / "milestones" / selected_release / "reference_imagery_cog.tif"
     assert not target_cog.exists()
 
@@ -631,16 +618,10 @@ def test_reference_layers_repair_generates_from_matching_shared_mosaic(tmp_path:
         )
     )
 
-    client = _client_with_settings(settings)
-    try:
-        response = client.get(f"/api/temporal-projects/{project_id}/reference-layers")
-    finally:
-        _clear_dependency_overrides()
+    repaired_project, repaired_count = repair_temporal_project_reference_imagery(project_id, settings)
 
-    assert response.status_code == 200
-    payload = response.json()
-    assert len(payload) == 1
-    assert payload[0]["layer_id"] == f"temporal-reference-{selected_release}"
+    assert repaired_count == 1
+    assert repaired_project.milestones[0].reference_imagery is not None
     target_cog = settings.temporal_projects_dir / project_id / "milestones" / selected_release / "reference_imagery_cog.tif"
     assert target_cog.is_file()
 
@@ -669,20 +650,15 @@ def test_reference_layers_repair_matches_shared_mosaic_at_metadata_zoom(tmp_path
         )
     )
 
-    client = _client_with_settings(settings)
-    try:
-        response = client.get(f"/api/temporal-projects/{project_id}/reference-layers")
-    finally:
-        _clear_dependency_overrides()
+    repaired_project, repaired_count = repair_temporal_project_reference_imagery(project_id, settings)
 
-    assert response.status_code == 200
-    payload = response.json()
-    assert len(payload) == 1
+    assert repaired_count == 1
+    assert repaired_project.milestones[0].reference_imagery is not None
     target_cog = settings.temporal_projects_dir / project_id / "milestones" / selected_release / "reference_imagery_cog.tif"
     assert target_cog.is_file()
 
 
-def test_temporal_project_load_generates_missing_buffer_layers_from_additions(tmp_path: Path) -> None:
+def test_temporal_project_load_does_not_generate_missing_buffer_layers_from_additions(tmp_path: Path) -> None:
     settings = Settings(runtime_cache_dir=tmp_path / "runtime")
     project_id = "temporal-buffer-discovery"
     project_dir = settings.temporal_projects_dir / project_id
@@ -734,10 +710,9 @@ def test_temporal_project_load_generates_missing_buffer_layers_from_additions(tm
 
     assert loaded.milestones[0].buffer_layers_geojson == {}
     non_baseline_buffers = loaded.milestones[1].buffer_layers_geojson
-    assert set(non_baseline_buffers) == {"10m", "15m", "20m"}
-    assert all(len(payload["features"]) == 1 for payload in non_baseline_buffers.values())
+    assert non_baseline_buffers == {}
     for name in ("building_change_buffer_10m.geojson", "building_change_buffer_15m.geojson", "building_change_buffer_20m.geojson"):
-        assert (project_dir / "milestones" / "WB_2022_R03" / name).is_file()
+        assert not (project_dir / "milestones" / "WB_2022_R03" / name).exists()
 
 
 def test_tilejson_metadata_lookup_touches_only_selected_release(monkeypatch, tmp_path: Path) -> None:

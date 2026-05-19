@@ -4,6 +4,8 @@ const ENABLE_CLIENT_LOG_RELAY = import.meta.env.VITE_ENABLE_CLIENT_LOG_RELAY !==
 const MAX_PAYLOAD_LENGTH = 20_000;
 const TEMPORAL_REFERENCE_PREFIX = "TEMPORAL_REFERENCE_";
 const TEMPORAL_ADDED_PREFIX = "TEMPORAL_ADDED_";
+const TEMPORAL_OUTPUT_PREFIX = "TEMPORAL_OUTPUT_";
+const TEMPORAL_ACTIVE_PREFIX = "TEMPORAL_ACTIVE_";
 const REFERENCE_LAYER_PANEL_PREFIX = "REFERENCE_LAYER_PANEL_";
 const RELAY_DEDUPE_MS = 5_000; // Suppress identical events for 5 seconds
 const MAX_DEDUPE_ENTRIES = 100;
@@ -71,6 +73,8 @@ export function relayClientLog(event: string, payload: Record<string, unknown>):
     (
       !event.startsWith(TEMPORAL_REFERENCE_PREFIX) &&
       !event.startsWith(TEMPORAL_ADDED_PREFIX) &&
+      !event.startsWith(TEMPORAL_OUTPUT_PREFIX) &&
+      !event.startsWith(TEMPORAL_ACTIVE_PREFIX) &&
       !event.startsWith(REFERENCE_LAYER_PANEL_PREFIX)
     )
   ) {
