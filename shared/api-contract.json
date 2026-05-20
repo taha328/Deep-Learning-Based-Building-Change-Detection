@@ -1,0 +1,218 @@
+{
+  "endpoints": {
+    "list_releases": {
+      "request": null,
+      "response": {
+        "releases": [
+          {
+            "identifier": "WB_2024_R01",
+            "release_date": "2024-01-01",
+            "label": "2024-01-01 | WB_2024_R01"
+          }
+        ]
+      }
+    },
+    "validate_request": {
+      "request": {
+        "aoi_geojson": {
+          "type": "Polygon",
+          "coordinates": [[[0, 0], [0, 1], [1, 1], [1, 0], [0, 0]]]
+        },
+        "t1_release": "WB_2023_R01",
+        "t2_release": "WB_2024_R01",
+        "mode": "fast_preview",
+        "inference_backend": "bandon_mps",
+        "change_threshold": 0.5,
+        "semantic_threshold": 0.5,
+        "merge_close_gap_m": 10,
+        "building_block_gap_m": 25,
+        "buffer_distances_m": [10, 15, 20],
+        "keep_disjoint_buffer_parts_separate": true
+      },
+      "response": {
+        "valid": true,
+        "normalized_aoi": {
+          "type": "Polygon",
+          "coordinates": [[[0, 0], [0, 1], [1, 1], [1, 0], [0, 0]]]
+        },
+        "estimated_tile_count_t1": 24,
+        "estimated_tile_count_t2": 24,
+        "estimated_total_tiles": 48,
+        "estimated_area_m2": 12345.67,
+        "warnings": [],
+        "blocking_errors": [],
+        "recommended_mode": "fast_preview"
+      }
+    },
+    "run_detection": {
+      "request": "same as validate_request, but all runtime thresholds are fully populated",
+      "response": {
+        "success": true,
+        "summary": {
+          "request_hash": "4d0f8d63d24b7e676a7f1e67",
+          "mode": "full_run",
+          "model_backend": "bandon_mps",
+          "result_semantics": "building_change",
+          "estimated_area_m2": 12345.67,
+          "tile_count_t1": 24,
+          "tile_count_t2": 24,
+          "total_new_buildings": 8,
+          "total_building_blocks": 3,
+          "total_new_building_area_m2": 2100.5,
+          "total_building_block_area_m2": 2510.2,
+          "total_change_polygons": 8,
+          "total_change_area_m2": 2100.5
+        },
+        "preview_images": {
+          "t1_preview_png_data_url": "data:image/png;base64,...",
+          "t2_preview_png_data_url": "data:image/png;base64,...",
+          "change_probability_preview_png_data_url": "data:image/png;base64,...",
+          "change_overlay_preview_png_data_url": "data:image/png;base64,..."
+        },
+        "change_polygons_geojson": {
+          "type": "FeatureCollection",
+          "features": []
+        },
+        "building_blocks_geojson": {
+          "type": "FeatureCollection",
+          "features": []
+        },
+        "buffer_layers_geojson": {
+          "10m": {
+            "type": "FeatureCollection",
+            "features": []
+          }
+        },
+        "tabular_metrics": {
+          "summary_rows": [],
+          "new_building_rows": [],
+          "building_block_rows": [],
+          "buffer_rows": {}
+        },
+        "artifacts": [
+          {
+            "name": "export_bundle_zip",
+            "path": "/path/to/export_bundle.zip",
+            "media_type": "application/zip",
+            "description": "Complete export bundle"
+          }
+        ],
+        "downloadable_zip_path": "/path/to/export_bundle.zip",
+        "diagnostics": {
+          "cache_hit": false,
+          "stage_seconds": {
+            "download": 12.1
+          },
+          "tile_counts": {
+            "t1": 24,
+            "t2": 24,
+            "total": 48
+          },
+          "patch_count": 9,
+          "thresholds": {
+            "change_threshold": 0.5,
+            "semantic_threshold": 0.5
+          },
+          "min_new_building_pixels": 50
+        }
+      }
+    },
+    "list_temporal_projects": {
+      "request": null,
+      "response": [
+        {
+          "project_id": "temporal-demo",
+          "name": "Hay Hassani Growth",
+          "semantics": "expansion_only",
+          "milestone_count": 4,
+          "complete_milestone_count": 3,
+          "created_at": "2026-04-17T10:00:00Z",
+          "updated_at": "2026-04-17T10:30:00Z",
+          "download_bundle_path": "/runtime_cache/temporal_projects/temporal-demo/temporal_project_bundle.zip"
+        }
+      ]
+    },
+    "get_temporal_project": {
+      "request": {
+        "project_id": "temporal-demo"
+      },
+      "response": {
+        "project_id": "temporal-demo",
+        "name": "Hay Hassani Growth",
+        "semantics": "expansion_only",
+        "aoi_geojson": {
+          "type": "Polygon",
+          "coordinates": [[[0, 0], [0, 1], [1, 1], [1, 0], [0, 0]]]
+        },
+        "milestones": [],
+        "created_at": "2026-04-17T10:00:00Z",
+        "updated_at": "2026-04-17T10:30:00Z",
+        "warnings": [],
+        "validation_blocking_errors": [],
+        "download_bundle_path": null
+      }
+    },
+    "save_temporal_project": {
+      "request": {
+        "project": "same shape as get_temporal_project response"
+      },
+      "response": {
+        "project_id": "temporal-demo",
+        "updated_at": "2026-04-17T10:30:00Z",
+        "download_bundle_path": null
+      }
+    },
+    "validate_temporal_project": {
+      "request": {
+        "project": "same shape as get_temporal_project response"
+      },
+      "response": {
+        "valid": true,
+        "project": "normalized temporal project",
+        "warnings": [
+          "Baseline milestone WB_2024_R01 has no manual override; cumulative growth will start from an empty baseline."
+        ],
+        "blocking_errors": [],
+        "estimated_total_tiles": 96,
+        "pair_estimates": [
+          {
+            "from_release_identifier": "WB_2024_R01",
+            "to_release_identifier": "WB_2025_R01",
+            "estimated_tile_count_t1": 24,
+            "estimated_tile_count_t2": 24,
+            "estimated_total_tiles": 48,
+            "warnings": [],
+            "blocking_errors": []
+          }
+        ]
+      }
+    },
+    "run_temporal_project": {
+      "request": {
+        "project_id": "temporal-demo"
+      },
+      "response": {
+        "success": true,
+        "error_message": null,
+        "project": "temporal project with milestone outputs, metrics, grouped block layers, growth envelopes, and download_bundle_path"
+      }
+    },
+    "import_temporal_override": {
+      "request": {
+        "request": {
+          "project_id": "temporal-demo",
+          "release_identifier": "WB_2025_R01",
+          "override_geojson": {
+            "type": "Polygon",
+            "coordinates": [[[0, 0], [0, 1], [1, 1], [1, 0], [0, 0]]]
+          }
+        }
+      },
+      "response": {
+        "success": true,
+        "error_message": null,
+        "project": "temporal project with updated downstream cumulative outputs, grouped block layers, and growth envelopes"
+      }
+    }
+  }
+}

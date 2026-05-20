@@ -35,8 +35,7 @@ export function WorkflowParametersPanel({
   const setSetting = useAppStore((store) => store.setSetting);
 
   const availabilityByMode = new Map(backendAvailability.map((entry) => [entry.mode, entry]));
-  const selectedBackendMode = state.settings.modelBackend === "bandon_mps" ? "bandon_mps" : state.settings.sam3BackendMode;
-  const selectedBackendAvailability = availabilityByMode.get(selectedBackendMode);
+  const selectedBackendAvailability = availabilityByMode.get(state.settings.modelBackend);
   const probeMissingForBandon =
     state.settings.modelBackend === "bandon_mps" &&
     backendAvailability.length === 0 &&
@@ -135,41 +134,18 @@ export function WorkflowParametersPanel({
           <Select
             id="model-backend"
             value={state.settings.modelBackend}
-            onChange={(event) => setSetting("modelBackend", event.target.value as "bandon_mps" | "sam3")}
+            onChange={(event) => setSetting("modelBackend", event.target.value as "bandon_mps")}
             className="border-sidebar-border bg-card text-card-foreground shadow-none"
           >
             <option value="bandon_mps">
               {availabilityByMode.get("bandon_mps")?.available === false ? t("settings.bandon_mps_unavailable") : t("settings.bandon_mps")}
             </option>
-            <option value="sam3">{t("settings.sam3_compatibility")}</option>
           </Select>
         </div>
 
-        {runtimeConfig.supportsRequestBackendSelection && state.settings.modelBackend === "sam3" ? (
-          <div className="space-y-2">
-            <FieldLabel htmlFor="sam3-mode">{t("settings.sam3_mode")}</FieldLabel>
-            <Select
-              id="sam3-mode"
-              value={state.settings.sam3BackendMode}
-              onChange={(event) =>
-                setSetting("sam3BackendMode", event.target.value as "public_zerogpu" | "local" | "huggingface_gpu")
-              }
-              className="border-sidebar-border bg-card text-card-foreground shadow-none"
-            >
-              <option value="public_zerogpu">{t("settings.public_zerogpu")}</option>
-              <option value="local">{t("settings.local")}</option>
-              <option value="huggingface_gpu">{t("settings.huggingface_gpu")}</option>
-            </Select>
-          </div>
-        ) : null}
-
         <div className="rounded border border-sidebar-border bg-sidebar px-3 py-3 text-sm text-foreground">
-          <p className="font-medium text-foreground">
-            {state.settings.modelBackend === "bandon_mps" ? t("settings.bandon_mps") : t("settings.sam3_compatibility")}
-          </p>
-          <p className="mt-1 leading-6 text-muted-foreground">
-            {state.settings.modelBackend === "bandon_mps" ? t("settings.bandon_primary") : t("settings.sam3_remote")}
-          </p>
+          <p className="font-medium text-foreground">{t("settings.bandon_mps")}</p>
+          <p className="mt-1 leading-6 text-muted-foreground">{t("settings.bandon_primary")}</p>
         </div>
 
         {backendAvailabilityLoading ? <p className="text-sm text-muted-foreground">{t("status.checking_backend")}</p> : null}

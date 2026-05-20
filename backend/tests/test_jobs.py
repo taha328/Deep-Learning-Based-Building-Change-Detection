@@ -14,7 +14,6 @@ from src.jobs import tasks as job_tasks
 from src.jobs import service as jobs_service
 from src.jobs.exceptions import JobsDisabledError
 from src.jobs.service import cancel_job, start_detection_job, start_temporal_project_job
-from src.repositories import job_repository
 from src.repositories.job_repository import mark_job_completed
 from src.schemas import ArtifactEntry, DiagnosticMetadata, RunRequest, RunResponse, SummaryStats
 
@@ -179,13 +178,13 @@ def test_cancel_job_marks_request_and_revokes(monkeypatch, tmp_path) -> None:
 def test_mark_job_completed_clears_previous_error_fields(tmp_path) -> None:
     session = _FakeJobSession(
         job=JobRecord(
-            job_id="job-stale-then-complete",
+            job_id="job-failed-then-complete",
             job_kind="temporal_project",
             status="failed",
             progress=100,
             stage="failed",
-            error_code="worker_stale",
-            error_message="Job exceeded the stale timeout.",
+            error_code="runtime_error",
+            error_message="Previous run failed.",
             created_at=datetime.now(UTC),
             updated_at=datetime.now(UTC),
             completed_at=datetime.now(UTC),
@@ -194,7 +193,7 @@ def test_mark_job_completed_clears_previous_error_fields(tmp_path) -> None:
     settings = Settings(runtime_cache_dir=tmp_path)
 
     record = mark_job_completed(
-        job_id="job-stale-then-complete",
+        job_id="job-failed-then-complete",
         result_run_id="run-1",
         raw_result={"success": True},
         settings=settings,
@@ -206,7 +205,7 @@ def test_mark_job_completed_clears_previous_error_fields(tmp_path) -> None:
     assert record.error_message is None
 
 
-def test_get_job_response_normalizes_legacy_complete_without_stale_reconcile(monkeypatch, tmp_path) -> None:
+def test_get_job_response_normalizes_legacy_complete(monkeypatch, tmp_path) -> None:
     session = _FakeJobSession(
         job=JobRecord(
             job_id="job-legacy-complete",
@@ -221,13 +220,7 @@ def test_get_job_response_normalizes_legacy_complete_without_stale_reconcile(mon
     )
     settings = Settings(runtime_cache_dir=tmp_path)
 
-    monkeypatch.setattr(jobs_service, "session_scope", lambda *_args, **_kwargs: _job_session_scope(session))
-    monkeypatch.setattr(job_repository, "session_scope", lambda *_args, **_kwargs: _job_session_scope(session))
-    monkeypatch.setattr(
-        jobs_service,
-        "reconcile_stale_jobs",
-        lambda *_args, **_kwargs: pytest.fail("read endpoints must not reconcile stale jobs"),
-    )
+    monkeypatch.setattr(jobs_service, "get_job", lambda *_args, **_kwargs: session.job)
 
     response = jobs_service.get_job_response("job-legacy-complete", settings=settings)
 
@@ -242,8 +235,8 @@ def test_worker_skips_terminal_job_before_running(monkeypatch, tmp_path) -> None
             status="failed",
             progress=100,
             stage="failed",
-            error_code="worker_stale",
-            error_message="Job exceeded the stale timeout.",
+            error_code="runtime_error",
+            error_message="Previous run failed.",
             created_at=datetime.now(UTC),
             updated_at=datetime.now(UTC),
             completed_at=datetime.now(UTC),

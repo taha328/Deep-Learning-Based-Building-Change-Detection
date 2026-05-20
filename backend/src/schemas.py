@@ -7,8 +7,7 @@ from src.execution_profiles import PipelineExecutionConfig
 
 
 ModeName = Literal["fast_preview", "full_run"]
-ModelBackendName = Literal["sam3", "bandon_mps"]
-Sam3BackendMode = Literal["public_zerogpu", "local", "huggingface_gpu"]
+InferenceBackendName = Literal["bandon_mps", "mtgcdnet_s2looking_mps"]
 LatestImagerySource = Literal["esri_wayback", "mapbox_current"]
 ReferenceLayerKind = Literal["vector", "raster"]
 ReferenceGeometryType = Literal["point", "line", "polygon", "mixed", "raster"]
@@ -132,8 +131,7 @@ class ValidationRequest(BaseModel):
     t1_release: str
     t2_release: str
     mode: ModeName
-    model_backend: ModelBackendName | None = None
-    sam3_backend_mode: Sam3BackendMode | None = None
+    inference_backend: InferenceBackendName | None = None
     change_threshold: float | None = None
     semantic_threshold: float | None = None
     min_new_building_pixels: int | None = None
@@ -156,18 +154,6 @@ class ValidationRequest(BaseModel):
         if len(value) > 8:
             raise ValueError("At most 8 buffer distances are supported.")
         return value
-
-
-class SegmentationRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    aoi_geojson: dict[str, Any]
-    release: str
-    mode: ModeName
-    model_backend: Literal["sam3"] | None = "sam3"
-    sam3_backend_mode: Sam3BackendMode | None = None
-    semantic_threshold: float | None = None
-    min_segment_pixels: int | None = None
 
 
 class ValidationResponse(BaseModel):
@@ -230,7 +216,7 @@ class SummaryStats(BaseModel):
     request_hash: str
     mode: ModeName
     model_backend: str | None = None
-    result_semantics: Literal["new_buildings", "building_change", "segmentation"] | None = None
+    result_semantics: Literal["new_buildings", "building_change"] | None = None
     estimated_area_m2: float
     tile_count_t1: int
     tile_count_t2: int
@@ -249,9 +235,6 @@ class SummaryStats(BaseModel):
     release_date: str | None = None
     dominant_src_date: str | None = None
     dominant_src_res_m: float | None = None
-    segmentation_prompt: str | None = None
-    total_segments: int = 0
-    total_segment_area_m2: float = 0.0
 
 
 class DiagnosticMetadata(BaseModel):

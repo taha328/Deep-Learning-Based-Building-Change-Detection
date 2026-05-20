@@ -12,6 +12,12 @@ import { createOpenStreetMapStyle, mapboxProvider } from "@/lib/basemap";
 import { buildBackendFileUrl } from "@/lib/backend-files";
 import { relayClientLog } from "@/lib/client-log-relay";
 import { cn } from "@/lib/utils";
+import {
+  getMilestoneColorMap,
+  getTemporalLayerPaint,
+  usesGeneratedMilestoneColors,
+  type TemporalStyledLayerKind,
+} from "@/features/map/temporal-layer-colors";
 import type {
   TemporalAddedOverlayPresentation,
   ReferenceLayerPresentation,
@@ -103,6 +109,10 @@ type LayerEntry = {
   label: string;
   enabled: boolean;
   description?: string;
+  swatch?: {
+    color: string;
+    opacity?: number;
+  };
 };
 
 type ReferenceLayerGeoJsonData = Record<string, FeatureCollection>;
@@ -161,13 +171,14 @@ type TemporalAddedLayerKind =
 type TemporalAddedLayerDefinition = {
   kind: TemporalAddedLayerKind;
   toggleKey: LayerToggleKey;
-  paint: maplibregl.FillLayerSpecification["paint"];
+  paint: NonNullable<maplibregl.FillLayerSpecification["paint"]>;
   data: (overlay: TemporalAddedOverlayPresentation) => FeatureCollection;
 };
 
 type TemporalAddedLayerLifecycle = {
   sourceId: string;
   layerId: string;
+  lineLayerId: string | null;
   signature: string;
   previousSignature: string | null;
   mode: "create" | "reuse" | "update";
@@ -586,17 +597,30 @@ function temporalAddedLayerId(projectId: string | null, releaseIdentifier: strin
   return `temporal-added-layer-${sanitizeMapLibreId(projectId ?? "unknown")}-${sanitizeMapLibreId(releaseIdentifier)}-${kind}`;
 }
 
+function temporalAddedLineLayerId(projectId: string | null, releaseIdentifier: string, kind: TemporalAddedLayerKind): string {
+  return `${temporalAddedLayerId(projectId, releaseIdentifier, kind)}-line`;
+}
+
+function isMilestoneStyledTemporalLayer(kind: TemporalAddedLayerKind): kind is TemporalStyledLayerKind {
+  return kind === "additions" || kind === "buffer10m";
+}
+
+function temporalAddedLayerIds(projectId: string | null, releaseIdentifier: string, kind: TemporalAddedLayerKind): string[] {
+  const fillLayerId = temporalAddedLayerId(projectId, releaseIdentifier, kind);
+  return isMilestoneStyledTemporalLayer(kind) ? [fillLayerId, temporalAddedLineLayerId(projectId, releaseIdentifier, kind)] : [fillLayerId];
+}
+
 const TEMPORAL_ADDED_LAYER_DEFINITIONS: TemporalAddedLayerDefinition[] = [
   {
     kind: "additions",
     toggleKey: "temporalAdditions",
-    paint: { "fill-color": "#dc2626", "fill-opacity": 0.9 },
+    paint: { "fill-color": "#B91C1C", "fill-opacity": 0.88, "fill-outline-color": "#B91C1C" },
     data: (overlay) => buildRawAdditionFeatureCollection(overlay.additions),
   },
   {
     kind: "buffer10m",
     toggleKey: "buffer10m",
-    paint: { "fill-color": BUILDING_CHANGE_BUFFER_FILL_COLORS["10m"], "fill-opacity": NON_CUMULATIVE_BUFFER_FILL_OPACITY },
+    paint: { "fill-color": "#B91C1C", "fill-opacity": 0.3, "fill-outline-color": "#B91C1C" },
     data: (overlay) => ensureFeatureCollection(overlay.buffer10m),
   },
   {
@@ -696,15 +720,56 @@ function hashString(value: string): string {
   return String(hash >>> 0);
 }
 
+function applyTemporalAddedLayerStyle(
+  map: MapLibreMap,
+  projectId: string,
+  releaseIdentifier: string,
+  kind: TemporalAddedLayerKind,
+  milestoneColor: string,
+) {
+  if (!isMilestoneStyledTemporalLayer(kind)) {
+    return;
+  }
+  const fillLayerId = temporalAddedLayerId(projectId, releaseIdentifier, kind);
+  const lineLayerId = temporalAddedLineLayerId(projectId, releaseIdentifier, kind);
+  const temporalLayerPaint = getTemporalLayerPaint(kind, milestoneColor);
+  if (map.getLayer(fillLayerId)) {
+    for (const [property, value] of Object.entries(temporalLayerPaint.fillPaint)) {
+      map.setPaintProperty(fillLayerId, property, value);
+    }
+  }
+  if (map.getLayer(lineLayerId)) {
+    for (const [property, value] of Object.entries(temporalLayerPaint.linePaint)) {
+      map.setPaintProperty(lineLayerId, property, value);
+    }
+  }
+  devLog("TEMPORAL_OUTPUT_LAYER_STYLE_APPLY", {
+    projectId,
+    releaseIdentifier,
+    layerKind: kind,
+    color: milestoneColor,
+    fillOpacity: temporalLayerPaint.fillOpacity,
+    lineOpacity: temporalLayerPaint.lineOpacity,
+  });
+}
+
 function ensureTemporalAddedLayer(
   map: MapLibreMap,
   projectId: string,
   overlay: TemporalAddedOverlayPresentation,
   definition: TemporalAddedLayerDefinition,
   sourceSignatures: Record<string, string>,
+  milestoneColor: string,
 ): TemporalAddedLayerLifecycle {
   const sourceId = temporalAddedSourceId(projectId, overlay.releaseIdentifier, definition.kind);
   const layerId = temporalAddedLayerId(projectId, overlay.releaseIdentifier, definition.kind);
+  const lineLayerId = isMilestoneStyledTemporalLayer(definition.kind)
+    ? temporalAddedLineLayerId(projectId, overlay.releaseIdentifier, definition.kind)
+    : null;
+  const temporalLayerPaint = isMilestoneStyledTemporalLayer(definition.kind)
+    ? getTemporalLayerPaint(definition.kind, milestoneColor)
+    : null;
+  const fillPaint = temporalLayerPaint?.fillPaint ?? definition.paint;
   const data = definition.data(overlay);
   const { featureCount, payloadBytes, signature } = temporalAddedDataStats(data);
   const previousSignature = sourceSignatures[sourceId] ?? null;
@@ -805,7 +870,7 @@ function ensureTemporalAddedLayer(
       id: layerId,
       type: "fill",
       source: sourceId,
-      paint: definition.paint,
+      paint: fillPaint,
       layout: { visibility: "none" },
     });
     devLog("TEMPORAL_ADDED_LAYER_CREATE", {
@@ -818,6 +883,9 @@ function ensureTemporalAddedLayer(
       payloadBytes,
     });
   } else {
+    for (const [property, value] of Object.entries(fillPaint)) {
+      map.setPaintProperty(layerId, property, value);
+    }
     devLog("TEMPORAL_ADDED_LAYER_REUSE", {
       projectId,
       releaseIdentifier: overlay.releaseIdentifier,
@@ -829,7 +897,42 @@ function ensureTemporalAddedLayer(
     });
   }
 
-  return { sourceId, layerId, signature, previousSignature, mode, featureCount, payloadBytes };
+  if (lineLayerId && temporalLayerPaint) {
+    if (!map.getLayer(lineLayerId)) {
+      map.addLayer({
+        id: lineLayerId,
+        type: "line",
+        source: sourceId,
+        paint: temporalLayerPaint.linePaint,
+        layout: { visibility: "none" },
+      });
+      devLog("TEMPORAL_ADDED_LAYER_CREATE", {
+        projectId,
+        releaseIdentifier: overlay.releaseIdentifier,
+        kind: `${definition.kind}:line`,
+        sourceId,
+        layerId: lineLayerId,
+        featureCount,
+        payloadBytes,
+      });
+    } else {
+      for (const [property, value] of Object.entries(temporalLayerPaint.linePaint)) {
+        map.setPaintProperty(lineLayerId, property, value);
+      }
+      devLog("TEMPORAL_ADDED_LAYER_REUSE", {
+        projectId,
+        releaseIdentifier: overlay.releaseIdentifier,
+        kind: `${definition.kind}:line`,
+        sourceId,
+        layerId: lineLayerId,
+        featureCount,
+        payloadBytes,
+      });
+    }
+    applyTemporalAddedLayerStyle(map, projectId, overlay.releaseIdentifier, definition.kind, milestoneColor);
+  }
+
+  return { sourceId, layerId, lineLayerId, signature, previousSignature, mode, featureCount, payloadBytes };
 }
 
 function syncTemporalOutputLayers(params: {
@@ -837,10 +940,11 @@ function syncTemporalOutputLayers(params: {
   projectId: string | null;
   activeReleaseIdentifier: string | null;
   availableReleaseIdentifiers: string[];
+  colorByReleaseIdentifier: Record<string, string>;
   layerState: LayerToggleState;
   registeredLayerIds: Set<string>;
 }): TemporalOutputLayerSyncResult {
-  const { map, projectId, activeReleaseIdentifier, availableReleaseIdentifiers, layerState, registeredLayerIds } = params;
+  const { map, projectId, activeReleaseIdentifier, availableReleaseIdentifiers, colorByReleaseIdentifier, layerState, registeredLayerIds } = params;
   const emptyResult = { appliedCount: 0, hiddenCount: 0, skippedCount: registeredLayerIds.size, missingLayerCount: 0 };
   const styleLoaded = Boolean(map?.isStyleLoaded());
   const styleReady = isMapStyleReadyForLayerMutation(map);
@@ -849,11 +953,19 @@ function syncTemporalOutputLayers(params: {
     (definition) => definition.toggleKey,
   );
   const temporalLayerCount = registeredLayerIds.size;
-  const expectedOutputLayerCount = availableReleaseIdentifiers.length * TEMPORAL_ADDED_LAYER_DEFINITIONS.length;
+  const expectedOutputLayerCount = availableReleaseIdentifiers.reduce(
+    (count, releaseIdentifier) =>
+      count +
+      TEMPORAL_ADDED_LAYER_DEFINITIONS.reduce(
+        (layerCount, definition) => layerCount + temporalAddedLayerIds(projectId, releaseIdentifier, definition.kind).length,
+        0,
+      ),
+    0,
+  );
   const expectedActiveLayerIds =
     projectId && activeReleaseIdentifier
-      ? TEMPORAL_ADDED_LAYER_DEFINITIONS.map((definition) =>
-          temporalAddedLayerId(projectId, activeReleaseIdentifier, definition.kind),
+      ? TEMPORAL_ADDED_LAYER_DEFINITIONS.flatMap((definition) =>
+          temporalAddedLayerIds(projectId, activeReleaseIdentifier, definition.kind),
         )
       : [];
   const missingLayerIds = expectedActiveLayerIds.filter((layerId) => !registeredLayerIds.has(layerId));
@@ -1008,14 +1120,16 @@ function syncTemporalOutputLayers(params: {
   const hiddenLayerIds: string[] = [];
   for (const layerId of registeredLayerIds) {
     const activeDefinition = TEMPORAL_ADDED_LAYER_DEFINITIONS.find(
-      (definition) => layerId === temporalAddedLayerId(projectId, activeReleaseIdentifier, definition.kind),
+      (definition) =>
+        activeReleaseIdentifier &&
+        temporalAddedLayerIds(projectId, activeReleaseIdentifier, definition.kind).includes(layerId),
     );
     const matchingReleaseIdentifier =
       activeReleaseIdentifier && activeDefinition
         ? activeReleaseIdentifier
         : availableReleaseIdentifiers.find((releaseIdentifier) =>
             TEMPORAL_ADDED_LAYER_DEFINITIONS.some(
-              (definition) => layerId === temporalAddedLayerId(projectId, releaseIdentifier, definition.kind),
+              (definition) => temporalAddedLayerIds(projectId, releaseIdentifier, definition.kind).includes(layerId),
             ),
           );
     const mapLayerExists = Boolean(map.getLayer(layerId));
@@ -1044,6 +1158,10 @@ function syncTemporalOutputLayers(params: {
     }
 
     if (activeDefinition) {
+      const color = colorByReleaseIdentifier[activeReleaseIdentifier] ?? "#B91C1C";
+      if (layerId === temporalAddedLayerId(projectId, activeReleaseIdentifier, activeDefinition.kind)) {
+        applyTemporalAddedLayerStyle(map, projectId, activeReleaseIdentifier, activeDefinition.kind, color);
+      }
       devLog("TEMPORAL_OUTPUT_LAYER_FILTER_APPLIED", {
         projectId,
         layerId,
@@ -2309,11 +2427,40 @@ export function MapView({
     workflowMode === "temporal" ? temporalPresentation?.referenceImageryTimeline ?? [] : [];
   const temporalAvailableMilestoneIds =
     workflowMode === "temporal" ? temporalPresentation?.availableMilestoneIds ?? [] : [];
+  const temporalMilestoneColorByReleaseIdentifier = useMemo(
+    () => (workflowMode === "temporal" ? getMilestoneColorMap(temporalAvailableMilestoneIds) : {}),
+    [temporalAvailableMilestoneIds, workflowMode],
+  );
+  const activeTemporalMilestoneColor =
+    temporalPresentation?.selectedReleaseIdentifier
+      ? temporalMilestoneColorByReleaseIdentifier[temporalPresentation.selectedReleaseIdentifier] ?? "#B91C1C"
+      : "#B91C1C";
   const temporalSelectedMilestoneIndex =
     workflowMode === "temporal" ? temporalPresentation?.selectedMilestoneIndex ?? -1 : -1;
   const temporalHydratingProject =
     workflowMode === "temporal" ? temporalPresentation?.isHydratingProject ?? false : false;
   const temporalProjectId = workflowMode === "temporal" ? temporalPresentation?.projectId ?? null : null;
+  useEffect(() => {
+    if (workflowMode !== "temporal" || !temporalProjectId || temporalAvailableMilestoneIds.length === 0) {
+      return;
+    }
+    devLog("TEMPORAL_MILESTONE_COLOR_MAP", {
+      projectId: temporalProjectId,
+      colorByReleaseIdentifier: temporalMilestoneColorByReleaseIdentifier,
+    });
+    if (usesGeneratedMilestoneColors(temporalAvailableMilestoneIds.length)) {
+      console.warn("TEMPORAL_MILESTONE_COLOR_PALETTE_EXTENDED", {
+        projectId: temporalProjectId,
+        milestoneCount: temporalAvailableMilestoneIds.length,
+        colorByReleaseIdentifier: temporalMilestoneColorByReleaseIdentifier,
+      });
+      devLog("TEMPORAL_MILESTONE_COLOR_PALETTE_EXTENDED", {
+        projectId: temporalProjectId,
+        milestoneCount: temporalAvailableMilestoneIds.length,
+        colorByReleaseIdentifier: temporalMilestoneColorByReleaseIdentifier,
+      });
+    }
+  }, [temporalAvailableMilestoneIds, temporalMilestoneColorByReleaseIdentifier, temporalProjectId, workflowMode]);
   const getTemporalOutputSyncLayerState = useCallback(
     (projectIdForSync: string | null): LayerToggleState => {
       if (!projectIdForSync) {
@@ -2983,6 +3130,7 @@ export function MapView({
         projectId,
         activeReleaseIdentifier: releaseIdentifier,
         availableReleaseIdentifiers: temporalAvailableMilestoneIds,
+        colorByReleaseIdentifier: temporalMilestoneColorByReleaseIdentifier,
         layerState: getTemporalOutputSyncLayerState(projectId),
         registeredLayerIds: temporalAddedLayerIdsRef.current,
       });
@@ -3335,6 +3483,7 @@ export function MapView({
         projectId,
         activeReleaseIdentifier: temporalReferenceImagery.releaseIdentifier,
         availableReleaseIdentifiers: temporalAvailableMilestoneIds,
+        colorByReleaseIdentifier: temporalMilestoneColorByReleaseIdentifier,
         layerState: getTemporalOutputSyncLayerState(projectId),
         registeredLayerIds: temporalAddedLayerIdsRef.current,
       });
@@ -3393,6 +3542,7 @@ export function MapView({
     referenceLayers,
     temporalPresentation,
     temporalAvailableMilestoneIds,
+    temporalMilestoneColorByReleaseIdentifier,
     temporalReferenceImagery,
     temporalReferenceImageryAvailable,
     temporalSelectedMilestoneIndex,
@@ -3435,6 +3585,7 @@ export function MapView({
         projectId,
         activeReleaseIdentifier: temporalPresentation?.selectedReleaseIdentifier ?? null,
         availableReleaseIdentifiers: temporalAvailableMilestoneIds,
+        colorByReleaseIdentifier: temporalMilestoneColorByReleaseIdentifier,
         layerState: outputSyncLayerState,
         registeredLayerIds: temporalAddedLayerIdsRef.current,
       });
@@ -3446,6 +3597,7 @@ export function MapView({
         projectId,
         activeReleaseIdentifier: temporalPresentation?.selectedReleaseIdentifier ?? null,
         availableReleaseIdentifiers: temporalAvailableMilestoneIds,
+        colorByReleaseIdentifier: temporalMilestoneColorByReleaseIdentifier,
         layerState: outputSyncLayerState,
         registeredLayerIds: temporalAddedLayerIdsRef.current,
       });
@@ -3467,6 +3619,7 @@ export function MapView({
         projectId,
         activeReleaseIdentifier: null,
         availableReleaseIdentifiers: temporalAvailableMilestoneIds,
+        colorByReleaseIdentifier: temporalMilestoneColorByReleaseIdentifier,
         layerState: outputSyncLayerState,
         registeredLayerIds: temporalAddedLayerIdsRef.current,
       });
@@ -3502,10 +3655,14 @@ export function MapView({
       projectUpdatedAt: temporalPresentation.projectUpdatedAt,
       releases: registrationCandidates.map((overlay) => overlay.releaseIdentifier),
       definitions: TEMPORAL_ADDED_LAYER_DEFINITIONS.map((definition) => definition.kind),
+      colors: registrationCandidates.map((overlay) => [
+        overlay.releaseIdentifier,
+        temporalMilestoneColorByReleaseIdentifier[overlay.releaseIdentifier] ?? "#B91C1C",
+      ]),
     });
     const expectedLayerIds = registrationCandidates.flatMap((overlay) =>
-      TEMPORAL_ADDED_LAYER_DEFINITIONS.map((definition) =>
-        temporalAddedLayerId(projectId, overlay.releaseIdentifier, definition.kind),
+      TEMPORAL_ADDED_LAYER_DEFINITIONS.flatMap((definition) =>
+        temporalAddedLayerIds(projectId, overlay.releaseIdentifier, definition.kind),
       ),
     );
     const registrationAlreadyReady =
@@ -3519,19 +3676,36 @@ export function MapView({
       const stats = temporalAddedRegistrationStatsRef.current[registrationKey];
       totalFeatureCount = stats?.featureCount ?? 0;
       totalPayloadBytes = stats?.payloadBytes ?? 0;
+      for (const overlay of registrationCandidates) {
+        for (const definition of TEMPORAL_ADDED_LAYER_DEFINITIONS) {
+          applyTemporalAddedLayerStyle(
+            map,
+            projectId,
+            overlay.releaseIdentifier,
+            definition.kind,
+            temporalMilestoneColorByReleaseIdentifier[overlay.releaseIdentifier] ?? "#B91C1C",
+          );
+        }
+      }
     } else {
       for (const overlay of registrationCandidates) {
         for (const definition of TEMPORAL_ADDED_LAYER_DEFINITIONS) {
-          const beforeLayerExists = Boolean(map.getLayer(temporalAddedLayerId(projectId, overlay.releaseIdentifier, definition.kind)));
+          const beforeLayerCount = temporalAddedLayerIds(projectId, overlay.releaseIdentifier, definition.kind).filter((layerId) =>
+            Boolean(map.getLayer(layerId)),
+          ).length;
           const lifecycle = ensureTemporalAddedLayer(
             map,
             projectId,
             overlay,
             definition,
             temporalAddedSourceSignaturesRef.current,
+            temporalMilestoneColorByReleaseIdentifier[overlay.releaseIdentifier] ?? "#B91C1C",
           );
           temporalAddedSourceIdsRef.current.add(lifecycle.sourceId);
           temporalAddedLayerIdsRef.current.add(lifecycle.layerId);
+          if (lifecycle.lineLayerId) {
+            temporalAddedLayerIdsRef.current.add(lifecycle.lineLayerId);
+          }
           totalFeatureCount += lifecycle.featureCount;
           totalPayloadBytes += lifecycle.payloadBytes;
           if (lifecycle.mode === "create") {
@@ -3541,11 +3715,11 @@ export function MapView({
           } else {
             reusedSources += 1;
           }
-          if (beforeLayerExists) {
-            reusedLayers += 1;
-          } else {
-            createdLayers += 1;
-          }
+          const afterLayerCount = [lifecycle.layerId, lifecycle.lineLayerId].filter(
+            (layerId): layerId is string => Boolean(layerId),
+          ).length;
+          reusedLayers += beforeLayerCount;
+          createdLayers += Math.max(0, afterLayerCount - beforeLayerCount);
         }
       }
       temporalAddedRegistrationKeyRef.current = registrationKey;
@@ -3607,7 +3781,15 @@ export function MapView({
       ),
       registeredLayerIds: Array.from(temporalAddedLayerIdsRef.current),
       temporalLayerCount: temporalAddedLayerIdsRef.current.size,
-      expectedOutputLayerCount: temporalAvailableMilestoneIds.length * TEMPORAL_ADDED_LAYER_DEFINITIONS.length,
+      expectedOutputLayerCount: temporalAvailableMilestoneIds.reduce(
+        (count, releaseIdentifier) =>
+          count +
+          TEMPORAL_ADDED_LAYER_DEFINITIONS.reduce(
+            (layerCount, definition) => layerCount + temporalAddedLayerIds(projectId, releaseIdentifier, definition.kind).length,
+            0,
+          ),
+        0,
+      ),
     });
 
     const syncResult = syncTemporalOutputLayers({
@@ -3615,6 +3797,7 @@ export function MapView({
       projectId,
       activeReleaseIdentifier: selectedReleaseIdentifier,
       availableReleaseIdentifiers: temporalAvailableMilestoneIds,
+      colorByReleaseIdentifier: temporalMilestoneColorByReleaseIdentifier,
       layerState: outputSyncLayerState,
       registeredLayerIds: temporalAddedLayerIdsRef.current,
     });
@@ -3634,6 +3817,7 @@ export function MapView({
           projectId,
           activeReleaseIdentifier: selectedReleaseIdentifier,
           availableReleaseIdentifiers: temporalAvailableMilestoneIds,
+          colorByReleaseIdentifier: temporalMilestoneColorByReleaseIdentifier,
           layerState: outputSyncLayerState,
           registeredLayerIds: temporalAddedLayerIdsRef.current,
         });
@@ -3651,6 +3835,7 @@ export function MapView({
               projectId,
               activeReleaseIdentifier: selectedReleaseIdentifier,
               availableReleaseIdentifiers: temporalAvailableMilestoneIds,
+              colorByReleaseIdentifier: temporalMilestoneColorByReleaseIdentifier,
               layerState: outputSyncLayerState,
               registeredLayerIds: temporalAddedLayerIdsRef.current,
             });
@@ -3700,6 +3885,7 @@ export function MapView({
     mapStyleRevision,
     temporalAddedOverlayTimeline,
     temporalAvailableMilestoneIds,
+    temporalMilestoneColorByReleaseIdentifier,
     temporalPresentation,
     temporalProjectId,
     temporalSelectedMilestoneIndex,
@@ -4289,11 +4475,13 @@ export function MapView({
               key: "temporalAdditions",
               label: t("map.additions"),
               enabled: selectedTemporalMilestoneReady && temporalVectors.temporalAdditions.features.length > 0,
+              swatch: { color: activeTemporalMilestoneColor, opacity: 0.88 },
             },
             {
               key: "buffer10m",
               label: `${t("map.building_change_buffer")} 10 m`,
               enabled: selectedTemporalMilestoneReady && pairwiseBuffers.buffer10m.features.length > 0,
+              swatch: { color: activeTemporalMilestoneColor, opacity: 0.3 },
             },
             {
               key: "buffer15m",
@@ -4388,7 +4576,16 @@ export function MapView({
       )}
     >
       <span className="min-w-0">
-        <span className="block">{entry.label}</span>
+        <span className="flex min-w-0 items-center gap-2">
+          {entry.swatch ? (
+            <span
+              aria-hidden="true"
+              className="h-3 w-3 shrink-0 rounded-[2px] border border-border"
+              style={{ backgroundColor: entry.swatch.color, opacity: entry.swatch.opacity ?? 1 }}
+            />
+          ) : null}
+          <span className="block truncate">{entry.label}</span>
+        </span>
         {entry.description ? <span className="mt-0.5 block text-caption text-muted-foreground">{entry.description}</span> : null}
       </span>
       <input

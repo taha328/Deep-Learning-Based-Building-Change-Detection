@@ -93,7 +93,6 @@ def jobs_health(settings: Settings = Depends(get_app_settings)) -> dict[str, obj
             "broker_url": _broker_url(settings),
             "celery_queue": settings.celery_task_default_queue,
             "celery_worker_pool": settings.celery_worker_pool,
-            "celery_job_stale_after_minutes": settings.celery_job_stale_after_minutes,
         }
 
     redis_state = redis_health(settings)
@@ -104,5 +103,4 @@ def jobs_health(settings: Settings = Depends(get_app_settings)) -> dict[str, obj
         "broker_url": _broker_url(settings),
         "celery_queue": settings.celery_task_default_queue,
         "celery_worker_pool": settings.celery_worker_pool,
-        "celery_job_stale_after_minutes": settings.celery_job_stale_after_minutes,
     }

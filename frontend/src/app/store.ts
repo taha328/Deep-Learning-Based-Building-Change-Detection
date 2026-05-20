@@ -5,7 +5,6 @@ import type {
   ModeName,
   ModelBackendName,
   RunResponse,
-  Sam3BackendMode,
   TemporalProject,
   ValidationResponse,
 } from "@/api/contracts";
@@ -24,7 +23,6 @@ export interface DetectionSettings {
   t2Release: string;
   mode: ModeName;
   modelBackend: ModelBackendName;
-  sam3BackendMode: Sam3BackendMode;
   changeThreshold: number;
   semanticThreshold: number;
   mergeCloseGapM: number;
@@ -94,7 +92,6 @@ function buildDefaultSettings(): DetectionSettings {
     t2Release: "",
     mode: "full_run",
     modelBackend: runtimeConfig.defaultModelBackend,
-    sam3BackendMode: runtimeConfig.defaultSam3BackendMode,
     changeThreshold: 0.5,
     semanticThreshold: 0.5,
     mergeCloseGapM: 10,

@@ -29,8 +29,6 @@ import type {
   TemporalMilestone,
   TemporalProject,
   TemporalProjectValidationResponse,
-  ModelBackendName,
-  Sam3BackendMode,
 } from "@/api/contracts";
 import {
   createTemporalProjectExportBundle,
@@ -319,19 +317,9 @@ function preferredLoadedProjectPanel(project: TemporalProject): WorkflowSectionI
   return project.milestones.length > 0 ? "progress" : "aoi";
 }
 
-function buildExecutionConfig(
-  modelBackend: ModelBackendName,
-  sam3BackendMode: Sam3BackendMode,
-): PipelineExecutionConfig {
-  if (modelBackend === "bandon_mps") {
-    return {
-      model_backend: "bandon_mps",
-    };
-  }
-
+function buildExecutionConfig(): PipelineExecutionConfig {
   return {
-    model_backend: "sam3",
-    backend_mode: sam3BackendMode,
+    inference_backend: "bandon_mps",
   };
 }
 
@@ -763,8 +751,8 @@ export function TemporalMosaicPanel({
       return;
     }
     setProgressMetricsVisible(false);
-    setProject(emptyProject(aoi, t("temporal.untitled_project"), buildExecutionConfig(settings.modelBackend, settings.sam3BackendMode)));
-  }, [aoi, project, settings.modelBackend, settings.sam3BackendMode, setProject, temporalProjectBootstrap, loadProjectMutation.isPending, workflowMode, t]);
+    setProject(emptyProject(aoi, t("temporal.untitled_project"), buildExecutionConfig()));
+  }, [aoi, project, setProject, temporalProjectBootstrap, loadProjectMutation.isPending, workflowMode, t]);
 
   useEffect(() => {
     if (!project || hydratingAoiRef.current) {
@@ -1063,7 +1051,7 @@ export function TemporalMosaicPanel({
   const syncProjectWithCurrentAoi = (current: TemporalProject): TemporalProject => ({
     ...current,
     aoi_geojson: aoi,
-    execution_config: buildExecutionConfig(settings.modelBackend, settings.sam3BackendMode),
+    execution_config: buildExecutionConfig(),
     latest_source: current.latest_source ?? "esri_wayback",
     updated_at: nowIso(),
   });
@@ -1108,7 +1096,7 @@ export function TemporalMosaicPanel({
     try {
       const projectId = buildProjectIdFromName(name);
       const nextProject: TemporalProject = {
-        ...emptyProject(aoi, t("temporal.untitled_project"), buildExecutionConfig(settings.modelBackend, settings.sam3BackendMode)),
+        ...emptyProject(aoi, t("temporal.untitled_project"), buildExecutionConfig()),
         project_id: projectId,
         name,
         project_dir: resolveProjectDirectory(projectId, directory),

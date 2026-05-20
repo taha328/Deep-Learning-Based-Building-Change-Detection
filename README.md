@@ -5,7 +5,7 @@ This monorepo contains a React frontend and a local-first FastAPI backend:
 - [`frontend/`](./frontend): React + Vite application
 - [`backend/`](./backend): FastAPI API plus local processing pipeline
 
-The frontend talks only to FastAPI. Optional remote SAM3 execution is still supported internally by the backend through `gradio_client`, but that adapter is not exposed to the browser.
+The frontend talks only to FastAPI. Inference is local-only through `bandon_mps` or `mtgcdnet_s2looking_mps`.
 
 ## Repository Layout
 
@@ -17,6 +17,24 @@ notebook_.ipynb  # original scientific workflow
 ```
 
 ## Local Run
+
+One-command dev stack:
+
+```bash
+./scripts/dev_start_all.sh
+```
+
+Open:
+
+```text
+http://127.0.0.1:5173/
+```
+
+Keep the `dev_start_all.sh` terminal open. Pressing `CTRL+C` stops the frontend, backend, and Celery worker; if the browser says connection refused, start the stack again. To stop stale dev processes and free ports `5173`, `5174`, and `8000` manually:
+
+```bash
+./scripts/dev_stop_all.sh
+```
 
 Backend:
 
@@ -133,8 +151,7 @@ The geospatial and model pipeline remains unchanged:
 
 - live Wayback release discovery
 - AOI validation and tile-budget guards
-- tiled per-date building extraction
-- local BANDON MTGCDNet or backend-managed remote SAM3 execution
+- local MTGCDNet change detection through `bandon_mps` or `mtgcdnet_s2looking_mps`
 - change score derivation, cleanup, vectorization, blocks, buffers, and exports
 
 ## API Contract Snapshot

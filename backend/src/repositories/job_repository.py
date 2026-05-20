@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from datetime import timedelta
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from src.config import Settings
@@ -16,7 +14,6 @@ from src.db.session import session_scope
 JobStatus = Literal["queued", "running", "completed", "failed", "cancel_requested", "cancelled"]
 LEGACY_COMPLETED_JOB_STATUS = "complete"
 COMPLETED_JOB_STATUS = "completed"
-STALE_JOB_STATUSES = ("queued", "running")
 TERMINAL_JOB_STATUSES = (COMPLETED_JOB_STATUS, LEGACY_COMPLETED_JOB_STATUS, "failed", "cancelled")
 
 
@@ -190,16 +187,6 @@ def mark_job_completed(
     return record
 
 
-def is_job_stale(record: JobRecord, *, stale_after_minutes: int) -> bool:
-    if record.status not in STALE_JOB_STATUSES:
-        return False
-    stale_before = utc_now() - timedelta(minutes=max(1, stale_after_minutes))
-    reference_time = record.started_at or record.updated_at or record.created_at
-    if reference_time is None:
-        return False
-    return reference_time < stale_before
-
-
 def mark_job_failed(
     *,
     job_id: str,
@@ -303,38 +290,6 @@ def list_jobs(
     if job_kind:
         query = query.filter(JobRecord.job_kind == job_kind)
     return query.order_by(JobRecord.created_at.desc()).limit(limit).all()
-
-
-def mark_stale_jobs_failed(
-    *,
-    stale_after_minutes: int,
-    settings: Settings | None = None,
-    session: Session | None = None,
-) -> list[JobRecord]:
-    if session is None:
-        with session_scope(settings) as scoped_session:
-            return mark_stale_jobs_failed(stale_after_minutes=stale_after_minutes, settings=settings, session=scoped_session)
-
-    stale_before = utc_now() - timedelta(minutes=max(1, stale_after_minutes))
-    query = (
-        session.query(JobRecord)
-        .filter(JobRecord.status.in_(STALE_JOB_STATUSES))
-        .filter(func.coalesce(JobRecord.started_at, JobRecord.updated_at, JobRecord.created_at) < stale_before)
-    )
-    stale_jobs = query.all()
-    if not stale_jobs:
-        return []
-
-    message = f"Job exceeded the stale timeout of {stale_after_minutes} minute(s) without completing."
-    for record in stale_jobs:
-        record.status = "failed"
-        record.stage = "failed"
-        record.progress = 100
-        record.error_code = "worker_stale"
-        record.error_message = message
-        record.message = message
-        record.completed_at = record.completed_at or utc_now()
-    return stale_jobs
 
 
 def get_project_for_job(session: Session, project_id: str) -> ProjectRecord | None:

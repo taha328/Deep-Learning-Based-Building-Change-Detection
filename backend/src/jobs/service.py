@@ -18,7 +18,6 @@ from src.repositories.job_repository import (
     mark_job_cancel_requested,
     mark_job_enqueued,
     mark_job_failed,
-    mark_stale_jobs_failed,
     normalize_job_status,
 )
 from src.schemas import RunRequest
@@ -49,16 +48,6 @@ def assert_redis_available(settings: Settings) -> None:
             "Redis is unavailable. Start Redis before using async jobs.",
             details={"broker_url": _broker_url(settings), "error": str(exc)},
         )
-
-
-def reconcile_stale_jobs(settings: Settings) -> int:
-    with session_scope(settings) as session:
-        stale_jobs = mark_stale_jobs_failed(
-            stale_after_minutes=settings.celery_job_stale_after_minutes,
-            settings=settings,
-            session=session,
-        )
-        return len(stale_jobs)
 
 
 def _job_response(job: JobRecord) -> JobResponse:

@@ -206,10 +206,10 @@ def resolve_temporal_project_execution_config(project: TemporalProject, settings
             continue
         saw_legacy_pair = True
         if response.summary.model_backend == "bandon_mps":
-            return PipelineExecutionConfig(model_backend="bandon_mps")
+            return PipelineExecutionConfig(inference_backend=settings.inference_backend)
 
     if saw_legacy_pair:
-        return PipelineExecutionConfig(model_backend="sam3", backend_mode="public_zerogpu")
+        return PipelineExecutionConfig(inference_backend=settings.inference_backend)
 
     return _default_temporal_execution_config(settings)
 
@@ -3145,12 +3145,12 @@ def run_temporal_project(
     logger.info("EFFECTIVE_INFERENCE_BACKEND value=%s projectId=%s", settings.inference_backend, project.project_id)
     logger.info(
         "EFFECTIVE_CHECKPOINT_PATH value=%s projectId=%s",
-        request_hash_context.get("bandon_checkpoint_path") if request_hash_context else None,
+        request_hash_context.get("checkpoint_path") if request_hash_context else None,
         project.project_id,
     )
     logger.info(
         "EFFECTIVE_CHECKPOINT_SHA256 value=%s projectId=%s",
-        request_hash_context.get("bandon_checkpoint_sha256") if request_hash_context else None,
+        request_hash_context.get("checkpoint_sha256") if request_hash_context else None,
         project.project_id,
     )
     logger.info(

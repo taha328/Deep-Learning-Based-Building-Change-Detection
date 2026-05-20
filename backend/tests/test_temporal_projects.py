@@ -81,7 +81,7 @@ def _sample_project(project_id: str = "temporal-demo") -> TemporalProject:
 
 
 def _bandon_config() -> PipelineExecutionConfig:
-    return PipelineExecutionConfig(model_backend="bandon_mps")
+    return PipelineExecutionConfig(inference_backend="bandon_mps")
 
 
 def _bandon_pair_response(
@@ -91,7 +91,7 @@ def _bandon_pair_response(
     releases: list[WaybackRelease],
     geojson: dict,
 ) -> RunResponse:
-    backend = resolve_backend(PipelineExecutionConfig(model_backend="bandon_mps"), settings=settings)
+    backend = resolve_backend(PipelineExecutionConfig(inference_backend="bandon_mps"), settings=settings)
     configured_settings = backend.configure_settings(settings)
     validation, prepared = validate_request(
         request,
@@ -254,7 +254,7 @@ def test_run_temporal_project_builds_monotonic_cumulative_union(monkeypatch, tmp
 
 
 def test_run_temporal_project_infers_legacy_bandon_execution_config_and_skips_reruns(monkeypatch, tmp_path) -> None:
-    settings = Settings(runtime_cache_dir=tmp_path, model_backend_default="sam3")
+    settings = Settings(runtime_cache_dir=tmp_path)
     releases = _sample_releases(settings)
     monkeypatch.setattr("src.services.temporal_projects.list_releases", lambda _: releases)
     project = save_temporal_project(_sample_project("legacy-bandon"), settings)
@@ -295,18 +295,18 @@ def test_run_temporal_project_infers_legacy_bandon_execution_config_and_skips_re
     project_json_path.write_text(json.dumps(legacy_payload, indent=2))
 
     inferred = resolve_temporal_project_execution_config(get_temporal_project(project.project_id, settings), settings)
-    assert inferred.model_backend == "bandon_mps"
+    assert inferred.inference_backend == "bandon_mps"
 
     executed_pairs.clear()
     rerun = run_temporal_project(project.project_id, settings=settings, pair_runner=_pair_runner)
     assert rerun.success is True
     assert rerun.project.execution_config is not None
-    assert rerun.project.execution_config.model_backend == "bandon_mps"
+    assert rerun.project.execution_config.inference_backend == "bandon_mps"
     assert executed_pairs == []
 
 
 def test_run_temporal_project_only_executes_appended_milestone(monkeypatch, tmp_path) -> None:
-    settings = Settings(runtime_cache_dir=tmp_path, model_backend_default="sam3")
+    settings = Settings(runtime_cache_dir=tmp_path)
     releases = _sample_releases(settings)
     monkeypatch.setattr("src.services.temporal_projects.list_releases", lambda _: releases)
     project = save_temporal_project(
@@ -369,7 +369,6 @@ def test_run_temporal_project_only_executes_appended_milestone(monkeypatch, tmp_
 def test_mapbox_latest_source_adds_synthetic_latest_milestone(monkeypatch, tmp_path) -> None:
     settings = Settings(
         runtime_cache_dir=tmp_path,
-        model_backend_default="bandon_mps",
         mapbox_current_imagery_enabled=True,
         mapbox_access_token="test-token",
     )
@@ -402,7 +401,7 @@ def test_mapbox_latest_source_adds_synthetic_latest_milestone(monkeypatch, tmp_p
         project,
         settings=settings,
         remote_patch_budget_enabled=False,
-        request_hash_context={"model_backend": "bandon_mps", "backend_mode": "bandon_mps"},
+        request_hash_context={"model_backend": "bandon_mps", "inference_backend": "bandon_mps"},
         execution_config=_bandon_config(),
     )
 
@@ -416,7 +415,6 @@ def test_mapbox_latest_source_adds_synthetic_latest_milestone(monkeypatch, tmp_p
 def test_mapbox_latest_source_runs_after_latest_wayback_milestone(monkeypatch, tmp_path) -> None:
     settings = Settings(
         runtime_cache_dir=tmp_path,
-        model_backend_default="bandon_mps",
         mapbox_current_imagery_enabled=True,
         mapbox_access_token="test-token",
     )
@@ -470,7 +468,7 @@ def test_mapbox_latest_source_runs_after_latest_wayback_milestone(monkeypatch, t
 
 
 def test_run_temporal_project_reruns_only_dirty_prefix_boundary(monkeypatch, tmp_path) -> None:
-    settings = Settings(runtime_cache_dir=tmp_path, model_backend_default="sam3")
+    settings = Settings(runtime_cache_dir=tmp_path)
     releases = _sample_releases_with_2027(settings)
     monkeypatch.setattr("src.services.temporal_projects.list_releases", lambda _: releases)
     project = save_temporal_project(

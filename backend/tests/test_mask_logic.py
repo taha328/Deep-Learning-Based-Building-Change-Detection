@@ -1,6 +1,6 @@
 import numpy as np
 
-from src.domain.inference import derive_new_building_products
+from src.domain.change_products import derive_new_building_products
 
 
 def test_new_building_mask_logic_matches_notebook() -> None:

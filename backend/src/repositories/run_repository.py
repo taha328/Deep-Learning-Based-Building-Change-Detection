@@ -86,7 +86,7 @@ def save_detection_run(
     run.request_hash = request_hash
     run.status = status
     run.mode = request.mode
-    run.model_backend = response.summary.model_backend if response.summary else request.model_backend
+    run.model_backend = response.summary.model_backend if response.summary else request.inference_backend
     run.completed_at = datetime.now(UTC)
     run.error_code = response.error_code
     run.error_message = response.error_message
@@ -122,7 +122,7 @@ def save_temporal_run(
     run.project_db_id = project.id if project else None
     run.status = status
     run.model_backend = (
-        response.project.execution_config.model_backend
+        response.project.execution_config.inference_backend
         if response.project.execution_config is not None
         else None
     )

@@ -125,7 +125,7 @@ def test_ablation_override_does_not_change_default_request_hash(monkeypatch) -> 
             ],
         },
     )
-    settings = Settings(model_backend_default="bandon_mps")
+    settings = Settings()
     monkeypatch.delenv("BANDON_ABLATION_STRIDE", raising=False)
     _validation, prepared_default = validate_request(
         request,

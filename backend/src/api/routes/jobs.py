@@ -53,13 +53,6 @@ def cancel(job_id: str, settings: Settings = Depends(get_app_settings)) -> JobRe
         _raise_job_service_error(exc)
 
 
-@router.post("/admin/reconcile-stale")
-def reconcile_stale(settings: Settings = Depends(get_app_settings)) -> dict[str, int]:
-    from src.jobs.service import reconcile_stale_jobs
-
-    return {"failed_jobs": reconcile_stale_jobs(settings)}
-
-
 @router.post("/detection")
 def start_detection(request: RunRequest, settings: Settings = Depends(get_app_settings)) -> JobStartResponse:
     from src.jobs.service import start_detection_job

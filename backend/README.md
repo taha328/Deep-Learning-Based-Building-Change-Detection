@@ -145,11 +145,10 @@ PYTHONNOUSERSITE=1 ./.venv/bin/python scripts/verify_worker_env.py
 
 The FastAPI API is the only browser-facing API.
 
-Processing can still use different execution backends behind FastAPI:
+Processing uses local inference backends behind FastAPI:
 
 - `bandon_mps` for the local BANDON pipeline on Apple Silicon
-- `sam3` for SAM3-based execution
-- optional remote SAM3 execution through a backend-only `gradio_client` adapter
+- `mtgcdnet_s2looking_mps` for the S2Looking checkpoint path
 
 ## Environment Overrides
 
@@ -162,12 +161,9 @@ Common environment variables:
 - `APP_FULL_RUN_MAX_SCENE_TILES`
 - `APP_DOWNLOAD_WORKERS`
 - `APP_BUFFER_DISTANCES_M`
-- `APP_MODEL_BACKEND_DEFAULT`
-- `APP_REMOTE_SEGMENTATION_SPACE`
-- `APP_REMOTE_SEGMENTATION_API_NAME`
-- `APP_REMOTE_SEGMENTATION_PROMPT`
-- `APP_REMOTE_SEGMENTATION_TIMEOUT_SEC`
-- `APP_REMOTE_SEGMENTATION_RETRIES`
+- `APP_INFERENCE_BACKEND`
+- `APP_S2LOOKING_CHECKPOINT_PATH`
+- `APP_S2LOOKING_CHANGE_THRESHOLD`
 - `APP_BANDON_REPO_DIR`
 - `APP_BANDON_ENV_PREFIX`
 - `APP_BANDON_CONFIG_PATH`
@@ -180,7 +176,6 @@ Common environment variables:
 - `CELERY_TASK_ACKS_LATE`
 - `CELERY_TASK_REJECT_ON_WORKER_LOST`
 - `CELERY_WORKER_PREFETCH_MULTIPLIER`
-- `CELERY_JOB_STALE_AFTER_MINUTES`
 - `JOBS_ENABLED`
 - `APP_BANDON_CHECKPOINT_PATH`
 - `APP_BANDON_DEVICE`

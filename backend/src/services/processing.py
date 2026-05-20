@@ -19,9 +19,9 @@ from src.domain.artifact_manifest import register_artifact
 from src.domain.run_workspace import cleanup_run_tmp_dir, get_run_tmp_dir
 from src.domain.stage_timing import StageTimingRecorder
 from src.domain.bandon_runner import run_bandon_inference
-from src.domain.exports import export_bandon_outputs, export_run_outputs, export_segmentation_outputs, write_run_manifest
+from src.domain.change_products import derive_new_building_products
+from src.domain.exports import export_bandon_outputs, write_run_manifest
 from src.domain.imagery_providers import MapboxCurrentProvider
-from src.domain.inference import derive_new_building_products, run_single_scene_inference, run_tiled_inference
 from src.domain.mapbox_current import MAPBOX_ATTRIBUTION, MAPBOX_SOURCE_ID
 from src.domain.mosaic import MosaicResult, WaybackTileDownloadError, align_mosaic_pair, download_wayback_mosaic
 from rasterio.features import rasterize
@@ -51,17 +51,12 @@ from src.domain.wayback_tile_preflight_cache import (
     write_wayback_tile_preflight_cache_atomic,
 )
 from src.domain.vectorize import (
-    SegmentationVectorizationContext,
     VectorizationContext,
     build_building_blocks,
     build_change_blocks,
     build_change_buffer_layers,
-    build_metric_buffer_layers,
     merge_close_change_regions,
-    merge_close_buildings,
     vectorize_change_regions,
-    vectorize_new_buildings,
-    vectorize_segmentation_regions,
 )
 from src.domain.wayback import (
     MetadataSummary,
@@ -70,13 +65,12 @@ from src.domain.wayback import (
     preflight_wayback_tile_availability,
     summarize_wayback_metadata,
 )
-from src.schemas import DiagnosticMetadata, RunRequest, RunResponse, SegmentationRequest, SummaryStats
+from src.schemas import DiagnosticMetadata, RunRequest, RunResponse, SummaryStats
 from src.services.releases import list_releases
 from src.services.validation import (
     PreparedRequest,
     resolve_min_new_building_pixels,
     validate_request,
-    validate_segmentation_request,
 )
 from src.utils.raster import rasterize_aoi_mask_like, read_rgb
 from src.utils.geometry import reproject_geometry
@@ -87,23 +81,12 @@ from src.utils.profiling import StageTimings
 LOGGER = get_logger(__name__)
 
 
-SEGMENTATION_STAGE_MAP = {
-    "release_resolution": "backend_resolution",
-    "download": "imagery_download_or_load",
-    "mosaic": "mosaic_build_or_materialize",
-    "segmentation_inference": "inference",
-    "postprocessing": "postprocess",
-    "vectorization": "vectorization",
-    "export": "artifact_write",
-}
-
 DETECTION_STAGE_MAP = {
     "release_resolution": "backend_resolution",
     "tile_indexing": "imagery_cache_lookup",
     "download": "imagery_download_or_load",
     "mosaic": "coregistration",
     "bandon_inference": "inference",
-    "remote_segmentation": "inference",
     "postprocessing": "postprocess",
     "vectorization": "vectorization",
     "export": "artifact_write",
@@ -199,17 +182,8 @@ def _resolve_available_tiles_for_aoi(
     return selected_tiles
 
 
-def _inference_stage_message(model_backend: Literal["sam3", "bandon_mps"], inference_runner) -> str:
-    if model_backend == "bandon_mps":
-        return "Running BANDON MTGCDNet change detection"
-    runner_name = getattr(inference_runner, "__name__", "")
-    if runner_name == "run_tiled_inference":
-        return "Running remote SAM3 building extraction"
-    if isinstance(inference_runner, partial):
-        nested_name = getattr(inference_runner.func, "__name__", "")
-        if nested_name == "run_local_tiled_inference":
-            return "Running local SAM3 building extraction"
-    return "Running building extraction"
+def _inference_stage_message() -> str:
+    return "Running local MTGCDNet change detection"
 
 
 def _write_bandon_input_images(
@@ -1193,369 +1167,15 @@ def _tilemap_unavailability_message(
     )
 
 
-def run_segmentation(
-    request: SegmentationRequest,
-    *,
-    settings: Settings,
-    progress: ProgressReporter = None,
-    x_ip_token: str | None = None,
-    inference_runner=run_single_scene_inference,
-    remote_patch_budget_enabled: bool = True,
-    request_hash_context: dict[str, object] | None = None,
-) -> RunResponse:
-    validation_started_ns = time.perf_counter_ns()
-    releases = list_releases(settings)
-    validation, prepared = validate_segmentation_request(
-        request,
-        releases=releases,
-        settings=settings,
-        remote_patch_budget_enabled=remote_patch_budget_enabled,
-        request_hash_context=request_hash_context,
-    )
-    if not validation.valid or prepared is None:
-        return RunResponse(
-            success=False,
-            error_code="invalid_request",
-            error_message="; ".join(validation.blocking_errors) or "The request is invalid.",
-        )
-
-    validation_duration_ms = _elapsed_ms(validation_started_ns)
-    timing = StageTimingRecorder(
-        run_id=prepared.request_hash,
-        pipeline_kind="segmentation",
-        metadata={"mode": request.mode, "model_backend": "sam3"},
-    )
-    timing.add_stage(
-        "validation",
-        duration_ms=validation_duration_ms,
-        metadata={"valid": True, "estimated_tiles": prepared.tile_count},
-    )
-
-    with timing.stage("imagery_cache_lookup"):
-        cached = load_cached_response(settings, prepared.request_hash)
-    if cached is not None:
-        if cached.diagnostics is not None:
-            cached.diagnostics.cache_hit = True
-        result_dir = request_result_dir(settings, prepared.request_hash)
-        _write_timing_report_safely(timing, result_dir)
-        return cached
-
-    timings = StageTimings(recorder=timing, stage_name_map=SEGMENTATION_STAGE_MAP)
-    result_dir = request_result_dir(settings, prepared.request_hash)
-    run_tmp_dir = get_run_tmp_dir(settings, prepared.request_hash)
-    run_succeeded = False
-
-    from src.utils.geometry import bounds_dict, parse_aoi_geometry
-
-    geometry = parse_aoi_geometry(prepared.normalized_aoi)
-    aoi_bbox = bounds_dict(geometry)
-    semantic_threshold = (
-        float(request.semantic_threshold)
-        if request.semantic_threshold is not None
-        else float(settings.default_semantic_threshold)
-    )
-    min_segment_pixels = max(
-        int(request.min_segment_pixels)
-        if request.min_segment_pixels is not None
-        else int(settings.default_min_new_building_pixels),
-        1,
-    )
-    run_warnings: list[str] = []
-    backend_diagnostics: dict[str, Any] = {
-        "model_backend": "sam3",
-        "segmentation_prompt": settings.remote_segmentation_prompt,
-    }
-
-    LOGGER.info("Running SAM3 segmentation for request %s", prepared.request_hash)
-    try:
-        _report(progress, 0.05, "Resolving Wayback metadata")
-        if settings.wayback_tilemap_preflight_enabled:
-            _report(progress, 0.1, "Checking tile availability")
-
-        with timings.track("release_resolution"):
-            resolved_release = _resolve_release_for_aoi(
-                settings,
-                release=prepared.release,
-                aoi_bbox=aoi_bbox,
-                normalized_aoi=prepared.normalized_aoi,
-                timing=timings.recorder,
-                stage_prefix="release_resolution",
-                scene_role="single",
-            )
-        scene_metadata = resolved_release.metadata
-        tilemap = resolved_release.tilemap
-        if resolved_release.zoom < settings.zoom:
-            run_warnings.append(
-                f"Release {prepared.release.identifier} is being downloaded at z={resolved_release.zoom} because z={settings.zoom} has no safe AOI coverage."
-            )
-
-        if scene_metadata.mixed_capture_dates:
-            run_warnings.append(
-                f"Release {prepared.release.identifier} intersects {scene_metadata.capture_date_count} capture-date regions within the AOI."
-            )
-        if tilemap is not None:
-            if tilemap.failed_check_count > 0:
-                run_warnings.append(
-                    f"Tile availability preflight was incomplete: {tilemap.failed_check_count} tile checks failed."
-                )
-            elif tilemap.available_count < tilemap.candidate_count:
-                run_warnings.append(
-                    f"Release {prepared.release.identifier} has partial z={resolved_release.zoom} tile coverage for the AOI "
-                    f"({tilemap.available_count}/{tilemap.candidate_count} tiles available)."
-                )
-            if tilemap.preflight_complete and tilemap.available_count == 0:
-                return RunResponse(
-                    success=False,
-                    error_code="wayback_tile_coverage_unavailable",
-                    error_message=_tilemap_unavailability_message(
-                        release_identifier=prepared.release.identifier,
-                        metadata=scene_metadata,
-                        tilemap=tilemap,
-                        zoom=resolved_release.zoom,
-                    ),
-                    diagnostics=DiagnosticMetadata(
-                        cache_hit=False,
-                        stage_seconds=timings.values,
-                        tile_counts={"source": prepared.tile_count, "total": prepared.tile_count},
-                        thresholds={"semantic_threshold": semantic_threshold},
-                        min_new_building_pixels=min_segment_pixels,
-                        backend=backend_diagnostics,
-                        warnings=run_warnings,
-                        coverage={"source": _coverage_entry(prepared.release.identifier, resolved_release.zoom, scene_metadata, tilemap)},
-                    ),
-                )
-
-        summary_df = _segmentation_summary_df(
-            release_identifier=prepared.release.identifier,
-            release_date=str(prepared.release.release_date),
-            zoom=resolved_release.zoom,
-            scene_metadata=scene_metadata,
-            tilemap=tilemap,
-            tile_count=prepared.tile_count,
-            prompt=settings.remote_segmentation_prompt,
-        )
-
-        _report(progress, 0.18, "Downloading Wayback imagery")
-        try:
-            with timings.track("download"):
-                scene = download_wayback_mosaic(
-                    prepared.release,
-                    aoi_bbox,
-                    settings=settings,
-                    zoom=resolved_release.zoom,
-                    out_dir=result_dir,
-                    label="source",
-                    max_tiles=None,
-                    available_tiles=tilemap.available_tiles if tilemap is not None and tilemap.preflight_complete else None,
-                    progress_callback=lambda payload: _report(
-                        progress,
-                        0.18,
-                        _wayback_download_progress_message(payload),
-                    ),
-                )
-        except WaybackTileDownloadError as exc:
-            return RunResponse(success=False, error_code="wayback_tile_download_failed", error_message=str(exc))
-        except ValueError as exc:
-            return RunResponse(success=False, error_code="wayback_tile_coverage_unavailable", error_message=str(exc))
-        except requests.RequestException as exc:
-            return RunResponse(
-                success=False,
-                error_code="wayback_tile_download_failed",
-                error_message=f"{type(exc).__name__}: {exc}",
-            )
-
-        _report(progress, 0.35, "Preparing source imagery")
-        with timings.track("mosaic"):
-            source_rgb = read_rgb(scene.geotiff_path)
-            with rasterio.open(scene.valid_mask_path) as src:
-                valid_mask = src.read(1).astype(bool)
-            aoi_mask = rasterize_aoi_mask_like(scene.geotiff_path, prepared.normalized_aoi)
-            if aoi_mask.shape == valid_mask.shape:
-                if int(aoi_mask.sum()) > 0:
-                    valid_mask &= aoi_mask
-                    source_rgb = source_rgb.copy()
-                    source_rgb[~valid_mask] = 0
-                    LOGGER.info(
-                        "AOI_RASTER_MASK_APPLIED rasterPath=%s width=%s height=%s outsideAoiPixelCount=%s validInsideAoiPixelCount=%s",
-                        scene.geotiff_path,
-                        int(aoi_mask.shape[1]),
-                        int(aoi_mask.shape[0]),
-                        int((~aoi_mask).sum()),
-                        int(aoi_mask.sum()),
-                    )
-                else:
-                    LOGGER.warning(
-                        "AOI mask resolved to zero valid pixels for %s; skipping AOI mask application to preserve run stability.",
-                        scene.geotiff_path,
-                    )
-
-        actual_patch_count = estimate_patch_count(
-            source_rgb.shape[0],
-            source_rgb.shape[1],
-            settings.patch_size,
-            settings.stride,
-        )
-        if remote_patch_budget_enabled and actual_patch_count > prepared.mode_limits.max_remote_patches_per_scene:
-            return RunResponse(
-                success=False,
-                error_code="remote_patch_budget_exceeded",
-                error_message=(
-                    "Source imagery requires "
-                    f"{actual_patch_count} remote SAM3 patches, exceeding the {prepared.mode_limits.label} "
-                    f"limit of {prepared.mode_limits.max_remote_patches_per_scene}. Reduce the AOI extent."
-                ),
-                diagnostics=DiagnosticMetadata(
-                    cache_hit=False,
-                    stage_seconds=timings.values,
-                    tile_counts={"source": scene.tile_count, "total": scene.tile_count},
-                    thresholds={"semantic_threshold": semantic_threshold},
-                    min_new_building_pixels=min_segment_pixels,
-                    backend=backend_diagnostics,
-                    warnings=run_warnings,
-                    coverage={"source": _coverage_entry(prepared.release.identifier, resolved_release.zoom, scene_metadata, tilemap)},
-                ),
-            )
-
-        _report(progress, 0.45, "Running SAM3 segmentation")
-        try:
-            with timings.track("segmentation_inference"):
-                probs, inference_diag = inference_runner(
-                    source_rgb,
-                    settings=settings,
-                    semantic_threshold=semantic_threshold,
-                    cache_dir=result_dir,
-                    x_ip_token=x_ip_token,
-                    progress_callback=lambda message: _report(progress, 0.55, message),
-                )
-        except RuntimeError as exc:
-            message = str(exc)
-            error_code = (
-                "remote_provider_quota_exhausted"
-                if "exceeded your gpu quota" in message.lower()
-                else "remote_provider_unavailable"
-            )
-            return RunResponse(
-                success=False,
-                error_code=error_code,
-                error_message=message,
-                diagnostics=DiagnosticMetadata(
-                    cache_hit=False,
-                    stage_seconds=timings.values,
-                    tile_counts={"source": scene.tile_count, "total": scene.tile_count},
-                    thresholds={"semantic_threshold": semantic_threshold},
-                    min_new_building_pixels=min_segment_pixels,
-                    backend=backend_diagnostics,
-                    warnings=run_warnings,
-                    coverage={"source": _coverage_entry(prepared.release.identifier, resolved_release.zoom, scene_metadata, tilemap)},
-                ),
-            )
-        timings.values["patch_preparation"] = inference_diag.patch_prepare_seconds
-        timings.values["remote_inference"] = inference_diag.remote_seconds
-        timings.values["mask_decode"] = inference_diag.mask_decode_seconds
-
-        segmentation_prob = probs["segmentation_prediction"]
-        _report(progress, 0.72, "Applying post-processing")
-        with timings.track("postprocessing"):
-            raw_segmentation_mask = (segmentation_prob >= semantic_threshold) & valid_mask
-            segmentation_mask, segmentation_labels = remove_small_components(
-                raw_segmentation_mask,
-                min_segment_pixels,
-            )
-
-        _report(progress, 0.82, "Vectorizing segmentation")
-        with timings.track("vectorization"):
-            segmentation_df, segmentation_geojson = vectorize_segmentation_regions(
-                segmentation_mask,
-                scene.geotiff_path,
-                SegmentationVectorizationContext(
-                    release=prepared.release.identifier,
-                    src_date=scene_metadata.dominant_src_date,
-                    prompt=settings.remote_segmentation_prompt,
-                ),
-            )
-
-        _report(progress, 0.92, "Exporting artifacts")
-        with timings.track("export"):
-            previews, artifacts, zip_path, tabular_metrics = export_segmentation_outputs(
-                result_dir=result_dir,
-                reference_raster_path=scene.geotiff_path,
-                source_rgb=source_rgb,
-                segmentation_prob=segmentation_prob,
-                segmentation_mask=segmentation_mask,
-                segmentation_labels=segmentation_labels,
-                segmentation_df=segmentation_df,
-                segmentation_geojson=segmentation_geojson,
-                summary_df=summary_df,
-            )
-
-        total_segment_area = float(segmentation_df["area_m2"].sum()) if not segmentation_df.empty else 0.0
-        response = RunResponse(
-            success=True,
-            summary=SummaryStats(
-                request_hash=prepared.request_hash,
-                mode=request.mode,
-                model_backend="sam3",
-                result_semantics="segmentation",
-                estimated_area_m2=round(prepared.area_m2, 2),
-                tile_count_t1=scene.tile_count,
-                tile_count_t2=0,
-                total_new_buildings=0,
-                total_building_blocks=0,
-                total_new_building_area_m2=0.0,
-                total_building_block_area_m2=0.0,
-                release_date=str(prepared.release.release_date),
-                dominant_src_date=scene_metadata.dominant_src_date,
-                dominant_src_res_m=scene_metadata.dominant_src_res_m,
-                segmentation_prompt=settings.remote_segmentation_prompt,
-                total_segments=int(len(segmentation_df)),
-                total_segment_area_m2=round(total_segment_area, 2),
-            ),
-            preview_images=previews,
-            segmentation_geojson=segmentation_geojson,
-            tabular_metrics=tabular_metrics,
-            artifacts=artifacts,
-            downloadable_zip_path=zip_path,
-            diagnostics=DiagnosticMetadata(
-                cache_hit=False,
-                stage_seconds=timings.values,
-                tile_counts={"source": scene.tile_count, "total": scene.tile_count},
-                patch_count=inference_diag.patch_count,
-                thresholds={"semantic_threshold": semantic_threshold},
-                min_new_building_pixels=min_segment_pixels,
-                backend=backend_diagnostics,
-                warnings=run_warnings,
-                coverage={"source": _coverage_entry(prepared.release.identifier, resolved_release.zoom, scene_metadata, tilemap)},
-            ),
-        )
-        save_cached_response(settings, prepared.request_hash, response)
-        _write_manifest_with_timing(
-            timing=timing,
-            result_dir=result_dir,
-            artifacts=artifacts,
-            extra_artifacts=_source_manifest_entries_for_scenes(
-                request_dir=result_dir,
-                run_id=prepared.request_hash,
-                scenes=[scene],
-            ),
-        )
-        _report(progress, 1.0, "Completed")
-        run_succeeded = True
-        return response
-    finally:
-        if not run_succeeded:
-            _write_timing_report_safely(timing, result_dir)
-        cleanup_run_tmp_dir(settings, prepared.request_hash, success=run_succeeded)
-
-
 def run_detection(
     request: RunRequest,
     *,
     settings: Settings,
     progress: ProgressReporter = None,
     x_ip_token: str | None = None,
-    inference_runner=run_tiled_inference,
-    model_backend: Literal["sam3", "bandon_mps"] = "sam3",
-    remote_patch_budget_enabled: bool = True,
+    inference_runner=None,
+    model_backend: Literal["bandon_mps"] = "bandon_mps",
+    remote_patch_budget_enabled: bool = False,
     request_hash_context: dict[str, object] | None = None,
 ) -> RunResponse:
     validation_started_ns = time.perf_counter_ns()
@@ -2024,34 +1644,13 @@ def run_detection(
             settings.patch_size,
             settings.stride,
         )
-        if remote_patch_budget_enabled and actual_patch_count > prepared.mode_limits.max_remote_patches_per_scene:
-            return RunResponse(
-                success=False,
-                error_code="remote_patch_budget_exceeded",
-                error_message=(
-                    "Aligned imagery requires "
-                    f"{actual_patch_count} remote SAM3 patches per date, exceeding the {prepared.mode_limits.label} "
-                    f"limit of {prepared.mode_limits.max_remote_patches_per_scene}. Reduce the AOI extent."
-                ),
-                diagnostics=_build_failure_diagnostics(
-                    timings=timings,
-                    prepared=prepared,
-                    request=request,
-                    min_new_building_pixels=min_pixels,
-                    old_building_mask_dilation_pixels=old_building_mask_dilation_pixels,
-                    new_building_core_distance_pixels=new_building_core_distance_pixels,
-                    scene_t1_metadata=scene_t1_metadata,
-                    scene_t2_metadata=scene_t2_metadata,
-                    tilemap_t1=tilemap_t1,
-                    tilemap_t2=tilemap_t2,
-                    zoom_t1=resolved_t1.zoom,
-                    zoom_t2=resolved_t2.zoom,
-                    warnings=run_warnings + alignment_warnings,
-                    backend=backend_diagnostics,
-                ),
+        if actual_patch_count > prepared.mode_limits.max_inference_patches_per_scene:
+            run_warnings.append(
+                f"Aligned imagery requires {actual_patch_count} inference patches per date, exceeding the "
+                f"{prepared.mode_limits.label} guidance of {prepared.mode_limits.max_inference_patches_per_scene}."
             )
 
-        _report(progress, 0.45, _inference_stage_message(model_backend, inference_runner))
+        _report(progress, 0.45, _inference_stage_message())
 
         vector_context = VectorizationContext(
             release_t1=prepared.t1_release.identifier,
@@ -2431,182 +2030,6 @@ def run_detection(
             run_succeeded = True
             return response
 
-        probs: dict[str, object]
-        try:
-            with timings.track("remote_segmentation"):
-                probs, inference_diag = inference_runner(
-                    arr_t1,
-                    arr_t2,
-                    settings=settings,
-                    semantic_threshold=request.semantic_threshold,
-                    cache_dir=result_dir,
-                    x_ip_token=x_ip_token,
-                    progress_callback=lambda message: _report(progress, 0.55, message),
-                )
-        except RuntimeError as exc:
-            message = str(exc)
-            error_code = (
-                "remote_provider_quota_exhausted"
-                if "exceeded your gpu quota" in message.lower()
-                else "remote_provider_unavailable"
-            )
-            return RunResponse(
-                success=False,
-                error_code=error_code,
-                error_message=message,
-                diagnostics=_build_failure_diagnostics(
-                    timings=timings,
-                    prepared=prepared,
-                    request=request,
-                    min_new_building_pixels=min_pixels,
-                    old_building_mask_dilation_pixels=old_building_mask_dilation_pixels,
-                    new_building_core_distance_pixels=new_building_core_distance_pixels,
-                    scene_t1_metadata=scene_t1_metadata,
-                    scene_t2_metadata=scene_t2_metadata,
-                    tilemap_t1=tilemap_t1,
-                    tilemap_t2=tilemap_t2,
-                    zoom_t1=resolved_t1.zoom,
-                    zoom_t2=resolved_t2.zoom,
-                    warnings=run_warnings + alignment_warnings,
-                    backend=backend_diagnostics,
-                ),
-            )
-        timings.values["patch_preparation"] = inference_diag.patch_prepare_seconds
-        timings.values["remote_inference"] = inference_diag.remote_seconds
-        timings.values["mask_decode"] = inference_diag.mask_decode_seconds
-
-        _report(progress, 0.72, "Applying post-processing")
-        with timings.track("postprocessing"):
-            products = derive_new_building_products(
-                probs["change_prediction"],  # type: ignore[index]
-                probs["t1_semantic_prediction"],  # type: ignore[index]
-                probs["t2_semantic_prediction"],  # type: ignore[index]
-                change_threshold=change_threshold,
-                semantic_threshold=semantic_threshold,
-                min_new_building_pixels=min_pixels,
-                old_building_mask_dilation_pixels=old_building_mask_dilation_pixels,
-                new_building_core_distance_pixels=new_building_core_distance_pixels,
-                valid_comparison_mask=valid_comparison_mask,
-            )
-
-        _report(progress, 0.82, "Vectorizing results")
-        with timings.track("vectorization"):
-            raw_new_buildings_df, raw_new_buildings_geojson = vectorize_new_buildings(
-                products["new_building_mask"],
-                scene_t2.geotiff_path,
-                vector_context,
-            )
-            new_buildings_df, new_buildings_geojson = merge_close_buildings(
-                raw_new_buildings_geojson,
-                max_gap_m=request.merge_close_gap_m,
-                context=vector_context,
-            )
-            building_blocks_df, building_blocks_geojson = build_building_blocks(
-                new_buildings_geojson,
-                max_gap_m=request.building_block_gap_m,
-                context=vector_context,
-            )
-            with timing.stage("buffer_generation", buffer_count=len(request.buffer_distances_m)):
-                buffer_layers = build_metric_buffer_layers(
-                    building_blocks_geojson,
-                    distances_m=request.buffer_distances_m,
-                    context=vector_context,
-                    keep_disjoint_parts_separate=request.keep_disjoint_buffer_parts_separate,
-                    road_constraint_layer_path=request.road_constraint_layer_path,
-                )
-
-        _report(progress, 0.92, "Exporting artifacts")
-        with timings.track("export"):
-            previews, artifacts, zip_path, tabular_metrics = export_run_outputs(
-                result_dir=result_dir,
-                reference_raster_path=scene_t2.geotiff_path,
-                t1_rgb=arr_t1,
-                t2_rgb=arr_t2,
-                change_prob=probs["change_prediction"],  # type: ignore[index]
-                t1_building_prob=probs["t1_semantic_prediction"],  # type: ignore[index]
-                t2_building_prob=probs["t2_semantic_prediction"],  # type: ignore[index]
-                t1_building_mask=products["t1_building_mask"],
-                t2_building_mask=products["t2_building_mask"],
-                new_building_mask=products["new_building_mask"],
-                new_building_labels=products["new_building_labels"],
-                new_buildings_df=new_buildings_df,
-                new_buildings_geojson=new_buildings_geojson,
-                building_blocks_df=building_blocks_df,
-                building_blocks_geojson=building_blocks_geojson,
-                buffer_layers=buffer_layers,
-                summary_df=pair_summary_df,
-            )
-
-        total_new_building_area = float(new_buildings_df["area_m2"].sum()) if not new_buildings_df.empty else 0.0
-        total_block_area = float(building_blocks_df["area_m2"].sum()) if not building_blocks_df.empty else 0.0
-        response = RunResponse(
-            success=True,
-            summary=SummaryStats(
-                request_hash=prepared.request_hash,
-                mode=request.mode,
-                model_backend=model_backend,
-                result_semantics="new_buildings",
-                estimated_area_m2=round(prepared.area_m2, 2),
-                tile_count_t1=scene_t1.tile_count,
-                tile_count_t2=scene_t2.tile_count,
-                total_new_buildings=int(len(new_buildings_df)),
-                total_building_blocks=int(len(building_blocks_df)),
-                total_new_building_area_m2=round(total_new_building_area, 2),
-                total_building_block_area_m2=round(total_block_area, 2),
-                release_date_t1=str(prepared.t1_release.release_date),
-                release_date_t2="current_basemap" if use_mapbox_t2 else str(prepared.t2_release.release_date),
-                dominant_src_date_t1=scene_t1_metadata.dominant_src_date,
-                dominant_src_date_t2=scene_t2_metadata.dominant_src_date,
-                dominant_src_res_m_t1=scene_t1_metadata.dominant_src_res_m,
-                dominant_src_res_m_t2=scene_t2_metadata.dominant_src_res_m,
-            ),
-            preview_images=previews,
-            new_buildings_geojson=new_buildings_geojson,
-            building_blocks_geojson=building_blocks_geojson,
-            buffer_layers_geojson={label: geojson for label, (_, geojson) in buffer_layers.items()},
-            tabular_metrics=tabular_metrics,
-            artifacts=artifacts,
-            downloadable_zip_path=zip_path,
-            diagnostics=DiagnosticMetadata(
-                cache_hit=False,
-                stage_seconds=timings.values,
-                tile_counts={
-                    "t1": scene_t1.tile_count,
-                    "t2": scene_t2.tile_count,
-                    "total": scene_t1.tile_count + scene_t2.tile_count,
-                },
-                patch_count=inference_diag.patch_count,
-                thresholds={
-                    "change_threshold": change_threshold,
-                    "semantic_threshold": semantic_threshold,
-                    "old_building_mask_dilation_pixels": float(old_building_mask_dilation_pixels),
-                    "new_building_core_distance_pixels": float(new_building_core_distance_pixels),
-                },
-                min_new_building_pixels=min_pixels,
-                alignment=alignment_result.diagnostics,
-                backend=backend_diagnostics,
-                warnings=run_warnings + alignment_warnings,
-                coverage={
-                    "t1": _coverage_entry(prepared.t1_release.identifier, resolved_t1.zoom, scene_t1_metadata, tilemap_t1),
-                    "t2": _coverage_entry(MAPBOX_SOURCE_ID if use_mapbox_t2 else prepared.t2_release.identifier, resolved_t2.zoom, scene_t2_metadata, tilemap_t2),
-                },
-            ),
-        )
-        save_cached_response(settings, prepared.request_hash, response)
-        _write_manifest_with_timing(
-            timing=timing,
-            result_dir=result_dir,
-            artifacts=artifacts,
-            extra_artifacts=_source_manifest_entries_for_scenes(
-                request_dir=result_dir,
-                run_id=prepared.request_hash,
-                scenes=[scene_t1, scene_t2],
-            ),
-            run_metadata=run_identity,
-        )
-        _report(progress, 1.0, "Completed")
-        run_succeeded = True
-        return response
     finally:
         if not run_succeeded:
             _write_timing_report_safely(timing, result_dir)

@@ -1,8 +1,8 @@
 import { z } from "zod";
 
 export const modeSchema = z.enum(["fast_preview", "full_run"]);
-export const modelBackendSchema = z.enum(["sam3", "bandon_mps"]);
-export const sam3BackendModeSchema = z.enum(["public_zerogpu", "local", "huggingface_gpu"]);
+export const modelBackendSchema = z.enum(["bandon_mps"]);
+export const inferenceBackendSchema = z.enum(["bandon_mps", "mtgcdnet_s2looking_mps"]);
 export const latestImagerySourceSchema = z.enum(["esri_wayback", "mapbox_current"]);
 
 export const releaseSchema = z.object({
@@ -79,7 +79,7 @@ export type ReferenceLayerScope = z.infer<typeof referenceLayerScopeSchema>;
 export type ReferenceLayerStrategy = z.infer<typeof referenceLayerStrategySchema>;
 
 export const backendAvailabilitySchema = z.object({
-  mode: z.enum(["public_zerogpu", "local", "huggingface_gpu", "bandon_mps"]),
+  mode: inferenceBackendSchema,
   label: z.string(),
   available: z.boolean(),
   enabled_by_default: z.boolean(),
@@ -89,8 +89,7 @@ export const backendAvailabilitySchema = z.object({
 
 export const pipelineExecutionConfigSchema = z
   .object({
-    model_backend: modelBackendSchema,
-    backend_mode: z.enum(["public_zerogpu", "local", "huggingface_gpu"]).optional(),
+    inference_backend: inferenceBackendSchema,
   })
   .passthrough();
 
@@ -99,8 +98,7 @@ export const validationRequestSchema = z.object({
   t1_release: z.string(),
   t2_release: z.string(),
   mode: modeSchema,
-  model_backend: modelBackendSchema.optional(),
-  sam3_backend_mode: sam3BackendModeSchema.optional(),
+  inference_backend: inferenceBackendSchema.optional(),
   change_threshold: z.number().optional(),
   semantic_threshold: z.number().optional(),
   min_new_building_pixels: z.number().int().optional(),
@@ -372,7 +370,6 @@ export const temporalProjectExportBundleSchema = z.object({
 
 export type ModeName = z.infer<typeof modeSchema>;
 export type ModelBackendName = z.infer<typeof modelBackendSchema>;
-export type Sam3BackendMode = z.infer<typeof sam3BackendModeSchema>;
 export type LatestImagerySource = z.infer<typeof latestImagerySourceSchema>;
 export type ReleaseMetadata = z.infer<typeof releaseSchema>;
 export type BackendAvailability = z.infer<typeof backendAvailabilitySchema>;

@@ -16,15 +16,13 @@ Supported frontend variables:
 - `VITE_ENABLE_REQUEST_BACKEND_SELECTION=true|false`
 - `VITE_MAPBOX_API_KEY=...`
 
-Legacy `window.huggingface.variables` support remains for hosted environments.
-
 ## Local Development
 
 1. Start the backend locally:
 
 ```bash
 cd /Users/tahaelouali/Desktop/Building_change_app/backend
-APP_MODEL_BACKEND_DEFAULT=bandon_mps APP_BANDON_DEVICE=mps ./.venv/bin/python -m uvicorn src.api.main:app --reload --host 127.0.0.1 --port 8000
+APP_INFERENCE_BACKEND=bandon_mps APP_BANDON_DEVICE=mps ./.venv/bin/python -m uvicorn src.api.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
 2. Start the frontend locally:
@@ -83,4 +81,4 @@ npm run pages:deploy -- --project-name taha321-building-change-frontend
 
 - The frontend does not duplicate backend logic. It calls the FastAPI API only.
 - The local workflow is intended to match the practical parameter set exposed by the QGIS plugin.
-- Optional remote SAM3 execution, if enabled, is handled internally by the backend through `gradio_client`.
+- Backend inference is local-only through `bandon_mps` or `mtgcdnet_s2looking_mps`.

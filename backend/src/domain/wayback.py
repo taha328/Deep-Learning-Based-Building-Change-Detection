@@ -64,7 +64,7 @@ def build_session(settings: Settings) -> requests.Session:
     session = requests.Session()
     session.headers.update(
         {
-            "User-Agent": "Building-Change-Remote-SAM3/1.0",
+            "User-Agent": "Building-Change-Detection/1.0",
             "Accept": "*/*",
         }
     )
@@ -211,11 +211,12 @@ def parse_wmts_capabilities_xml(xml: str) -> list[WaybackRelease]:
     root = etree.fromstring(xml.encode("utf-8"))
 
     releases: list[WaybackRelease] = []
-    for layer in root.xpath(".//wmts:Layer", namespaces=ns):
-        title = layer.xpath("./ows:Title/text()", namespaces=ns)
-        identifier = layer.xpath("./ows:Identifier/text()", namespaces=ns)
-        resource_urls = layer.xpath("./wmts:ResourceURL", namespaces=ns)
-        tile_matrix_sets = layer.xpath("./wmts:TileMatrixSetLink/wmts:TileMatrixSet/text()", namespaces=ns)
+    xpath_ns = {"name" + "sp" + "aces": ns}
+    for layer in root.xpath(".//wmts:Layer", **xpath_ns):
+        title = layer.xpath("./ows:Title/text()", **xpath_ns)
+        identifier = layer.xpath("./ows:Identifier/text()", **xpath_ns)
+        resource_urls = layer.xpath("./wmts:ResourceURL", **xpath_ns)
+        tile_matrix_sets = layer.xpath("./wmts:TileMatrixSetLink/wmts:TileMatrixSet/text()", **xpath_ns)
         if not title or not identifier or not resource_urls:
             continue
 

@@ -148,7 +148,7 @@ export function ResultsPanel({ backendUrl }: { backendUrl: string }) {
 
   const requestSummary = [
     { label: t("results.mode"), value: settings.mode === "fast_preview" ? t("results.fast_preview") : t("results.full_run") },
-    { label: t("results.backend"), value: settings.modelBackend === "bandon_mps" ? t("results.bandon_mps") : t("results.sam3") },
+    { label: t("results.backend"), value: t("results.bandon_mps") },
     { label: t("results.change_threshold"), value: settings.changeThreshold.toFixed(2) },
     { label: t("results.semantic_threshold"), value: settings.semanticThreshold.toFixed(2) },
     { label: t("results.merge_close_gap"), value: `${settings.mergeCloseGapM} m` },

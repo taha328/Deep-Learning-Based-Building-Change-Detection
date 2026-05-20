@@ -1,14 +1,5 @@
-declare global {
-  interface Window {
-    huggingface?: {
-      variables?: Record<string, string | undefined>;
-    };
-  }
-}
-
 export type FrontendRuntimeMode = "local" | "remote";
-export type ModelBackendName = "sam3" | "bandon_mps";
-export type Sam3BackendMode = "public_zerogpu" | "local" | "huggingface_gpu";
+export type ModelBackendName = "bandon_mps";
 
 export interface FrontendRuntimeConfig {
   mode: FrontendRuntimeMode;
@@ -16,7 +7,6 @@ export interface FrontendRuntimeConfig {
   modeLabel: string;
   modeDescription: string;
   defaultModelBackend: ModelBackendName;
-  defaultSam3BackendMode: Sam3BackendMode;
   showBackendSelector: boolean;
   supportsRequestBackendSelection: boolean;
 }
@@ -27,10 +17,6 @@ const DEFAULT_FASTAPI_BACKEND_URL = "http://127.0.0.1:8000";
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
 
 function readVariable(key: string): string | undefined {
-  const fromSpace = window.huggingface?.variables?.[key];
-  if (fromSpace) {
-    return fromSpace;
-  }
   return import.meta.env[key] as string | undefined;
 }
 
@@ -58,13 +44,7 @@ function inferFrontendRuntimeMode(): FrontendRuntimeMode {
 }
 
 function inferModelBackend(rawValue: string | undefined, fallback: ModelBackendName): ModelBackendName {
-  return rawValue === "sam3" || rawValue === "bandon_mps" ? rawValue : fallback;
-}
-
-function inferSam3BackendMode(rawValue: string | undefined, fallback: Sam3BackendMode): Sam3BackendMode {
-  return rawValue === "public_zerogpu" || rawValue === "local" || rawValue === "huggingface_gpu"
-    ? rawValue
-    : fallback;
+  return rawValue === "bandon_mps" ? rawValue : fallback;
 }
 
 export function getFrontendRuntimeConfig(): FrontendRuntimeConfig {
@@ -89,11 +69,7 @@ export function getFrontendRuntimeConfig(): FrontendRuntimeConfig {
 
   const defaultModelBackend = inferModelBackend(
     readVariable("DEFAULT_MODEL_BACKEND") ?? readVariable("VITE_DEFAULT_MODEL_BACKEND"),
-    mode === "local" ? "bandon_mps" : "sam3",
-  );
-  const defaultSam3BackendMode = inferSam3BackendMode(
-    readVariable("DEFAULT_SAM3_BACKEND_MODE") ?? readVariable("VITE_DEFAULT_SAM3_BACKEND_MODE"),
-    "public_zerogpu",
+    "bandon_mps",
   );
   const showBackendSelector =
     readBooleanVariable("SHOW_BACKEND_SELECTOR") ??
@@ -112,7 +88,6 @@ export function getFrontendRuntimeConfig(): FrontendRuntimeConfig {
       modeDescription:
         "This frontend targets your local FastAPI backend and defaults to BANDON MTGCDNet on Apple Silicon MPS.",
       defaultModelBackend,
-      defaultSam3BackendMode,
       showBackendSelector,
       supportsRequestBackendSelection,
     };
@@ -123,9 +98,8 @@ export function getFrontendRuntimeConfig(): FrontendRuntimeConfig {
     backendUrl,
     modeLabel: "Hosted frontend · Remote backend",
     modeDescription:
-      "This deployment targets a FastAPI backend while preserving backend-only remote SAM3 execution support.",
+      "This deployment targets a FastAPI backend using local change detection backends.",
     defaultModelBackend,
-    defaultSam3BackendMode,
     showBackendSelector,
     supportsRequestBackendSelection,
   };

@@ -15,7 +15,7 @@ from rasterio.transform import from_origin
 
 from src.config import Settings
 from src.domain.coregistration import CoregistrationDiagnostics, CoregistrationResult
-from src.domain.inference import derive_new_building_products
+from src.domain.change_products import derive_new_building_products
 from src.domain.mosaic import (
     MosaicResult,
     _download_tile_with_retries,

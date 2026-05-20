@@ -99,10 +99,7 @@ function buildRequest(
   };
 
   if (runtimeConfig.supportsRequestBackendSelection) {
-    request.model_backend = state.settings.modelBackend;
-    if (state.settings.modelBackend === "sam3") {
-      request.sam3_backend_mode = state.settings.sam3BackendMode;
-    }
+    request.inference_backend = state.settings.modelBackend;
   }
 
   return request;
@@ -662,8 +659,7 @@ export function SettingsPanel({
     () => new Map(backendAvailability.map((entry) => [entry.mode, entry])),
     [backendAvailability],
   );
-  const selectedBackendMode = state.settings.modelBackend === "bandon_mps" ? "bandon_mps" : state.settings.sam3BackendMode;
-  const selectedBackendAvailability = availabilityByMode.get(selectedBackendMode);
+  const selectedBackendAvailability = availabilityByMode.get(state.settings.modelBackend);
   const probeMissingForBandon =
     state.settings.modelBackend === "bandon_mps" &&
     backendAvailability.length === 0 &&

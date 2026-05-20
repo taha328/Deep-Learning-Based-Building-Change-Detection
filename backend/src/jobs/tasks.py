@@ -8,14 +8,12 @@ from typing import Any
 from src.config import Settings, get_settings
 from src.core_api import run_detection_api, run_temporal_project_api
 from src.db.session import session_scope
-from src.execution_profiles import PipelineExecutionConfig, resolve_configured_inference_execution_config
 from src.jobs.celery_app import celery_app
 from src.jobs.progress import update_progress
 from src.jobs.service import mark_job_execution_failed
 from src.repositories.job_repository import (
     TERMINAL_JOB_STATUSES,
     get_job,
-    is_job_stale,
     mark_job_cancelled,
     mark_job_completed,
     mark_job_failed,
@@ -54,11 +52,6 @@ def _resolve_settings(settings_payload: dict[str, Any] | None = None) -> Setting
     if settings_payload:
         return Settings.model_validate(settings_payload)
     return get_settings()
-
-
-def _build_execution_config(request: RunRequest, settings: Settings) -> PipelineExecutionConfig:
-    del request
-    return resolve_configured_inference_execution_config(settings)
 
 
 def _log_worker_effective_backend(*, job_id: str, job_kind: str, settings: Settings) -> None:
@@ -162,16 +155,6 @@ def _prepare_job_for_execution(job_id: str, settings: Settings) -> dict[str, Any
         if job.status in TERMINAL_JOB_STATUSES:
             status = "completed" if job.status == "complete" else job.status
             return {"job_id": job_id, "status": status, "skipped": True}
-        if is_job_stale(job, stale_after_minutes=settings.celery_job_stale_after_minutes):
-            message = f"Job exceeded the stale timeout of {settings.celery_job_stale_after_minutes} minute(s) before the worker could start it."
-            mark_job_failed(
-                job_id=job_id,
-                error_code="worker_stale",
-                error_message=message,
-                settings=settings,
-                session=session,
-            )
-            return {"job_id": job_id, "status": "failed", "error_code": "worker_stale", "skipped": True}
     return None
 
 
@@ -269,7 +252,6 @@ def run_detection_job(self, job_id: str, request_payload: dict[str, Any], settin
         response = run_detection_api(
             request,
             settings=settings,
-            execution_config=_build_execution_config(request, settings),
             progress_callback=progress_callback,
             x_ip_token=None,
         )

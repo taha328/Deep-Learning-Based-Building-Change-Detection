@@ -289,7 +289,7 @@ def _archive_date(
 
 
 def _backend_label(project: TemporalProject) -> str:
-    return project.execution_config.model_backend if project.execution_config else ""
+    return project.execution_config.inference_backend if project.execution_config else ""
 
 
 def _metrics(milestone: TemporalMilestone) -> TemporalMilestoneMetrics:
@@ -788,7 +788,7 @@ def build_temporal_results_kml(project_id: str, settings: Settings | None = None
 
 
 def _source_backend(project: TemporalProject) -> str | None:
-    return project.execution_config.model_backend if project.execution_config is not None else None
+    return project.execution_config.inference_backend if project.execution_config is not None else None
 
 
 def _feature_area_m2(feature: dict[str, Any], crs: str) -> float | None:

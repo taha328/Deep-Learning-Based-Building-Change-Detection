@@ -91,7 +91,7 @@ def _mapbox_project(project_id: str = "temporal-prefetch-mapbox") -> TemporalPro
 
 
 def _bandon_config() -> PipelineExecutionConfig:
-    return PipelineExecutionConfig(model_backend="bandon_mps")
+    return PipelineExecutionConfig(inference_backend="bandon_mps")
 
 
 def _bandon_pair_response(
@@ -107,7 +107,7 @@ def _bandon_pair_response(
         remote_patch_budget_enabled=False,
         request_hash_context={
             "model_backend": "bandon_mps",
-            "backend_mode": "bandon_mps",
+            "inference_backend": "bandon_mps",
             "bandon_processing_version": 2,
             "bandon_repo_dir": str(settings.bandon_repo_dir),
             "bandon_env_prefix": str(settings.bandon_env_prefix),
@@ -188,7 +188,7 @@ def test_temporal_imagery_prefetch_plan_builds_expected_pairs_for_mapbox_latest(
         project,
         settings=settings,
         remote_patch_budget_enabled=False,
-        request_hash_context={"model_backend": "bandon_mps", "backend_mode": "bandon_mps"},
+        request_hash_context={"model_backend": "bandon_mps", "inference_backend": "bandon_mps"},
     )
     prefetch_plan = _build_temporal_imagery_prefetch_plan(project, plan, settings=settings)
 
@@ -215,7 +215,7 @@ def test_run_temporal_imagery_prefetch_uses_shared_cache_only_without_manifest_o
         project,
         settings=settings,
         remote_patch_budget_enabled=False,
-        request_hash_context={"model_backend": "bandon_mps", "backend_mode": "bandon_mps"},
+        request_hash_context={"model_backend": "bandon_mps", "inference_backend": "bandon_mps"},
     )
 
     download_calls: list[tuple[str, str, bool, int]] = []
@@ -251,7 +251,6 @@ def test_run_temporal_project_prefetches_before_serial_pair_runner_and_writes_ti
         runtime_cache_dir=tmp_path,
         temporal_imagery_prefetch_enabled=True,
         temporal_imagery_prefetch_workers=1,
-        model_backend_default="bandon_mps",
         mapbox_current_imagery_enabled=True,
         mapbox_access_token="test-token",
     )
