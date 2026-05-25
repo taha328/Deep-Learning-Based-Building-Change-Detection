@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 import time
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Query, Request, Response, status
 from fastapi import File, Form, UploadFile
@@ -21,8 +22,11 @@ from src.core_api import (
     validate_temporal_project_api,
 )
 from src.services.temporal_projects import (
+    build_temporal_artifact_vector_tilejson,
     create_temporal_project_bundle,
     load_temporal_project_response_payload,
+    render_temporal_artifact_vector_tile,
+    resolve_temporal_project_artifact_path,
 )
 from src.services.temporal_exports import (
     TEMPORAL_RESULTS_EXPORT_FILENAMES,
@@ -319,6 +323,7 @@ def get_reference_tilejson(
         tiles_url=tiles_url,
     )
     tilejson_cache_ms = round((time.perf_counter() - started_at) * 1000, 2)
+    tile_version = reference_imagery_version_token(cog_info)
     logger.info(
         "TILEJSON_CACHE_%s projectId=%s releaseIdentifier=%s cacheKey=%s durationMs=%s",
         "HIT" if cache_hit else "MISS",
@@ -330,7 +335,10 @@ def get_reference_tilejson(
     logger.info("TILEJSON_SELECTED_RELEASE_ONLY projectId=%s releaseIdentifier=%s value=true", project_id, release_identifier)
     response = JSONResponse(
         payload,
-        headers={"Cache-Control": "public, max-age=0, must-revalidate"},
+        headers={
+            "Cache-Control": "public, max-age=300, stale-while-revalidate=86400",
+            "ETag": f'"{tile_version}"',
+        },
     )
     logger.info(
         "TILEJSON_SERVED projectId=%s releaseIdentifier=%s storageStrategy=%s cogExists=%s durationMs=%s",
@@ -341,6 +349,135 @@ def get_reference_tilejson(
         round((time.perf_counter() - started_at) * 1000, 2),
     )
     return response
+
+
+@router.get("/{project_id}/milestones/{release_identifier}/artifacts/{artifact_key}")
+def get_milestone_artifact(
+    project_id: str,
+    release_identifier: str,
+    artifact_key: str,
+    settings=Depends(get_app_settings),
+) -> FileResponse:
+    try:
+        path, media_type = resolve_temporal_project_artifact_path(
+            project_id=project_id,
+            release_identifier=release_identifier,
+            artifact_key=artifact_key,
+            settings=settings,
+        )
+    except FileNotFoundError as exc:
+        raise_api_error(status.HTTP_404_NOT_FOUND, "not_found", str(exc))
+    return FileResponse(path, media_type=media_type, filename=path.name)
+
+
+@router.get("/{project_id}/milestones/{release_identifier}/artifacts/{artifact_key}/tilejson.json")
+def get_milestone_artifact_tilejson(
+    project_id: str,
+    release_identifier: str,
+    artifact_key: str,
+    request: Request,
+    settings=Depends(get_app_settings),
+) -> JSONResponse:
+    try:
+        payload = build_temporal_artifact_vector_tilejson(
+            project_id=project_id,
+            release_identifier=release_identifier,
+            artifact_key=artifact_key,
+            settings=settings,
+            base_url=f"{request.url.scheme}://{request.url.netloc}",
+        )
+    except FileNotFoundError as exc:
+        raise_api_error(status.HTTP_404_NOT_FOUND, "not_found", str(exc))
+    version = ""
+    tiles = payload.get("tiles")
+    if isinstance(tiles, list) and tiles:
+        version = str(tiles[0]).split("?v=", 1)[-1] if "?v=" in str(tiles[0]) else ""
+    headers = {"Cache-Control": "public, max-age=300, stale-while-revalidate=86400"}
+    if version:
+        headers["ETag"] = f'"{version}"'
+    return JSONResponse(payload, headers=headers)
+
+
+@router.get("/{project_id}/milestones/{release_identifier}/artifacts/{artifact_key}/tiles/{z}/{x}/{y}.mvt")
+def get_milestone_artifact_vector_tile(
+    project_id: str,
+    release_identifier: str,
+    artifact_key: str,
+    z: int,
+    x: int,
+    y: int,
+    settings=Depends(get_app_settings),
+) -> Response:
+    _validate_xyz_bounds(z, x, y)
+    try:
+        artifact_path, media_type = resolve_temporal_project_artifact_path(
+            project_id=project_id,
+            release_identifier=release_identifier,
+            artifact_key=artifact_key,
+            settings=settings,
+            access_mode="vector_tile",
+        )
+        if media_type != "application/geo+json":
+            raise FileNotFoundError(f"Temporal artifact is not vector-tile capable: {artifact_key}")
+        stat = artifact_path.stat()
+        version = f"{stat.st_mtime_ns}-{stat.st_size}"
+        cache_path = (
+            settings.runtime_cache_dir
+            / "temporal_vector_tiles"
+            / quote(project_id, safe="")
+            / quote(release_identifier, safe="")
+            / quote(artifact_key, safe="")
+            / quote(version, safe="")
+            / str(z)
+            / str(x)
+            / f"{y}.mvt"
+        )
+        if cache_path.is_file():
+            logger.info(
+                "TEMPORAL_MVT_TILE_CACHE_HIT projectId=%s releaseIdentifier=%s artifactKey=%s z=%s x=%s y=%s cachePath=%s",
+                project_id,
+                release_identifier,
+                artifact_key,
+                z,
+                x,
+                y,
+                cache_path,
+            )
+            return FileResponse(
+                cache_path,
+                media_type="application/vnd.mapbox-vector-tile",
+                headers={"Cache-Control": "public, max-age=31536000, immutable", "ETag": f'"{version}"'},
+            )
+        logger.info(
+            "TEMPORAL_MVT_TILE_CACHE_MISS projectId=%s releaseIdentifier=%s artifactKey=%s z=%s x=%s y=%s cachePath=%s",
+            project_id,
+            release_identifier,
+            artifact_key,
+            z,
+            x,
+            y,
+            cache_path,
+        )
+        content = render_temporal_artifact_vector_tile(
+            project_id=project_id,
+            release_identifier=release_identifier,
+            artifact_key=artifact_key,
+            z=z,
+            x=x,
+            y=y,
+            settings=settings,
+        )
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_bytes(content)
+    except FileNotFoundError as exc:
+        raise_api_error(status.HTTP_404_NOT_FOUND, "not_found", str(exc))
+    except RuntimeError as exc:
+        raise_api_error(status.HTTP_500_INTERNAL_SERVER_ERROR, "vector_tile_dependency_missing", str(exc))
+    return Response(
+        content=content,
+        media_type="application/vnd.mapbox-vector-tile",
+        headers={"Cache-Control": "public, max-age=31536000, immutable", "ETag": f'"{version}"'},
+    )
 
 
 @router.get("/{project_id}/milestones/{release_identifier}/reference/tiles/{z}/{x}/{y}.png")
@@ -378,6 +515,16 @@ def get_reference_tile(
     if tile_cache.cache_hit:
         duration_ms = round((time.perf_counter() - started_at) * 1000, 2)
         logger.info(
+            "TEMPORAL_REFERENCE_TILE_CACHE_HIT projectId=%s releaseIdentifier=%s z=%s x=%s y=%s durationMs=%s cachePath=%s",
+            project_id,
+            release_identifier,
+            z,
+            x,
+            y,
+            duration_ms,
+            tile_cache.cache_path,
+        )
+        logger.info(
             "TILE_CACHE_HIT projectId=%s releaseIdentifier=%s z=%s x=%s y=%s durationMs=%s cachePath=%s",
             project_id,
             release_identifier,
@@ -401,7 +548,10 @@ def get_reference_tile(
         return FileResponse(
             tile_cache.cache_path,
             media_type="image/png",
-            headers={"Cache-Control": "public, max-age=31536000, immutable"},
+            headers={
+                "Cache-Control": "public, max-age=31536000, immutable",
+                "ETag": f'"{reference_imagery_version_token(cog_info)}"',
+            },
         )
 
     result = tile_cache.render_result
@@ -410,7 +560,10 @@ def get_reference_tile(
     response = Response(
         content=result.content,
         media_type="image/png",
-        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+        headers={
+            "Cache-Control": "public, max-age=31536000, immutable",
+            "ETag": f'"{reference_imagery_version_token(cog_info)}"',
+        },
     )
     logger.info(
         "TILE_COG_OPEN_MS projectId=%s releaseIdentifier=%s z=%s x=%s y=%s value=%s",
@@ -485,6 +638,56 @@ def get_reference_tile(
         y,
         round((time.perf_counter() - started_at) * 1000, 2),
         tile_cache.cache_path,
+    )
+    logger.info(
+        "TEMPORAL_REFERENCE_TILE_CACHE_MISS projectId=%s releaseIdentifier=%s z=%s x=%s y=%s durationMs=%s cachePath=%s alphaSource=%s",
+        project_id,
+        release_identifier,
+        z,
+        x,
+        y,
+        round((time.perf_counter() - started_at) * 1000, 2),
+        tile_cache.cache_path,
+        result.alpha_source,
+    )
+    logger.info(
+        "TEMPORAL_REFERENCE_TILE_RGBA_CONFIRMED projectId=%s releaseIdentifier=%s z=%s x=%s y=%s outputPngHasAlpha=%s alphaSource=%s",
+        project_id,
+        release_identifier,
+        z,
+        x,
+        y,
+        result.output_png_has_alpha,
+        result.alpha_source,
+    )
+    logger.info(
+        "TEMPORAL_REFERENCE_TILE_NODATA_ALPHA_CONFIRMED projectId=%s releaseIdentifier=%s z=%s x=%s y=%s transparentPixelCount=%s",
+        project_id,
+        release_identifier,
+        z,
+        x,
+        y,
+        result.transparent_pixel_count,
+    )
+    logger.info(
+        "TEMPORAL_REFERENCE_TILE_VALID_ALPHA_CONFIRMED projectId=%s releaseIdentifier=%s z=%s x=%s y=%s opaquePixelCount=%s",
+        project_id,
+        release_identifier,
+        z,
+        x,
+        y,
+        result.opaque_pixel_count,
+    )
+    logger.info(
+        "TEMPORAL_REFERENCE_TILE_RESPONSE projectId=%s releaseIdentifier=%s z=%s x=%s y=%s durationMs=%s cachePath=%s cacheHit=false cacheHeaders=%s",
+        project_id,
+        release_identifier,
+        z,
+        x,
+        y,
+        round((time.perf_counter() - started_at) * 1000, 2),
+        tile_cache.cache_path,
+        response.headers.get("Cache-Control"),
     )
     logger.info(
         (

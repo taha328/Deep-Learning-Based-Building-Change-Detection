@@ -19,6 +19,7 @@ import numpy as np
 import requests
 import urllib3
 from PIL import Image
+from requests.adapters import HTTPAdapter
 import rasterio
 from rasterio.transform import from_bounds
 
@@ -26,6 +27,8 @@ from src.config import Settings
 from src.domain.coregistration import CoregistrationDiagnostics, coregister_t1_to_t2_reprojection_only
 from src.domain.tiling import tile_bounds_3857, tile_range_for_bbox
 from src.domain.wayback import WaybackRelease
+from src.domain.wayback_metrics import record_tile_download, set_gauge
+from src.domain.wayback_tile_cache import WaybackTileCache
 from src.utils.raster import align_rgb_to_reference, align_single_band_mask_to_reference, read_rgb
 
 logger = logging.getLogger(__name__)
@@ -47,6 +50,10 @@ class TileDownloadResult:
     cache_hit: bool = False
     attempts: int = 0
     retry_count: int = 0
+    throttle_count: int = 0
+    timeout_count: int = 0
+    byte_size: int = 0
+    duration_seconds: float = 0.0
     url: str | None = None
 
 
@@ -100,8 +107,24 @@ def build_tile_url(template: str, tile_matrix_set: str, zoom: int, x: int, y: in
     )
 
 
-def _download_tile(url: str, timeout: tuple[int, int]) -> bytes | None:
-    response = requests.get(url, timeout=timeout)
+def create_wayback_tile_session(concurrency: int) -> requests.Session:
+    session = requests.Session()
+    adapter = HTTPAdapter(
+        pool_connections=max(concurrency, 1),
+        pool_maxsize=max(concurrency, 1),
+        pool_block=True,
+        max_retries=0,
+    )
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    logger.info("WAYBACK_TILE_SESSION_CREATED poolMaxSize=%s", max(concurrency, 1))
+    return session
+
+
+def _download_tile(url: str, timeout: tuple[int, int], session: requests.Session | None = None) -> bytes | None:
+    requests_get_module = getattr(requests.get, "__module__", "")
+    client = session if session is not None and requests_get_module.startswith("requests.") else requests
+    response = client.get(url, timeout=timeout)
     if response.status_code == 404:
         return None
     response.raise_for_status()
@@ -425,7 +448,27 @@ def _write_cached_mosaic(
     valid_mask_path = staging_dir / _CACHE_VALID_MASK_NAME
     metadata_path = staging_dir / _CACHE_METADATA_NAME
 
-    canvas.save(png_path)
+    tile_count = int(metadata.get("tile_count") or 0)
+    heavy_threshold = int(os.getenv("APP_INFERENCE_HEAVY_BATCH_TILE_THRESHOLD", os.getenv("APP_WAYBACK_HEAVY_BATCH_TILE_THRESHOLD", "2000")))
+    generate_full_png = os.getenv("APP_GENERATE_FULL_MOSAIC_PNG_FOR_HEAVY_BATCH", "false").strip().lower() in {"1", "true", "yes", "on"}
+    if tile_count >= heavy_threshold and not generate_full_png:
+        max_dimension = int(os.getenv("APP_MOSAIC_PREVIEW_MAX_DIMENSION", "4096"))
+        preview = canvas.copy()
+        preview.thumbnail((max_dimension, max_dimension), Image.Resampling.LANCZOS)
+        preview.save(png_path)
+        metadata["preview_png_downsampled"] = True
+        metadata["preview_png_size"] = [int(preview.width), int(preview.height)]
+        logger.info(
+            "WAYBACK_MOSAIC_FULL_PNG_SKIPPED tileCount=%s threshold=%s previewSize=%sx%s path=%s",
+            tile_count,
+            heavy_threshold,
+            preview.width,
+            preview.height,
+            png_path,
+        )
+    else:
+        canvas.save(png_path)
+        metadata["preview_png_downsampled"] = False
     arr = np.asarray(canvas)
     with rasterio.open(
         tif_path,
@@ -500,30 +543,45 @@ def _publish_cached_mosaic(
 
 
 def _download_tile_with_retries(
-    *,
     url: str,
     settings: Settings,
-    cache_path: Path,
+    *,
+    tile_cache: WaybackTileCache | None = None,
+    cache_path: Path | None = None,
+    z: int = 0,
+    x: int = 0,
+    y: int = 0,
+    session: requests.Session | None = None,
 ) -> TileDownloadResult:
-    if cache_path.exists():
-        try:
-            return TileDownloadResult(
-                status="available",
-                content=cache_path.read_bytes(),
-                cache_hit=True,
-                attempts=0,
-                retry_count=0,
-                url=url,
-            )
-        except OSError:
-            pass
-    attempts = max(settings.wayback_http_max_retries, 0) + 1
+    started = time.monotonic()
+    cached_tile = (
+        tile_cache.get_tile(z=z, x=x, y=y, file_fallback_path=cache_path)
+        if tile_cache is not None and cache_path is not None
+        else None
+    )
+    if cached_tile is not None:
+        duration_seconds = time.monotonic() - started
+        return TileDownloadResult(
+            status="available",
+            content=cached_tile,
+            cache_hit=True,
+            attempts=0,
+            retry_count=0,
+            byte_size=len(cached_tile),
+            duration_seconds=duration_seconds,
+            url=url,
+        )
+
+    retry_limit = min(max(settings.wayback_http_max_retries, 0), max(settings.download_retries, 0))
+    attempts = retry_limit + 1
     timeout = (
         settings.wayback_http_connect_timeout_seconds,
         settings.wayback_http_read_timeout_seconds,
     )
     backoff_base_sec = max(settings.wayback_http_backoff_base_seconds, 0.0)
     retry_count = 0
+    throttle_count = 0
+    timeout_count = 0
     retryable_exceptions = (
         OSError,
         requests.ConnectTimeout,
@@ -531,20 +589,41 @@ def _download_tile_with_retries(
         requests.ConnectionError,
         urllib3.exceptions.ProtocolError,
     )
+
     for attempt in range(1, attempts + 1):
         try:
-            tile_bytes = _download_tile(url, timeout)
-            if tile_bytes is None:
-                return TileDownloadResult(status="missing_404", attempts=attempt, retry_count=retry_count, url=url)
             try:
-                cache_path.parent.mkdir(parents=True, exist_ok=True)
-                tmp_path = cache_path.with_suffix(".tmp")
-                tmp_path.write_bytes(tile_bytes)
-                tmp_path.replace(cache_path)
-            except OSError:
-                pass
-            return TileDownloadResult(status="available", content=tile_bytes, attempts=attempt, retry_count=retry_count, url=url)
+                tile_bytes = _download_tile(url, timeout, session)
+            except TypeError:
+                # Existing tests monkeypatch _download_tile with the pre-session signature.
+                tile_bytes = _download_tile(url, timeout)  # type: ignore[misc,call-arg]
+            duration_seconds = time.monotonic() - started
+            if tile_bytes is None:
+                return TileDownloadResult(
+                    status="missing_404",
+                    attempts=attempt,
+                    retry_count=retry_count,
+                    throttle_count=throttle_count,
+                    timeout_count=timeout_count,
+                    duration_seconds=duration_seconds,
+                    url=url,
+                )
+            if tile_cache is not None:
+                tile_cache.put_tile(z=z, x=x, y=y, content=tile_bytes)
+            return TileDownloadResult(
+                status="available",
+                content=tile_bytes,
+                attempts=attempt,
+                retry_count=retry_count,
+                throttle_count=throttle_count,
+                timeout_count=timeout_count,
+                byte_size=len(tile_bytes),
+                duration_seconds=duration_seconds,
+                url=url,
+            )
         except retryable_exceptions as exc:
+            if isinstance(exc, (requests.ConnectTimeout, requests.ReadTimeout)):
+                timeout_count += 1
             if attempt < attempts:
                 retry_count += 1
                 logger.warning(
@@ -564,10 +643,20 @@ def _download_tile_with_retries(
                 url,
                 type(exc).__name__,
             )
-            return TileDownloadResult(status="transient_failed", attempts=attempt, retry_count=retry_count, url=url)
+            return TileDownloadResult(
+                status="transient_failed",
+                attempts=attempt,
+                retry_count=retry_count,
+                throttle_count=throttle_count,
+                timeout_count=timeout_count,
+                duration_seconds=time.monotonic() - started,
+                url=url,
+            )
         except requests.HTTPError as exc:
             response = exc.response
             if response is not None and response.status_code in _RETRYABLE_DOWNLOAD_STATUSES and attempt < attempts:
+                if response.status_code in {429, 503}:
+                    throttle_count += 1
                 retry_count += 1
                 logger.warning(
                     "Retrying Wayback tile download after HTTP %s attempt=%s maxAttempts=%s url=%s",
@@ -581,9 +670,25 @@ def _download_tile_with_retries(
                     time.sleep(backoff + random.uniform(0, min(0.5, max(backoff * 0.25, 0.0))))
                 continue
             if response is not None and response.status_code == 404:
-                return TileDownloadResult(status="missing_404", attempts=attempt, retry_count=retry_count, url=url)
+                return TileDownloadResult(
+                    status="missing_404",
+                    attempts=attempt,
+                    retry_count=retry_count,
+                    throttle_count=throttle_count,
+                    timeout_count=timeout_count,
+                    duration_seconds=time.monotonic() - started,
+                    url=url,
+                )
             raise
-    return TileDownloadResult(status="transient_failed", attempts=attempts, retry_count=retry_count, url=url)
+    return TileDownloadResult(
+        status="transient_failed",
+        attempts=attempts,
+        retry_count=retry_count,
+        throttle_count=throttle_count,
+        timeout_count=timeout_count,
+        duration_seconds=time.monotonic() - started,
+        url=url,
+    )
 
 
 def download_wayback_mosaic(
@@ -666,6 +771,13 @@ def download_wayback_mosaic(
                 metadata=cached_metadata,
             )
         if cache_dir.exists():
+            if settings.wayback_tile_cache_backend == "sqlite":
+                WaybackTileCache(
+                    settings=settings,
+                    release_id=release.identifier,
+                    layer_id=settings.tile_matrix_set,
+                    zoom=resolved_zoom,
+                ).delete_storage()
             shutil.rmtree(cache_dir, ignore_errors=True)
 
         canvas = Image.new("RGB", (width, height))
@@ -698,63 +810,159 @@ def download_wayback_mosaic(
         downloaded_tile_count = 0
         retry_count = 0
         failed_tile_count = 0
+        missing_tile_count = skipped_missing_from_preflight
+        transient_failure_count = 0
+        throttle_count = 0
+        timeout_count = 0
+        processed_tile_count = skipped_missing_from_preflight
+        progress_start = time.monotonic()
+        last_progress_at = 0.0
+        last_progress_tiles = 0
 
-        def _publish_progress() -> None:
+        def _publish_progress(*, force: bool = False) -> None:
+            nonlocal last_progress_at, last_progress_tiles
             if progress_callback is None:
                 return
+            now = time.monotonic()
+            if not force:
+                tile_delta = processed_tile_count - last_progress_tiles
+                time_delta = now - last_progress_at
+                if (
+                    tile_delta < settings.wayback_tile_progress_every_tiles
+                    and time_delta < settings.wayback_tile_progress_every_seconds
+                ):
+                    return
+            elapsed = max(now - progress_start, 0.001)
+            tile_rate = processed_tile_count / elapsed
+            remaining_tiles = max(tile_count - processed_tile_count, 0)
+            eta_seconds = remaining_tiles / tile_rate if tile_rate > 0 else None
             missing_tile_ratio = failed_tile_count / selected_tile_count if selected_tile_count else 0.0
+            last_progress_at = now
+            last_progress_tiles = processed_tile_count
             progress_callback(
                 {
                     "stage": "Téléchargement des tuiles Wayback",
                     "release_identifier": release.identifier,
+                    "preferred_zoom": settings.wayback_preferred_inference_zoom,
+                    "effective_zoom": resolved_zoom,
+                    "fallback_applied": resolved_zoom < settings.wayback_preferred_inference_zoom,
+                    "fallback_reason": "preferred_zoom_unavailable" if resolved_zoom < settings.wayback_preferred_inference_zoom else None,
+                    "processed_tile_count": processed_tile_count,
+                    "total_tile_count": tile_count,
                     "selected_tile_count": selected_tile_count,
                     "cache_hit_count": cache_hit_count,
                     "downloaded_tile_count": downloaded_tile_count,
+                    "missing_tile_count": missing_tile_count,
                     "failed_tile_count": failed_tile_count,
                     "retry_count": retry_count,
+                    "throttle_count": throttle_count,
+                    "timeout_count": timeout_count,
                     "missing_tile_ratio": missing_tile_ratio,
+                    "tile_rate_per_sec": tile_rate,
+                    "eta_seconds": eta_seconds,
                 }
             )
 
-        _publish_progress()
-        with ThreadPoolExecutor(max_workers=settings.wayback_tile_max_concurrency) as executor:
-            future_map = {
-                executor.submit(_download_tile_with_retries, url=tile_url, settings=settings, cache_path=cache_path): (x, y)
-                for x, y, tile_url, cache_path in jobs
-            }
-            actual_available_coords: set[tuple[int, int]] = set()
-            available_tile_count = 0
-            missing_tile_count = skipped_missing_from_preflight
-            transient_failure_count = 0
-            for future in as_completed(future_map):
-                x, y = future_map[future]
-                tile_result = future.result()
-                retry_count += int(tile_result.retry_count)
-                if tile_result.status == "missing_404":
-                    missing_tile_count += 1
-                    failed_tile_count += 1
-                    _publish_progress()
-                    continue
-                if tile_result.status == "transient_failed":
-                    transient_failure_count += 1
-                    failed_tile_count += 1
-                    _publish_progress()
-                    continue
-                if tile_result.content is None:
-                    transient_failure_count += 1
-                    failed_tile_count += 1
-                    _publish_progress()
-                    continue
-                available_tile_count += 1
-                if tile_result.cache_hit:
-                    cache_hit_count += 1
-                else:
-                    downloaded_tile_count += 1
-                actual_available_coords.add((x, y))
-                tile = Image.open(io.BytesIO(tile_result.content)).convert("RGB")
-                canvas.paste(tile, ((x - x_min) * 256, (y - y_min) * 256))
-                valid_mask[(y - y_min) * 256 : (y - y_min + 1) * 256, (x - x_min) * 256 : (x - x_min + 1) * 256] = 1
-                _publish_progress()
+        _publish_progress(force=True)
+        actual_available_coords: set[tuple[int, int]] = set()
+        available_tile_count = 0
+        effective_concurrency = max(settings.wayback_tile_min_concurrency, min(settings.wayback_tile_max_concurrency, selected_tile_count or 1))
+        logger.info(
+            "WAYBACK_TILE_DOWNLOAD_START release=%s zoom=%s selectedTiles=%s cacheBackend=%s concurrency=%s",
+            release.identifier,
+            resolved_zoom,
+            selected_tile_count,
+            settings.wayback_tile_cache_backend,
+            effective_concurrency,
+        )
+        with WaybackTileCache(settings=settings, release_id=release.identifier, layer_id=settings.tile_matrix_set, zoom=resolved_zoom) as tile_cache:
+            session = create_wayback_tile_session(effective_concurrency)
+            try:
+                cursor = 0
+                while cursor < len(jobs):
+                    batch = jobs[cursor : cursor + max(settings.wayback_tile_progress_every_tiles, effective_concurrency)]
+                    batch_started = time.monotonic()
+                    batch_throttles = 0
+                    batch_timeouts = 0
+                    with ThreadPoolExecutor(max_workers=effective_concurrency) as executor:
+                        future_map = {
+                            executor.submit(
+                                _download_tile_with_retries,
+                                url=tile_url,
+                                settings=settings,
+                                tile_cache=tile_cache,
+                                cache_path=cache_path,
+                                z=resolved_zoom,
+                                x=x,
+                                y=y,
+                                session=session,
+                            ): (x, y)
+                            for x, y, tile_url, cache_path in batch
+                        }
+                        set_gauge("wayback_tile_download_active", len(future_map), release=release.identifier, zoom=resolved_zoom)
+                        for future in as_completed(future_map):
+                            x, y = future_map[future]
+                            tile_result = future.result()
+                            processed_tile_count += 1
+                            retry_count += int(tile_result.retry_count)
+                            throttle_count += int(tile_result.throttle_count)
+                            timeout_count += int(tile_result.timeout_count)
+                            batch_throttles += int(tile_result.throttle_count)
+                            batch_timeouts += int(tile_result.timeout_count)
+                            record_tile_download(
+                                release=release.identifier,
+                                zoom=resolved_zoom,
+                                status=tile_result.status,
+                                duration_seconds=tile_result.duration_seconds,
+                                byte_size=tile_result.byte_size,
+                                cache_hit=tile_result.cache_hit,
+                                retry_count=tile_result.retry_count,
+                                throttle_count=tile_result.throttle_count,
+                                timeout_count=tile_result.timeout_count,
+                            )
+                            if tile_result.status == "missing_404":
+                                missing_tile_count += 1
+                                _publish_progress()
+                                continue
+                            if tile_result.status == "transient_failed":
+                                transient_failure_count += 1
+                                failed_tile_count += 1
+                                _publish_progress()
+                                continue
+                            if tile_result.content is None:
+                                transient_failure_count += 1
+                                failed_tile_count += 1
+                                _publish_progress()
+                                continue
+                            available_tile_count += 1
+                            if tile_result.cache_hit:
+                                cache_hit_count += 1
+                            else:
+                                downloaded_tile_count += 1
+                            actual_available_coords.add((x, y))
+                            tile = Image.open(io.BytesIO(tile_result.content)).convert("RGB")
+                            canvas.paste(tile, ((x - x_min) * 256, (y - y_min) * 256))
+                            valid_mask[(y - y_min) * 256 : (y - y_min + 1) * 256, (x - x_min) * 256 : (x - x_min + 1) * 256] = 1
+                            _publish_progress()
+                    cursor += len(batch)
+                    remote_issue_ratio = (batch_throttles + batch_timeouts) / max(len(batch), 1)
+                    if remote_issue_ratio > 0.02 and effective_concurrency > settings.wayback_tile_min_concurrency:
+                        next_concurrency = max(settings.wayback_tile_min_concurrency, int(effective_concurrency * 0.75))
+                        if next_concurrency < effective_concurrency:
+                            logger.warning(
+                                "WAYBACK_TILE_ADAPTIVE_BACKOFF release=%s zoom=%s previousConcurrency=%s nextConcurrency=%s issueRatio=%.3f batchDurationMs=%.1f",
+                                release.identifier,
+                                resolved_zoom,
+                                effective_concurrency,
+                                next_concurrency,
+                                remote_issue_ratio,
+                                (time.monotonic() - batch_started) * 1000,
+                            )
+                            effective_concurrency = next_concurrency
+            finally:
+                set_gauge("wayback_tile_download_active", 0, release=release.identifier, zoom=resolved_zoom)
+                session.close()
+        _publish_progress(force=True)
 
         if available_tile_count == 0:
             raise WaybackTileDownloadError(
@@ -776,25 +984,6 @@ def download_wayback_mosaic(
             )
 
         missing_tile_ratio = failed_tile_count / selected_tile_count if selected_tile_count else 0.0
-        if missing_tile_ratio > settings.wayback_max_missing_tile_ratio:
-            raise WaybackTileDownloadError(
-                (
-                    f"Wayback tile download incomplete for {release.identifier} at z={resolved_zoom}: "
-                    f"failed_tile_count={failed_tile_count} selected_tile_count={selected_tile_count} "
-                    f"missing_tile_ratio={missing_tile_ratio:.3f} retry_count={retry_count}."
-                ),
-                details={
-                    "release_identifier": release.identifier,
-                    "selected_tile_count": selected_tile_count,
-                    "cache_hit_count": cache_hit_count,
-                    "downloaded_tile_count": downloaded_tile_count,
-                    "failed_tile_count": failed_tile_count,
-                    "retry_count": retry_count,
-                    "missing_tile_ratio": missing_tile_ratio,
-                    "max_missing_tile_ratio": settings.wayback_max_missing_tile_ratio,
-                },
-            )
-
         if available_tiles is not None and transient_failure_count == 0:
             actual_available_coords = set(available_tiles)
 

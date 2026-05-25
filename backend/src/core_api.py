@@ -37,7 +37,7 @@ from src.services.temporal_projects import (
 from src.services.validation import validate_request
 
 
-ProgressCallback = Callable[[float, str], None]
+ProgressCallback = Callable[[float, str, dict[str, object] | None], None]
 
 
 def _resolve_settings(settings: Settings | None) -> Settings:
@@ -168,6 +168,7 @@ def run_temporal_project_api(
     *,
     settings: Settings | None = None,
     execution_config: PipelineExecutionConfig | None = None,
+    progress_callback: ProgressCallback | None = None,
     x_ip_token: str | None = None,
 ) -> TemporalProjectRunResponse:
     resolved_settings = _resolve_settings(settings)
@@ -189,6 +190,7 @@ def run_temporal_project_api(
         return run_detection(
             request,
             settings=configured_settings,
+            progress=progress_callback,
             x_ip_token=x_ip_token,
             inference_runner=backend.create_inference_runner(configured_settings),
             model_backend=backend.model_backend,

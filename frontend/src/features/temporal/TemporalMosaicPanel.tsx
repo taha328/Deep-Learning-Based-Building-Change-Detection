@@ -34,6 +34,7 @@ import {
   createTemporalProjectExportBundle,
   deleteReferenceLayer,
   getCachedRunResponse,
+  getTemporalMilestoneArtifact,
   getTemporalProject,
   importReferenceLayer,
   importTemporalOverride,
@@ -46,6 +47,7 @@ import {
   validateTemporalProject,
 } from "@/api/client";
 import { useAppStore } from "@/app/store";
+import { ApiClientError } from "@/api/http";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -72,7 +74,7 @@ import { RunProgressPanel } from "@/features/results/RunProgressPanel";
 import { GeometryImportModal } from "@/features/temporal/GeometryImportModal";
 import { MilestoneMetricCards } from "@/features/temporal/MilestoneMetricCards";
 import { ReferenceLayerImportModal } from "@/features/temporal/ReferenceLayerImportModal";
-import type { TemporalMapPresentation } from "@/features/temporal/types";
+import type { TemporalMapPresentation, TemporalOutputArtifactPresentation } from "@/features/temporal/types";
 import { SharedAoiSection } from "@/features/workspace/SharedAoiSection";
 import { WorkflowParametersPanel } from "@/features/workspace/WorkflowParametersPanel";
 import { WorkflowSectionCard } from "@/features/workspace/WorkflowSectionCard";
@@ -404,6 +406,89 @@ function hasMilestoneBufferFeatures(milestone: TemporalMilestone): boolean {
   );
 }
 
+const TEMPORAL_LAZY_ARTIFACT_FIELDS = [
+  ["automated_additions", "automated_additions_geojson"],
+  ["automated_candidate_footprint", "automated_candidate_footprint_geojson"],
+  ["automated_building_blocks", "automated_building_blocks_geojson"],
+  ["manual_override", "manual_override_geojson"],
+  ["additions", "additions_geojson"],
+  ["effective_building_blocks", "effective_building_blocks_geojson"],
+  ["effective_footprint", "effective_footprint_geojson"],
+  ["cumulative_union", "cumulative_union_geojson"],
+  ["cumulative_convex_hull", "cumulative_convex_hull_geojson"],
+  ["cumulative_growth_blocks", "cumulative_growth_blocks_geojson"],
+  ["cumulative_growth_envelope", "cumulative_growth_envelope_geojson"],
+] as const;
+
+const TEMPORAL_LAZY_BUFFER_ARTIFACT_FIELDS = [
+  ["building_change_buffer_10m", "10m"],
+  ["building_change_buffer_15m", "15m"],
+  ["building_change_buffer_20m", "20m"],
+] as const;
+
+function milestoneHasArtifact(milestone: TemporalMilestone, key: string): boolean {
+  return milestone.artifacts.some(
+    (artifact) =>
+      artifact.key === key &&
+      ((artifact.feature_count ?? 0) > 0 ||
+        (artifact.size_bytes ?? 0) > 0 ||
+        Boolean(artifact.tilejson_url) ||
+        Boolean(artifact.tiles_url_template)),
+  );
+}
+
+function milestoneArtifactByKey(milestone: TemporalMilestone, key: string) {
+  return milestone.artifacts.find((artifact) => artifact.key === key) ?? null;
+}
+
+function isHugeTemporalArtifact(milestone: TemporalMilestone, key: string): boolean {
+  const artifact = milestoneArtifactByKey(milestone, key);
+  const artifactRecord = artifact as
+    | (typeof artifact & {
+        tilejsonUrl?: string | null;
+        tilesUrlTemplate?: string | null;
+        sizeBytes?: number | null;
+        featureCount?: number | null;
+      })
+    | null;
+  return Boolean(
+    artifact?.tilejson_url ||
+      artifact?.tiles_url_template ||
+      artifactRecord?.tilejsonUrl ||
+      artifactRecord?.tilesUrlTemplate ||
+      (artifact?.feature_count ?? artifactRecord?.featureCount ?? 0) >= 20_000 ||
+      (artifact?.size_bytes ?? artifactRecord?.sizeBytes ?? 0) >= 10_000_000,
+  );
+}
+
+function temporalArtifactPresentation(
+  backendUrl: string,
+  milestone: TemporalMilestone,
+): Record<string, TemporalOutputArtifactPresentation> {
+  return Object.fromEntries(
+    milestone.artifacts
+      .filter((artifact) => artifact.key)
+      .map((artifact) => [
+        artifact.key as string,
+        {
+          key: artifact.key as string,
+          featureCount: artifact.feature_count ?? null,
+          sizeBytes: artifact.size_bytes ?? null,
+          bbox:
+            Array.isArray(artifact.bbox) &&
+            artifact.bbox.length >= 4 &&
+            artifact.bbox.every((value) => Number.isFinite(value))
+              ? ([artifact.bbox[0], artifact.bbox[1], artifact.bbox[2], artifact.bbox[3]] as [number, number, number, number])
+              : null,
+          artifactUrl: resolveBackendUrl(backendUrl, artifact.artifact_url),
+          tilejsonUrl: resolveBackendUrl(backendUrl, artifact.tilejson_url),
+          tilesUrlTemplate: resolveBackendUrl(backendUrl, artifact.tiles_url_template),
+          vectorSourceLayer: artifact.vector_source_layer ?? null,
+        },
+      ]),
+  );
+}
+
 function hasValidRasterBounds(bounds: number[] | null | undefined): bounds is [number, number, number, number] {
   return Array.isArray(bounds) && bounds.length >= 4 && bounds.every((value) => Number.isFinite(value));
 }
@@ -505,6 +590,7 @@ export function TemporalMosaicPanel({
   const [resultsExportMenuOpen, setResultsExportMenuOpen] = useState(false);
   const [resultsExportBusy, setResultsExportBusy] = useState<ResultsExportFormat | null>(null);
   const [resultsExportError, setResultsExportError] = useState<string | null>(null);
+  const [staleReferenceLayerProjectIds, setStaleReferenceLayerProjectIds] = useState<Set<string>>(new Set());
 
   const aoi = useAppStore((state) => state.aoi);
   const draftVertices = useAppStore((state) => state.draftVertices);
@@ -551,15 +637,37 @@ export function TemporalMosaicPanel({
         projectId,
         reason: "manual_reference_layer_panel",
       });
-      const layers = await listReferenceLayers(projectId, { signal });
-      relayClientLog("REFERENCE_LAYER_MANUAL_FETCH_DONE", {
-        projectId,
-        count: layers.length,
-        durationMs: Math.round(performance.now() - startedAt),
-      });
-      return layers;
+      try {
+        const layers = await listReferenceLayers(projectId, { signal });
+        relayClientLog("REFERENCE_LAYER_MANUAL_FETCH_DONE", {
+          projectId,
+          count: layers.length,
+          durationMs: Math.round(performance.now() - startedAt),
+        });
+        return layers;
+      } catch (error) {
+        if (error instanceof ApiClientError && error.status === 404) {
+          setStaleReferenceLayerProjectIds((current) => {
+            if (current.has(projectId)) {
+              return current;
+            }
+            const next = new Set(current);
+            next.add(projectId);
+            return next;
+          });
+          relayClientLog("TEMPORAL_STALE_PROJECT_REFERENCE_CLEARED", {
+            projectId,
+            reason: "reference_layers_404",
+            currentProjectId: project?.project_id ?? null,
+            affectedCurrentProject: project?.project_id === projectId,
+          });
+          return [];
+        }
+        throw error;
+      }
     },
-    enabled: Boolean(project?.project_id),
+    enabled: Boolean(project?.project_id && !staleReferenceLayerProjectIds.has(project.project_id)),
+    retry: (failureCount, error) => !(error instanceof ApiClientError && error.status === 404) && failureCount < 1,
   });
 
   type LoadProjectRequest = {
@@ -828,6 +936,126 @@ export function TemporalMosaicPanel({
   const manualReferenceLayers = referenceLayers;
 
   useEffect(() => {
+    if (!project?.project_id || !selectedMilestone) {
+      return;
+    }
+    const controller = new AbortController();
+    const releaseIdentifier = selectedMilestone.release_identifier;
+    const artifactFetches: Promise<[string, Record<string, unknown>]>[] = [];
+
+    for (const [artifactKey, fieldName] of TEMPORAL_LAZY_ARTIFACT_FIELDS) {
+      const currentValue = selectedMilestone[fieldName];
+      if (!hasFeatureCollectionFeatures(currentValue) && milestoneHasArtifact(selectedMilestone, artifactKey)) {
+        if (isHugeTemporalArtifact(selectedMilestone, artifactKey)) {
+          relayClientLog("TEMPORAL_GEOJSON_FETCH_SKIPPED_HUGE_ARTIFACT", {
+            projectId: project.project_id,
+            releaseIdentifier,
+            artifactKey,
+            reason: "vector_tile_available",
+          });
+          relayClientLog("TEMPORAL_GEOJSON_FETCH_BLOCKED_VECTOR_TILE_ARTIFACT", {
+            projectId: project.project_id,
+            releaseIdentifier,
+            artifactKey,
+            reason: "vector_tile_available",
+          });
+          continue;
+        }
+        artifactFetches.push(
+          getTemporalMilestoneArtifact(project.project_id, releaseIdentifier, artifactKey, { signal: controller.signal }).then((payload: Record<string, unknown>) => [
+            fieldName,
+            payload,
+          ]),
+        );
+      }
+    }
+    for (const [artifactKey, bufferKey] of TEMPORAL_LAZY_BUFFER_ARTIFACT_FIELDS) {
+      const currentValue = selectedMilestone.buffer_layers_geojson?.[bufferKey];
+      if (!hasFeatureCollectionFeatures(currentValue) && milestoneHasArtifact(selectedMilestone, artifactKey)) {
+        if (isHugeTemporalArtifact(selectedMilestone, artifactKey)) {
+          relayClientLog("TEMPORAL_GEOJSON_FETCH_SKIPPED_HUGE_ARTIFACT", {
+            projectId: project.project_id,
+            releaseIdentifier,
+            artifactKey,
+            reason: "vector_tile_available",
+          });
+          relayClientLog("TEMPORAL_GEOJSON_FETCH_BLOCKED_VECTOR_TILE_ARTIFACT", {
+            projectId: project.project_id,
+            releaseIdentifier,
+            artifactKey,
+            reason: "vector_tile_available",
+          });
+          continue;
+        }
+        artifactFetches.push(
+          getTemporalMilestoneArtifact(project.project_id, releaseIdentifier, artifactKey, { signal: controller.signal }).then((payload: Record<string, unknown>) => [
+            `buffer_layers_geojson.${bufferKey}`,
+            payload,
+          ]),
+        );
+      }
+    }
+    if (!artifactFetches.length) {
+      return () => {
+        controller.abort();
+      };
+    }
+
+    relayClientLog("PROJECT_LAYER_ARTIFACT_LAZY_FETCH", {
+      projectId: project.project_id,
+      releaseIdentifier,
+      artifactCount: artifactFetches.length,
+    });
+    Promise.all(artifactFetches)
+      .then((entries) => {
+        if (controller.signal.aborted) {
+          return;
+        }
+        setProject((current) => {
+          if (!current || current.project_id !== project.project_id) {
+            return current;
+          }
+          return {
+            ...current,
+            milestones: current.milestones.map((milestone) => {
+              if (milestone.release_identifier !== releaseIdentifier) {
+                return milestone;
+              }
+              const nextMilestone: TemporalMilestone = {
+                ...milestone,
+                buffer_layers_geojson: { ...milestone.buffer_layers_geojson },
+              };
+              for (const [fieldName, payload] of entries) {
+                if (fieldName.startsWith("buffer_layers_geojson.")) {
+                  const bufferKey = fieldName.split(".", 2)[1];
+                  nextMilestone.buffer_layers_geojson = {
+                    ...nextMilestone.buffer_layers_geojson,
+                    [bufferKey]: payload,
+                  };
+                } else {
+                  (nextMilestone as unknown as Record<string, unknown>)[fieldName] = payload;
+                }
+              }
+              return nextMilestone;
+            }),
+          };
+        });
+      })
+      .catch((error) => {
+        if (!controller.signal.aborted) {
+          relayClientLog("PROJECT_LAYER_ARTIFACT_LAZY_FETCH", {
+            projectId: project.project_id,
+            releaseIdentifier,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      });
+    return () => {
+      controller.abort();
+    };
+  }, [project?.project_id, selectedMilestone, setProject]);
+
+  useEffect(() => {
     if (!project?.project_id || !referenceLayersQuery.isSuccess) {
       return;
     }
@@ -869,6 +1097,7 @@ export function TemporalMosaicPanel({
       project?.milestones.map((milestone, index) => ({
         releaseIdentifier: milestone.release_identifier,
         status: milestone.status,
+        artifacts: temporalArtifactPresentation(backendUrl, milestone),
         additions: ensureFeatureCollection(milestone.additions_geojson),
         buffer10m: ensureFeatureCollection(milestone.buffer_layers_geojson?.["10m"]),
         buffer15m: ensureFeatureCollection(milestone.buffer_layers_geojson?.["15m"]),
@@ -897,11 +1126,24 @@ export function TemporalMosaicPanel({
         cumulativeGrowthEnvelope: ensureFeatureCollection(milestone.cumulative_growth_envelope_geojson),
         manualOverride: ensureFeatureCollection(milestone.manual_override_geojson),
       })) ?? [],
-    [project?.milestones],
+    [backendUrl, project?.milestones],
   );
 
   useEffect(() => {
     if (!selectedMilestone?.pair_request_hash || hasMilestoneBufferFeatures(selectedMilestone)) {
+      return;
+    }
+    const hasArtifactBackedBuffers =
+      milestoneHasArtifact(selectedMilestone, "building_change_buffer_10m") ||
+      milestoneHasArtifact(selectedMilestone, "building_change_buffer_15m") ||
+      milestoneHasArtifact(selectedMilestone, "building_change_buffer_20m");
+    if (hasArtifactBackedBuffers) {
+      relayClientLog("RUN_CACHE_POLL_STOPPED_STALE", {
+        projectId: project?.project_id ?? null,
+        releaseIdentifier: selectedMilestone.release_identifier,
+        requestHash: selectedMilestone.pair_request_hash,
+        reason: "artifact_backed_temporal_buffers",
+      });
       return;
     }
 
@@ -931,8 +1173,13 @@ export function TemporalMosaicPanel({
 
     return () => {
       cancelled = true;
+      relayClientLog("RUN_CACHE_POLL_CANCELLED", {
+        projectId: project?.project_id ?? null,
+        releaseIdentifier: selectedMilestone.release_identifier,
+        requestHash: selectedMilestone.pair_request_hash,
+      });
     };
-  }, [selectedMilestone?.pair_request_hash, selectedMilestone?.release_identifier, selectedMilestone?.buffer_layers_geojson, setProject]);
+  }, [project?.project_id, selectedMilestone, setProject]);
 
   useEffect(() => {
     if (!project?.milestones.length) {

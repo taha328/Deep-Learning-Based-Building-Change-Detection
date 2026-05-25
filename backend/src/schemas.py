@@ -168,6 +168,7 @@ class ValidationResponse(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     blocking_errors: list[str] = Field(default_factory=list)
     recommended_mode: ModeName
+    details: dict[str, Any] = Field(default_factory=dict)
 
 
 class RunRequest(ValidationRequest):
@@ -208,6 +209,23 @@ class ArtifactEntry(BaseModel):
     path: str
     media_type: str
     description: str
+    key: str | None = None
+    feature_count: int | None = None
+    size_bytes: int | None = None
+    source_mtime_ns: int | None = None
+    qgis_cache_key: str | None = None
+    bbox: list[float] | None = None
+    sha256: str | None = None
+    artifact_url: str | None = None
+    geojson_url: str | None = None
+    download_url: str | None = None
+    gpkg_url: str | None = None
+    qgis_preferred_url: str | None = None
+    qgis_preferred_format: str | None = None
+    qgis_compatible: bool = False
+    tilejson_url: str | None = None
+    tiles_url_template: str | None = None
+    vector_source_layer: str | None = None
 
 
 class SummaryStats(BaseModel):

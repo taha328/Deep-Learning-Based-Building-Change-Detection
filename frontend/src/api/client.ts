@@ -6,6 +6,7 @@ export const validateRequest = api.validateRequest;
 export const runDetection = api.runDetection;
 export const listTemporalProjects = api.listTemporalProjects;
 export const getTemporalProject = api.getTemporalProject;
+export const getTemporalMilestoneArtifact = api.getTemporalMilestoneArtifact;
 export const getCachedRunResponse = api.getCachedRunResponse;
 export const createRunExportBundle = api.createRunExportBundle;
 export const listJobs = api.listJobs;

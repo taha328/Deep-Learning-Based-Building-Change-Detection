@@ -9,6 +9,7 @@
     "dev:remote": "VITE_FRONTEND_MODE=remote vite --host 0.0.0.0 --port 5173 --strictPort",
     "build": "tsc -b && vite build",
     "test": "node --experimental-strip-types --test \"src/**/*.test.ts\"",
+    "test:e2e": "node scripts/e2e-screenshot-audit.mjs",
     "preview": "vite preview",
     "pages:deploy": "wrangler pages deploy dist"
   },

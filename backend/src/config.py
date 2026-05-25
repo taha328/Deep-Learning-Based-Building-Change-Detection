@@ -31,7 +31,8 @@ class Settings(BaseModel):
     )
     tile_matrix_set: str = "default028mm"
     zoom: int = 18
-    min_zoom: int = 13
+    min_zoom: int = 17
+    wayback_preferred_inference_zoom: int = 18
     request_timeout_sec: int = 120
     download_workers: int = 6
     download_retries: int = 3
@@ -52,9 +53,20 @@ class Settings(BaseModel):
     wayback_http_read_timeout_seconds: int = 60
     wayback_http_max_retries: int = 4
     wayback_http_backoff_base_seconds: float = 1.0
-    wayback_tile_max_concurrency: int = 4
+    wayback_tile_min_concurrency: int = 4
+    wayback_tile_max_concurrency: int = 12
+    wayback_tile_progress_every_tiles: int = 50
+    wayback_tile_progress_every_seconds: float = 5.0
+    wayback_tile_cache_backend: Literal["file", "sqlite"] = "sqlite"
+    wayback_tile_sqlite_wal: bool = True
+    wayback_tile_sqlite_batch_insert_size: int = 100
     wayback_max_missing_tile_ratio: float = 0.05
     wayback_tile_cache_dir: Path | None = None
+    wayback_tile_sqlite_cache_dir: Path | None = None
+    wayback_tile_cache_service_enabled: bool = False
+    wayback_tile_cache_service_url: str = ""
+    wayback_tile_cache_service_kind: str = "mapproxy"
+    wayback_heavy_batch_tile_threshold: int = 2000
     wayback_tilemap_preflight_enabled: bool = True
     wayback_metadata_cache_enabled: bool = True
     wayback_metadata_cache_ttl_seconds: int = 604800
@@ -76,10 +88,19 @@ class Settings(BaseModel):
     reference_tile_prewarm_max_tiles: int = 256
     patch_size: int = 1024
     stride: int = 768
+    inference_tiled_mode_auto: bool = True
+    inference_tile_size: int = 1024
+    inference_tile_overlap: int = 128
+    inference_tile_batch_size: int = 1
+    inference_max_in_memory_pixels: int = 25_000_000
+    inference_heavy_batch_tile_threshold: int = 2000
+    inference_disable_full_preview_png_for_heavy_batch: bool = True
+    generate_full_mosaic_png_for_heavy_batch: bool = False
+    mosaic_preview_max_dimension: int = 4096
     scene_segmentation_concurrency: int = 2
-    default_change_threshold: float = 0.40
-    default_semantic_threshold: float = 0.40
-    default_min_new_building_pixels: int = 50
+    default_change_threshold: float = 0.35
+    default_semantic_threshold: float = 0.35
+    default_min_new_building_pixels: int = 30
     addition_min_area_m2: float = 8.0
     addition_max_existing_overlap_ratio: float = 0.50
     addition_thin_artifact_max_area_m2: float = 80.0
@@ -109,9 +130,10 @@ class Settings(BaseModel):
     bandon_skip_nodata_crops: bool = True
     bandon_min_valid_ratio_within_aoi: float = 0.01
     s2looking_checkpoint_path: Path | None = None
-    s2looking_change_threshold: float = 0.50
+    s2looking_change_threshold: float = 0.35
     database_url: str = "postgresql+psycopg://building_change:building_change@localhost:5432/building_change"
     database_echo: bool = False
+    db_inline_json_max_bytes: int = 256 * 1024
     persistence_backend: PersistenceBackendName = "filesystem"
     redis_url: str = "redis://localhost:6379/0"
     celery_broker_url: str | None = None
@@ -185,6 +207,10 @@ class Settings(BaseModel):
             self.wayback_tile_preflight_cache_dir = self.runtime_cache_dir / "wayback_tile_preflight_cache"
         if self.wayback_tile_cache_dir is None:
             self.wayback_tile_cache_dir = self.runtime_cache_dir / "wayback_tiles"
+        if self.wayback_tile_sqlite_cache_dir is None:
+            self.wayback_tile_sqlite_cache_dir = self.runtime_cache_dir / "wayback_tile_cache"
+        if self.wayback_preferred_inference_zoom == 18 and self.zoom != 18:
+            self.wayback_preferred_inference_zoom = self.zoom
         if self.mapbox_current_imagery_cache_dir is None:
             self.mapbox_current_imagery_cache_dir = self.runtime_cache_dir / "mapbox_mosaics"
         if self.reference_tile_cache_dir is None:
@@ -201,8 +227,36 @@ class Settings(BaseModel):
             raise ValueError("wayback_http_max_retries must be greater than or equal to 0.")
         if self.wayback_http_backoff_base_seconds < 0:
             raise ValueError("wayback_http_backoff_base_seconds must be greater than or equal to 0.")
+        if self.wayback_preferred_inference_zoom < self.min_zoom:
+            raise ValueError("wayback_preferred_inference_zoom must be greater than or equal to min_zoom.")
+        if self.wayback_tile_min_concurrency < 1:
+            raise ValueError("wayback_tile_min_concurrency must be greater than or equal to 1.")
         if self.wayback_tile_max_concurrency < 1:
             raise ValueError("wayback_tile_max_concurrency must be greater than or equal to 1.")
+        if self.wayback_tile_max_concurrency < self.wayback_tile_min_concurrency:
+            raise ValueError("wayback_tile_max_concurrency must be greater than or equal to wayback_tile_min_concurrency.")
+        if self.wayback_tile_progress_every_tiles < 1:
+            raise ValueError("wayback_tile_progress_every_tiles must be greater than or equal to 1.")
+        if self.wayback_tile_progress_every_seconds <= 0:
+            raise ValueError("wayback_tile_progress_every_seconds must be greater than 0.")
+        if self.wayback_tile_sqlite_batch_insert_size < 1:
+            raise ValueError("wayback_tile_sqlite_batch_insert_size must be greater than or equal to 1.")
+        if self.wayback_heavy_batch_tile_threshold < 1:
+            raise ValueError("wayback_heavy_batch_tile_threshold must be greater than or equal to 1.")
+        if self.inference_tile_size < 128:
+            raise ValueError("inference_tile_size must be greater than or equal to 128.")
+        if self.inference_tile_overlap < 0:
+            raise ValueError("inference_tile_overlap must be greater than or equal to 0.")
+        if self.inference_tile_overlap * 2 >= self.inference_tile_size:
+            raise ValueError("inference_tile_overlap must be less than half of inference_tile_size.")
+        if self.inference_tile_batch_size < 1:
+            raise ValueError("inference_tile_batch_size must be greater than or equal to 1.")
+        if self.inference_max_in_memory_pixels < 1:
+            raise ValueError("inference_max_in_memory_pixels must be greater than or equal to 1.")
+        if self.inference_heavy_batch_tile_threshold < 1:
+            raise ValueError("inference_heavy_batch_tile_threshold must be greater than or equal to 1.")
+        if self.mosaic_preview_max_dimension < 256:
+            raise ValueError("mosaic_preview_max_dimension must be greater than or equal to 256.")
         if self.wayback_max_missing_tile_ratio < 0 or self.wayback_max_missing_tile_ratio > 1:
             raise ValueError("wayback_max_missing_tile_ratio must be between 0 and 1.")
         if self.inference_backend not in {"bandon_mps", "mtgcdnet_s2looking_mps"}:
@@ -274,6 +328,7 @@ class Settings(BaseModel):
         self.wayback_metadata_cache_dir.mkdir(parents=True, exist_ok=True)
         self.wayback_tile_preflight_cache_dir.mkdir(parents=True, exist_ok=True)
         self.wayback_tile_cache_dir.mkdir(parents=True, exist_ok=True)
+        self.wayback_tile_sqlite_cache_dir.mkdir(parents=True, exist_ok=True)
         self.mapbox_current_imagery_cache_dir.mkdir(parents=True, exist_ok=True)
         self.reference_tile_cache_dir.mkdir(parents=True, exist_ok=True)
         self.tmp_cache_dir.mkdir(parents=True, exist_ok=True)
@@ -309,6 +364,14 @@ class Settings(BaseModel):
 def _float_env(name: str, default: float) -> float:
     value = os.getenv(name)
     return float(value) if value else default
+
+
+def _float_env_any(names: tuple[str, ...], default: float) -> float:
+    for name in names:
+        value = os.getenv(name)
+        if value:
+            return float(value)
+    return default
 
 
 def _int_env(name: str, default: int) -> int:
@@ -386,14 +449,19 @@ def _load_backend_env_files() -> None:
 def get_settings() -> Settings:
     _load_backend_env_files()
     base = Settings()
+    preferred_wayback_zoom = _int_env_any(
+        ("APP_WAYBACK_PREFERRED_INFERENCE_ZOOM", "APP_WAYBACK_DEFAULT_ZOOM", "APP_TILE_ZOOM"),
+        base.wayback_preferred_inference_zoom,
+    )
     return Settings(
         project_root=base.project_root,
         runtime_cache_dir=Path(os.getenv("APP_RUNTIME_CACHE_DIR", str(base.runtime_cache_dir))),
         inference_backend=os.getenv("APP_INFERENCE_BACKEND", base.inference_backend),  # type: ignore[arg-type]
         wmts_capabilities_url=os.getenv("APP_WMTS_CAPABILITIES_URL", base.wmts_capabilities_url),
         tile_matrix_set=os.getenv("APP_TILE_MATRIX_SET", base.tile_matrix_set),
-        zoom=_int_env_any(("APP_WAYBACK_DEFAULT_ZOOM", "APP_TILE_ZOOM"), base.zoom),
+        zoom=preferred_wayback_zoom,
         min_zoom=_int_env("APP_TILE_MIN_ZOOM", base.min_zoom),
+        wayback_preferred_inference_zoom=preferred_wayback_zoom,
         request_timeout_sec=_int_env("APP_REQUEST_TIMEOUT_SEC", base.request_timeout_sec),
         download_workers=_int_env("APP_DOWNLOAD_WORKERS", base.download_workers),
         download_retries=_int_env("APP_DOWNLOAD_RETRIES", base.download_retries),
@@ -450,25 +518,46 @@ def get_settings() -> Settings:
             "APP_WAYBACK_HTTP_BACKOFF_BASE_SECONDS",
             _float_env("WAYBACK_RELEASES_RETRY_BACKOFF_SECONDS", base.wayback_releases_retry_backoff_seconds),
         ),
-        wayback_http_connect_timeout_seconds=_int_env(
-            "APP_WAYBACK_HTTP_CONNECT_TIMEOUT_SECONDS",
+        wayback_http_connect_timeout_seconds=_int_env_any(
+            ("APP_WAYBACK_TILE_CONNECT_TIMEOUT", "APP_WAYBACK_HTTP_CONNECT_TIMEOUT_SECONDS"),
             base.wayback_http_connect_timeout_seconds,
         ),
-        wayback_http_read_timeout_seconds=_int_env(
-            "APP_WAYBACK_HTTP_READ_TIMEOUT_SECONDS",
+        wayback_http_read_timeout_seconds=_int_env_any(
+            ("APP_WAYBACK_TILE_READ_TIMEOUT", "APP_WAYBACK_HTTP_READ_TIMEOUT_SECONDS"),
             base.wayback_http_read_timeout_seconds,
         ),
-        wayback_http_max_retries=_int_env(
-            "APP_WAYBACK_HTTP_MAX_RETRIES",
+        wayback_http_max_retries=_int_env_any(
+            ("APP_WAYBACK_TILE_MAX_RETRIES", "APP_WAYBACK_HTTP_MAX_RETRIES"),
             base.wayback_http_max_retries,
         ),
-        wayback_http_backoff_base_seconds=_float_env(
-            "APP_WAYBACK_HTTP_BACKOFF_BASE_SECONDS",
+        wayback_http_backoff_base_seconds=_float_env_any(
+            ("APP_WAYBACK_TILE_BACKOFF_BASE", "APP_WAYBACK_HTTP_BACKOFF_BASE_SECONDS"),
             base.wayback_http_backoff_base_seconds,
+        ),
+        wayback_tile_min_concurrency=_int_env(
+            "APP_WAYBACK_TILE_MIN_CONCURRENCY",
+            base.wayback_tile_min_concurrency,
         ),
         wayback_tile_max_concurrency=_int_env(
             "APP_WAYBACK_TILE_MAX_CONCURRENCY",
             base.wayback_tile_max_concurrency,
+        ),
+        wayback_tile_progress_every_tiles=_int_env(
+            "APP_WAYBACK_TILE_PROGRESS_EVERY_TILES",
+            base.wayback_tile_progress_every_tiles,
+        ),
+        wayback_tile_progress_every_seconds=_float_env(
+            "APP_WAYBACK_TILE_PROGRESS_EVERY_SECONDS",
+            base.wayback_tile_progress_every_seconds,
+        ),
+        wayback_tile_cache_backend=os.getenv("APP_WAYBACK_TILE_CACHE_BACKEND", base.wayback_tile_cache_backend),  # type: ignore[arg-type]
+        wayback_tile_sqlite_wal=_bool_env(
+            "APP_WAYBACK_TILE_SQLITE_WAL",
+            base.wayback_tile_sqlite_wal,
+        ),
+        wayback_tile_sqlite_batch_insert_size=_int_env(
+            "APP_WAYBACK_TILE_SQLITE_BATCH_INSERT_SIZE",
+            base.wayback_tile_sqlite_batch_insert_size,
         ),
         wayback_max_missing_tile_ratio=_float_env(
             "APP_WAYBACK_MAX_MISSING_TILE_RATIO",
@@ -478,6 +567,27 @@ def get_settings() -> Settings:
             Path(cache_dir_env)
             if (cache_dir_env := _optional_str_env("WAYBACK_TILE_CACHE_DIR", "APP_WAYBACK_TILE_CACHE_DIR"))
             else None
+        ),
+        wayback_tile_sqlite_cache_dir=(
+            Path(cache_dir_env)
+            if (cache_dir_env := _optional_str_env("APP_WAYBACK_TILE_SQLITE_CACHE_DIR"))
+            else None
+        ),
+        wayback_tile_cache_service_enabled=_bool_env(
+            "APP_WAYBACK_TILE_CACHE_SERVICE_ENABLED",
+            base.wayback_tile_cache_service_enabled,
+        ),
+        wayback_tile_cache_service_url=os.getenv(
+            "APP_WAYBACK_TILE_CACHE_SERVICE_URL",
+            base.wayback_tile_cache_service_url,
+        ),
+        wayback_tile_cache_service_kind=os.getenv(
+            "APP_WAYBACK_TILE_CACHE_SERVICE_KIND",
+            base.wayback_tile_cache_service_kind,
+        ),
+        wayback_heavy_batch_tile_threshold=_int_env(
+            "APP_WAYBACK_HEAVY_BATCH_TILE_THRESHOLD",
+            base.wayback_heavy_batch_tile_threshold,
         ),
         wayback_tilemap_preflight_enabled=_bool_env(
             "APP_WAYBACK_TILEMAP_PREFLIGHT_ENABLED",
@@ -560,6 +670,42 @@ def get_settings() -> Settings:
         ),
         patch_size=_int_env("APP_PATCH_SIZE", base.patch_size),
         stride=_int_env("APP_STRIDE", base.stride),
+        inference_tiled_mode_auto=_bool_env(
+            "APP_INFERENCE_TILED_MODE_AUTO",
+            base.inference_tiled_mode_auto,
+        ),
+        inference_tile_size=_int_env(
+            "APP_INFERENCE_TILE_SIZE",
+            base.inference_tile_size,
+        ),
+        inference_tile_overlap=_int_env(
+            "APP_INFERENCE_TILE_OVERLAP",
+            base.inference_tile_overlap,
+        ),
+        inference_tile_batch_size=_int_env(
+            "APP_INFERENCE_TILE_BATCH_SIZE",
+            base.inference_tile_batch_size,
+        ),
+        inference_max_in_memory_pixels=_int_env(
+            "APP_INFERENCE_MAX_IN_MEMORY_PIXELS",
+            base.inference_max_in_memory_pixels,
+        ),
+        inference_heavy_batch_tile_threshold=_int_env(
+            "APP_INFERENCE_HEAVY_BATCH_TILE_THRESHOLD",
+            base.inference_heavy_batch_tile_threshold,
+        ),
+        inference_disable_full_preview_png_for_heavy_batch=_bool_env(
+            "APP_INFERENCE_DISABLE_FULL_PREVIEW_PNG_FOR_HEAVY_BATCH",
+            base.inference_disable_full_preview_png_for_heavy_batch,
+        ),
+        generate_full_mosaic_png_for_heavy_batch=_bool_env(
+            "APP_GENERATE_FULL_MOSAIC_PNG_FOR_HEAVY_BATCH",
+            base.generate_full_mosaic_png_for_heavy_batch,
+        ),
+        mosaic_preview_max_dimension=_int_env(
+            "APP_MOSAIC_PREVIEW_MAX_DIMENSION",
+            base.mosaic_preview_max_dimension,
+        ),
         scene_segmentation_concurrency=_int_env(
             "APP_SCENE_SEGMENTATION_CONCURRENCY",
             base.scene_segmentation_concurrency,
@@ -648,6 +794,7 @@ def get_settings() -> Settings:
         ),
         database_url=os.getenv("DATABASE_URL", base.database_url),
         database_echo=_bool_env("DATABASE_ECHO", base.database_echo),
+        db_inline_json_max_bytes=_int_env("DB_INLINE_JSON_MAX_BYTES", base.db_inline_json_max_bytes),
         persistence_backend=os.getenv("PERSISTENCE_BACKEND", base.persistence_backend),  # type: ignore[arg-type]
         redis_url=os.getenv("REDIS_URL", base.redis_url),
         celery_broker_url=_optional_str_env("CELERY_BROKER_URL"),

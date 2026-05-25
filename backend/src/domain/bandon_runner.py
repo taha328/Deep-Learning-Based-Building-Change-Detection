@@ -10,12 +10,13 @@ import shutil
 import sys
 import subprocess
 import threading
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from PIL import Image
 
-from src.config import Settings
+if TYPE_CHECKING:
+    from src.config import Settings
 
 
 logger = logging.getLogger(__name__)

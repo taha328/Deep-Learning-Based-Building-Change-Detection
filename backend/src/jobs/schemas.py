@@ -44,6 +44,7 @@ class JobResponse(BaseModel):
     result_run_id: str | None = None
     raw_request: dict[str, Any] | None = None
     raw_result: dict[str, Any] | None = None
+    progress_details: dict[str, Any] | None = None
     cancel_requested: bool = False
     created_at: datetime
     updated_at: datetime

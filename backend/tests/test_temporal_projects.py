@@ -15,10 +15,13 @@ from src.domain.vectorize import build_temporal_growth_blocks, build_temporal_gr
 from src.services.releases import list_releases
 from src.services.temporal_projects import (
     _reference_imagery_from_pair_response,
+    audit_temporal_project_metadata_bloat,
+    audit_temporal_project_metrics,
     get_temporal_project,
     list_temporal_projects,
     import_temporal_override,
     resolve_temporal_project_execution_config,
+    publish_completed_tiled_request,
     run_temporal_project,
     save_temporal_project,
     validate_temporal_project,
@@ -251,6 +254,127 @@ def test_run_temporal_project_builds_monotonic_cumulative_union(monkeypatch, tmp
     final_envelope = _geometry(final_envelope_geojson)
     assert not _has_holes(final_envelope)
     assert final_cumulative.difference(final_envelope).area <= 1e-14
+
+
+def test_publish_completed_tiled_request_uses_temporal_project_artifact_schema(monkeypatch, tmp_path) -> None:
+    settings = Settings(runtime_cache_dir=tmp_path)
+    monkeypatch.setattr("src.services.temporal_projects.list_releases", lambda _: _sample_releases(settings))
+    project = _sample_project("publish-tiled")
+    project.milestones = [
+        TemporalMilestone(release_identifier="WB_2024_R01"),
+        TemporalMilestone(release_identifier="WB_2025_R01"),
+    ]
+    saved = save_temporal_project(project, settings)
+
+    request_id = "completed-tiled-request"
+    request_dir = settings.request_cache_dir / request_id
+    request_dir.mkdir(parents=True)
+    (request_dir / "prediction_change_mask.tif").write_bytes(b"mask")
+    (request_dir / "prediction_change_probability.tif").write_bytes(b"probability")
+    (request_dir / "export_bundle.zip").write_bytes(b"zip")
+    change_geojson = _feature_collection(
+        [[(-6.9998, 33.0002), (-6.9992, 33.0002), (-6.9992, 33.0008), (-6.9998, 33.0008)]]
+    )
+    (request_dir / "building_change_polygons.geojson").write_text(json.dumps(change_geojson), encoding="utf-8")
+    save_cached_response(
+        settings,
+        request_id,
+        RunResponse(
+            success=True,
+            summary=SummaryStats(
+                request_hash=request_id,
+                mode="full_run",
+                model_backend="bandon_mps",
+                estimated_area_m2=1.0,
+                tile_count_t1=1,
+                tile_count_t2=1,
+                total_new_buildings=0,
+                total_building_blocks=0,
+                total_new_building_area_m2=0.0,
+                total_building_block_area_m2=0.0,
+                total_change_polygons=1,
+                total_change_area_m2=1.0,
+            ),
+            change_polygons_geojson=change_geojson,
+            downloadable_zip_path=str(request_dir / "export_bundle.zip"),
+        ),
+    )
+
+    result = publish_completed_tiled_request(
+        request_id=request_id,
+        project_id=saved.project_id,
+        target_release="WB_2025_R01",
+        baseline_release="WB_2024_R01",
+        settings=settings,
+    )
+    second_result = publish_completed_tiled_request(
+        request_id=request_id,
+        project_id=saved.project_id,
+        target_release="WB_2025_R01",
+        baseline_release="WB_2024_R01",
+        settings=settings,
+    )
+
+    milestone_dir = settings.temporal_projects_dir / saved.project_id / "milestones" / "WB_2025_R01"
+    assert (milestone_dir / "additions.geojson").is_file()
+    assert (milestone_dir / "building_change_buffer_10m.geojson").is_file()
+    assert (milestone_dir / "building_change_buffer_15m.geojson").is_file()
+    assert (milestone_dir / "building_change_buffer_20m.geojson").is_file()
+    assert (settings.temporal_projects_dir / saved.project_id / "project_manifest.json").is_file()
+    assert (settings.temporal_projects_dir / saved.project_id / "project_summary.json").is_file()
+    assert result["artifact_counts"]["additions.geojson"] == 1
+    assert second_result["artifact_counts"]["additions.geojson"] == 1
+    reloaded = get_temporal_project(saved.project_id, settings)
+    target = next(item for item in reloaded.milestones if item.release_identifier == "WB_2025_R01")
+    assert target.pair_request_hash == request_id
+    artifact_names = {artifact.name for artifact in target.artifacts}
+    assert "WB_2025_R01_export_bundle" in artifact_names
+
+
+def test_temporal_project_metric_audit_reads_published_artifacts(monkeypatch, tmp_path) -> None:
+    settings = Settings(runtime_cache_dir=tmp_path)
+    monkeypatch.setattr("src.services.temporal_projects.list_releases", lambda _: _sample_releases(settings))
+    project = _sample_project("metric-audit")
+    project.milestones = [
+        TemporalMilestone(release_identifier="WB_2024_R01"),
+        TemporalMilestone(release_identifier="WB_2025_R01"),
+    ]
+    additions_geojson = _feature_collection(
+        [[(-6.9998, 33.0002), (-6.9992, 33.0002), (-6.9992, 33.0008), (-6.9998, 33.0008)]]
+    )
+    project.milestones[1].additions_geojson = additions_geojson
+    saved = save_temporal_project(project, settings)
+    milestone_dir = settings.temporal_projects_dir / saved.project_id / "milestones" / "WB_2025_R01"
+    milestone_dir.mkdir(parents=True, exist_ok=True)
+    (milestone_dir / "additions.geojson").write_text(json.dumps(additions_geojson), encoding="utf-8")
+
+    result = audit_temporal_project_metrics(
+        project_id=saved.project_id,
+        target_release="WB_2025_R01",
+        settings=settings,
+    )
+
+    assert result["layers"]["additions"]["feature_count"] == 1
+    assert result["layers"]["additions"]["geometry_area_m2"] > 0
+    assert result["ui_added_area_m2"] >= 0
+
+
+def test_temporal_project_metadata_bloat_audit_externalizes_feature_collections(monkeypatch, tmp_path) -> None:
+    settings = Settings(runtime_cache_dir=tmp_path)
+    monkeypatch.setattr("src.services.temporal_projects.list_releases", lambda _: _sample_releases(settings))
+    saved = save_temporal_project(_sample_project("metadata-audit"), settings)
+    project_json = settings.temporal_projects_dir / saved.project_id / "project.json"
+    result = audit_temporal_project_metadata_bloat(
+        project_id=saved.project_id,
+        settings=settings,
+        repair_metadata=True,
+        threshold_bytes=1,
+    )
+
+    assert result["bloated"] is True
+    assert result["repair_metadata_requested"] is True
+    assert result["repair_metadata_applied"] is True
+    assert result["project_json_after_bytes"] <= result["project_json_before_bytes"]
 
 
 def test_run_temporal_project_infers_legacy_bandon_execution_config_and_skips_reruns(monkeypatch, tmp_path) -> None:

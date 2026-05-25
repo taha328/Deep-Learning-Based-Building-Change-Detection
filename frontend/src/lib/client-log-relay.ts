@@ -6,6 +6,15 @@ const TEMPORAL_REFERENCE_PREFIX = "TEMPORAL_REFERENCE_";
 const TEMPORAL_ADDED_PREFIX = "TEMPORAL_ADDED_";
 const TEMPORAL_OUTPUT_PREFIX = "TEMPORAL_OUTPUT_";
 const TEMPORAL_ACTIVE_PREFIX = "TEMPORAL_ACTIVE_";
+const TEMPORAL_VECTOR_PREFIX = "TEMPORAL_VECTOR_";
+const TEMPORAL_VECTOR_TILE_PREFIX = "TEMPORAL_VECTOR_TILE_";
+const TEMPORAL_GEOJSON_PREFIX = "TEMPORAL_GEOJSON_";
+const TEMPORAL_BASELINE_PREFIX = "TEMPORAL_BASELINE_";
+const TEMPORAL_EMPTY_BASELINE_PREFIX = "TEMPORAL_EMPTY_BASELINE_";
+const TEMPORAL_RENDER_PREFIX = "TEMPORAL_RENDER_";
+const TEMPORAL_STALE_PROJECT_PREFIX = "TEMPORAL_STALE_PROJECT_";
+const TEMPORAL_SCREENSHOT_PREFIX = "TEMPORAL_SCREENSHOT_";
+const RUN_CACHE_POLL_PREFIX = "RUN_CACHE_POLL_";
 const REFERENCE_LAYER_PANEL_PREFIX = "REFERENCE_LAYER_PANEL_";
 const RELAY_DEDUPE_MS = 5_000; // Suppress identical events for 5 seconds
 const MAX_DEDUPE_ENTRIES = 100;
@@ -36,7 +45,11 @@ function getEventSignature(event: string, payload: Record<string, unknown>): str
   const releaseIdentifier = (payload.releaseIdentifier as string) ?? "";
   const switchKey = (payload.switchKey as string) ?? "";
   const reason = (payload.reason as string) ?? "";
-  return `${event}:${projectId}:${releaseIdentifier}:${switchKey}:${reason}`;
+  const layerId = (payload.layerId as string) ?? "";
+  const layerKey = (payload.layerKey as string) ?? "";
+  const kind = (payload.kind as string) ?? "";
+  const artifactKey = (payload.artifactKey as string) ?? "";
+  return `${event}:${projectId}:${releaseIdentifier}:${switchKey}:${reason}:${layerId}:${layerKey}:${kind}:${artifactKey}`;
 }
 
 function shouldRateLimitEvent(signature: string): boolean {
@@ -75,6 +88,15 @@ export function relayClientLog(event: string, payload: Record<string, unknown>):
       !event.startsWith(TEMPORAL_ADDED_PREFIX) &&
       !event.startsWith(TEMPORAL_OUTPUT_PREFIX) &&
       !event.startsWith(TEMPORAL_ACTIVE_PREFIX) &&
+      !event.startsWith(TEMPORAL_VECTOR_PREFIX) &&
+      !event.startsWith(TEMPORAL_VECTOR_TILE_PREFIX) &&
+      !event.startsWith(TEMPORAL_GEOJSON_PREFIX) &&
+      !event.startsWith(TEMPORAL_BASELINE_PREFIX) &&
+      !event.startsWith(TEMPORAL_EMPTY_BASELINE_PREFIX) &&
+      !event.startsWith(TEMPORAL_RENDER_PREFIX) &&
+      !event.startsWith(TEMPORAL_STALE_PROJECT_PREFIX) &&
+      !event.startsWith(TEMPORAL_SCREENSHOT_PREFIX) &&
+      !event.startsWith(RUN_CACHE_POLL_PREFIX) &&
       !event.startsWith(REFERENCE_LAYER_PANEL_PREFIX)
     )
   ) {

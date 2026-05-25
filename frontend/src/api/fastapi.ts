@@ -38,8 +38,12 @@ import {
   createCompletedRunProgress,
   createErrorRunProgress,
   formatRunStatus,
+  type WaybackTileProgressDetails,
   type RunProgressState,
 } from "@/lib/run-progress";
+import { relayClientLog } from "@/lib/client-log-relay";
+
+const activeCachedRunRequests = new Map<string, Promise<RunResponse>>();
 
 function createPendingRunProgress(): RunProgressState {
   return {
@@ -52,6 +56,39 @@ function createPendingRunProgress(): RunProgressState {
     eventId: null,
     rawEvent: null,
     updatedAt: Date.now(),
+    tileDetails: null,
+  };
+}
+
+function numberDetail(record: Record<string, unknown>, key: string): number | null {
+  const value = record[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function parseWaybackTileProgress(details: unknown): WaybackTileProgressDetails | null {
+  if (!details || typeof details !== "object") {
+    return null;
+  }
+  const record = details as Record<string, unknown>;
+  if (!("selected_tile_count" in record) && !("total_tile_count" in record)) {
+    return null;
+  }
+  return {
+    releaseIdentifier: typeof record.release_identifier === "string" ? record.release_identifier : null,
+    preferredZoom: numberDetail(record, "preferred_zoom"),
+    effectiveZoom: numberDetail(record, "effective_zoom"),
+    fallbackApplied: record.fallback_applied === true,
+    processedTileCount: numberDetail(record, "processed_tile_count") ?? 0,
+    totalTileCount: numberDetail(record, "total_tile_count") ?? numberDetail(record, "selected_tile_count") ?? 0,
+    cacheHitCount: numberDetail(record, "cache_hit_count") ?? 0,
+    downloadedTileCount: numberDetail(record, "downloaded_tile_count") ?? 0,
+    missingTileCount: numberDetail(record, "missing_tile_count") ?? 0,
+    failedTileCount: numberDetail(record, "failed_tile_count") ?? 0,
+    retryCount: numberDetail(record, "retry_count") ?? 0,
+    throttleCount: numberDetail(record, "throttle_count") ?? 0,
+    timeoutCount: numberDetail(record, "timeout_count") ?? 0,
+    tileRatePerSec: numberDetail(record, "tile_rate_per_sec"),
+    etaSeconds: numberDetail(record, "eta_seconds"),
   };
 }
 
@@ -105,6 +142,7 @@ function jobToProgress(job: JobResponse): RunProgressState {
     eventId: job.job_id,
     rawEvent: job.status,
     updatedAt: Date.now(),
+    tileDetails: parseWaybackTileProgress(job.progress_details),
   };
 }
 
@@ -338,9 +376,37 @@ export async function getTemporalProject(projectId: string): Promise<TemporalPro
   return temporalProjectSchema.parse(result);
 }
 
+export async function getTemporalMilestoneArtifact(
+  projectId: string,
+  releaseIdentifier: string,
+  artifactKey: string,
+  options?: { signal?: AbortSignal },
+): Promise<Record<string, unknown>> {
+  const result = await apiFetch<unknown>(
+    `/api/temporal-projects/${encodeURIComponent(projectId)}/milestones/${encodeURIComponent(releaseIdentifier)}/artifacts/${encodeURIComponent(artifactKey)}`,
+    { signal: options?.signal },
+  );
+  return z.record(z.any()).parse(result);
+}
+
 export async function getCachedRunResponse(requestHash: string): Promise<RunResponse> {
-  const result = await apiFetch<unknown>(`/api/cache/runs/${encodeURIComponent(requestHash)}`);
-  return runResponseSchema.parse(result);
+  const inFlight = activeCachedRunRequests.get(requestHash);
+  if (inFlight) {
+    relayClientLog("RUN_CACHE_POLL_DEDUPED", { requestHash });
+    return inFlight;
+  }
+  relayClientLog("RUN_CACHE_POLL_START", { requestHash });
+  const request = apiFetch<unknown>(`/api/cache/runs/${encodeURIComponent(requestHash)}`)
+    .then((result) => {
+      const parsed = runResponseSchema.parse(result);
+      relayClientLog("RUN_CACHE_POLL_STOPPED_COMPLETED", { requestHash, success: parsed.success });
+      return parsed;
+    })
+    .finally(() => {
+      activeCachedRunRequests.delete(requestHash);
+    });
+  activeCachedRunRequests.set(requestHash, request);
+  return request;
 }
 
 export async function createRunExportBundle(runId: string): Promise<string> {

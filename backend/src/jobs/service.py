@@ -14,7 +14,8 @@ from src.jobs.schemas import JobResponse, JobStartResponse
 from src.repositories.job_repository import (
     create_job,
     get_job,
-    list_jobs,
+    get_job_full_result,
+    list_job_summaries,
     mark_job_cancel_requested,
     mark_job_enqueued,
     mark_job_failed,
@@ -51,6 +52,7 @@ def assert_redis_available(settings: Settings) -> None:
 
 
 def _job_response(job: JobRecord) -> JobResponse:
+    raw_result = get_job_full_result(job.raw_result)
     return JobResponse.model_validate(
         {
             "job_id": job.job_id,
@@ -66,7 +68,8 @@ def _job_response(job: JobRecord) -> JobResponse:
             "error_message": job.error_message,
             "result_run_id": job.result_run_id,
             "raw_request": job.raw_request,
-            "raw_result": job.raw_result,
+            "raw_result": raw_result,
+            "progress_details": raw_result.get("progress_details") if isinstance(raw_result, dict) else None,
             "cancel_requested": job.cancel_requested,
             "created_at": job.created_at,
             "updated_at": job.updated_at,
@@ -174,8 +177,8 @@ def list_job_responses(
     limit: int = 50,
     status: str | None = None,
     job_kind: str | None = None,
-) -> list[JobResponse]:
-    return [_job_response(job) for job in list_jobs(settings=settings, limit=limit, status=status, job_kind=job_kind)]
+) -> list[dict[str, Any]]:
+    return list_job_summaries(settings=settings, limit=limit, status=status, job_kind=job_kind)
 
 
 def cancel_job(job_id: str, *, settings: Settings) -> JobResponse:

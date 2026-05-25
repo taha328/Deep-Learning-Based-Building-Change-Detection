@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
 import hashlib
+import json
 import numpy as np
 import pandas as pd
 from PIL import Image
@@ -20,10 +21,16 @@ from src.domain.run_workspace import cleanup_run_tmp_dir, get_run_tmp_dir
 from src.domain.stage_timing import StageTimingRecorder
 from src.domain.bandon_runner import run_bandon_inference
 from src.domain.change_products import derive_new_building_products
-from src.domain.exports import export_bandon_outputs, write_run_manifest
+from src.domain.exports import create_export_bundle_from_manifest, export_bandon_outputs, write_geojson, write_run_manifest
 from src.domain.imagery_providers import MapboxCurrentProvider
 from src.domain.mapbox_current import MAPBOX_ATTRIBUTION, MAPBOX_SOURCE_ID
 from src.domain.mosaic import MosaicResult, WaybackTileDownloadError, align_mosaic_pair, download_wayback_mosaic
+from src.domain.tiled_inference import (
+    TiledInferenceConfig,
+    make_bandon_patch_predictor,
+    run_tiled_inference,
+    select_inference_mode,
+)
 from rasterio.features import rasterize
 from shapely.geometry import shape
 
@@ -65,7 +72,7 @@ from src.domain.wayback import (
     preflight_wayback_tile_availability,
     summarize_wayback_metadata,
 )
-from src.schemas import DiagnosticMetadata, RunRequest, RunResponse, SummaryStats
+from src.schemas import ArtifactEntry, DiagnosticMetadata, PreviewImages, RunRequest, RunResponse, SummaryStats, TabularMetrics
 from src.services.releases import list_releases
 from src.services.validation import (
     PreparedRequest,
@@ -93,7 +100,7 @@ DETECTION_STAGE_MAP = {
 }
 
 
-ProgressReporter = Callable[[float, str], None] | None
+ProgressReporter = Callable[[float, str, dict[str, object] | None], None] | Callable[[float, str], None] | None
 
 
 @dataclass(frozen=True)
@@ -104,18 +111,27 @@ class ResolvedWaybackRelease:
     tilemap: TileAvailabilitySummary | None
 
 
-def _report(progress: ProgressReporter, value: float, message: str) -> None:
+def _report(progress: ProgressReporter, value: float, message: str, details: dict[str, object] | None = None) -> None:
     if progress is not None:
-        progress(value, message)
+        try:
+            progress(value, message, details)  # type: ignore[misc]
+        except TypeError:
+            progress(value, message)  # type: ignore[misc]
 
 
 def _wayback_download_progress_message(payload: dict[str, object]) -> str:
+    rate = float(payload.get("tile_rate_per_sec") or 0.0)
+    eta = payload.get("eta_seconds")
+    eta_text = f", ETA {int(float(eta))}s" if isinstance(eta, (int, float)) and float(eta) > 0 else ""
     return (
         f"{payload.get('stage', 'Téléchargement des tuiles Wayback')} "
+        f"z{payload.get('effective_zoom', '?')} "
         f"{payload.get('cache_hit_count', 0)} cache, "
-        f"{payload.get('downloaded_tile_count', 0)}/{payload.get('selected_tile_count', 0)} téléchargées, "
+        f"{payload.get('processed_tile_count', 0)}/{payload.get('total_tile_count', payload.get('selected_tile_count', 0))} traitées, "
+        f"{payload.get('downloaded_tile_count', 0)} téléchargées, "
         f"{payload.get('failed_tile_count', 0)} échecs, "
         f"{payload.get('retry_count', 0)} retries, "
+        f"{rate:.1f} tuiles/s{eta_text}, "
         f"missing_tile_ratio={float(payload.get('missing_tile_ratio') or 0.0):.3f}"
     )
 
@@ -202,6 +218,30 @@ def _write_bandon_input_images(
 def _write_bandon_mask_png(output_dir: Path, name: str, mask: np.ndarray) -> Path:
     path = output_dir / name
     Image.fromarray((np.asarray(mask, dtype=bool).astype(np.uint8) * 255), mode="L").save(path)
+    return path
+
+
+def _feature_collection_from_geojsonl(path: Path, *, max_features: int = 25_000) -> tuple[dict[str, Any], int, bool]:
+    features: list[dict[str, Any]] = []
+    total = 0
+    capped = False
+    if not path.exists():
+        return {"type": "FeatureCollection", "features": []}, 0, False
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            total += 1
+            if len(features) < max_features:
+                features.append(json.loads(line))
+            else:
+                capped = True
+    return {"type": "FeatureCollection", "features": features}, total, capped
+
+
+def _write_tiled_summary_csv(path: Path, rows: list[dict[str, Any]]) -> Path:
+    pd.DataFrame(rows).to_csv(path, index=False)
     return path
 
 
@@ -355,6 +395,7 @@ def _release_resolution_stage_metadata(
     preflight_status: str | None = None,
     coverage_ok: bool | None = None,
     fallback_used: bool | None = None,
+    zoom_fallback_applied: bool | None = None,
     selected_zoom: int | None = None,
     selected_release: str | None = None,
     exception_class: str | None = None,
@@ -374,6 +415,7 @@ def _release_resolution_stage_metadata(
         "preflight_status": preflight_status,
         "coverage_ok": coverage_ok,
         "fallback_used": fallback_used,
+        "zoom_fallback_applied": zoom_fallback_applied,
         "selected_zoom": selected_zoom,
         "selected_release": selected_release,
         "exception_class": exception_class,
@@ -883,7 +925,8 @@ def _resolve_release_for_aoi(
     last_tilemap: TileAvailabilitySummary | None = None
     attempted_zooms: list[int] = []
     attempt_count = 0
-    selected_zoom = settings.zoom
+    preferred_zoom = settings.wayback_preferred_inference_zoom
+    selected_zoom = preferred_zoom
     selected_release = release.identifier
     fallback_used = True
     coverage_ok = False
@@ -892,7 +935,7 @@ def _resolve_release_for_aoi(
     decision_recorded = False
 
     try:
-        for attempt_index, zoom in enumerate(range(settings.zoom, settings.min_zoom - 1, -1), start=1):
+        for attempt_index, zoom in enumerate(range(preferred_zoom, settings.min_zoom - 1, -1), start=1):
             attempt_count = attempt_index
             attempted_zooms.append(zoom)
             attempt_start = time.perf_counter_ns()
@@ -968,7 +1011,8 @@ def _resolve_release_for_aoi(
                             metadata_status=metadata_status,
                             preflight_status=preflight_status,
                             coverage_ok=True,
-                            fallback_used=False,
+                            fallback_used=fallback_used,
+                            zoom_fallback_applied=zoom < preferred_zoom,
                             selected_zoom=zoom,
                             selected_release=release.identifier,
                         ),
@@ -1013,7 +1057,8 @@ def _resolve_release_for_aoi(
                         metadata_status=metadata_status,
                         preflight_status="skipped",
                         coverage_ok=True,
-                        fallback_used=False,
+                        fallback_used=fallback_used,
+                        zoom_fallback_applied=zoom < preferred_zoom,
                         selected_zoom=zoom,
                         selected_release=release.identifier,
                     ),
@@ -1021,7 +1066,7 @@ def _resolve_release_for_aoi(
                 decision_recorded = True
                 return ResolvedWaybackRelease(release=release, zoom=zoom, metadata=metadata, tilemap=None)
 
-        selected_zoom = settings.zoom
+        selected_zoom = preferred_zoom
         fallback_used = True
         coverage_ok = _metadata_has_usable_coverage(last_metadata or MetadataSummary(dominant_src_date=None, dominant_src_res_m=None))
         decision_start = time.perf_counter_ns()
@@ -1370,9 +1415,9 @@ def run_detection(
         for label, resolved in (("T1", resolved_t1), ("T2", resolved_t2)):
             if label == "T2" and use_mapbox_t2:
                 continue
-            if resolved.zoom < settings.zoom:
+            if resolved.zoom < settings.wayback_preferred_inference_zoom:
                 run_warnings.append(
-                    f"{label} release {resolved.release.identifier} is being downloaded at z={resolved.zoom} because z={settings.zoom} has no safe AOI coverage."
+                    f"{label} release {resolved.release.identifier} is being downloaded at z={resolved.zoom} because z={settings.wayback_preferred_inference_zoom} has no safe AOI coverage."
                 )
 
         for label, release_identifier, metadata, tilemap in (
@@ -1466,6 +1511,7 @@ def run_detection(
                         progress,
                         0.18,
                         _wayback_download_progress_message(payload),
+                        payload,
                     ),
                 )
                 if use_mapbox_t2:
@@ -1519,6 +1565,7 @@ def run_detection(
                             progress,
                             0.18,
                             _wayback_download_progress_message(payload),
+                            payload,
                         ),
                     )
         except WaybackTileDownloadError as exc:
@@ -1588,6 +1635,238 @@ def run_detection(
                     backend=backend_diagnostics,
                 ),
             )
+
+        with rasterio.open(scene_t2.geotiff_path) as _tiled_probe_src:
+            inference_decision = select_inference_mode(
+                width=_tiled_probe_src.width,
+                height=_tiled_probe_src.height,
+                tile_count=max(scene_t1.tile_count, scene_t2.tile_count),
+                settings=settings,
+            )
+        backend_diagnostics["inference_mode"] = inference_decision.__dict__
+        if model_backend == "bandon_mps" and inference_decision.mode == "tiled":
+            _report(
+                progress,
+                0.45,
+                "Running tiled local MTGCDNet change detection",
+                {
+                    "stage": "tiled_inference",
+                    "mode": "tiled",
+                    "reason": inference_decision.reason,
+                    "tile_size": settings.inference_tile_size,
+                    "tile_overlap": settings.inference_tile_overlap,
+                    "width": inference_decision.width,
+                    "height": inference_decision.height,
+                    "pixel_count": inference_decision.pixel_count,
+                },
+            )
+            try:
+                with timings.track("bandon_inference", mode="tiled", reason=inference_decision.reason):
+                    tiled_result = run_tiled_inference(
+                        t1_mosaic_path=scene_t1.geotiff_path,
+                        t2_mosaic_path=scene_t2.geotiff_path,
+                        t1_valid_mask_path=scene_t1.valid_mask_path,
+                        t2_valid_mask_path=scene_t2.valid_mask_path,
+                        output_dir=result_dir,
+                        run_id=prepared.request_hash,
+                        settings=settings,
+                        config=TiledInferenceConfig.from_settings(settings, threshold=change_threshold),
+                        predictor=make_bandon_patch_predictor(
+                            settings=settings,
+                            effective_backend=settings.inference_backend,
+                            threshold=change_threshold,
+                        ),
+                        aoi_geojson=prepared.normalized_aoi,
+                        release_t1=prepared.t1_release.identifier,
+                        release_t2=MAPBOX_SOURCE_ID if use_mapbox_t2 else prepared.t2_release.identifier,
+                        progress_callback=lambda payload: _report(
+                            progress,
+                            min(
+                                0.90,
+                                0.45
+                                + 0.45
+                                * (
+                                    float(payload.get("processed_tiles") or 0)
+                                    / max(float(payload.get("total_tiles") or 1), 1.0)
+                                ),
+                            ),
+                            "Running tiled local MTGCDNet change detection",
+                            payload,
+                        ),
+                    )
+            except Exception as exc:  # noqa: BLE001
+                return RunResponse(
+                    success=False,
+                    error_code="tiled_inference_failed",
+                    error_message=f"{type(exc).__name__}: {exc}",
+                    diagnostics=_build_failure_diagnostics(
+                        timings=timings,
+                        prepared=prepared,
+                        request=request,
+                        min_new_building_pixels=min_pixels,
+                        old_building_mask_dilation_pixels=old_building_mask_dilation_pixels,
+                        new_building_core_distance_pixels=new_building_core_distance_pixels,
+                        scene_t1_metadata=scene_t1_metadata,
+                        scene_t2_metadata=scene_t2_metadata,
+                        tilemap_t1=tilemap_t1,
+                        tilemap_t2=tilemap_t2,
+                        zoom_t1=resolved_t1.zoom,
+                        zoom_t2=resolved_t2.zoom,
+                        warnings=run_warnings,
+                        backend=backend_diagnostics,
+                    ),
+                )
+
+            _report(progress, 0.92, "Exporting tiled artifacts")
+            max_response_features = max(0, int(settings.reference_layer_browser_geojson_max_features))
+            change_polygons_geojson, total_feature_count, response_geojson_capped = _feature_collection_from_geojsonl(
+                tiled_result.geojsonl_path,
+                max_features=max_response_features,
+            )
+            if response_geojson_capped:
+                run_warnings.append(
+                    f"Tiled response GeoJSON was capped at {max_response_features} features; full output is available as GeoJSONL artifact."
+                )
+            change_polygons_path = write_geojson(result_dir / "building_change_polygons.geojson", change_polygons_geojson)
+            summary_csv = _write_tiled_summary_csv(
+                result_dir / "wayback_pair_summary.csv",
+                pair_summary_df.to_dict(orient="records"),
+            )
+            artifacts = [
+                ArtifactEntry(
+                    name="prediction_change_probability_tif",
+                    path=str(tiled_result.probability_path),
+                    media_type="image/tiff",
+                    description="Tiled change probability raster",
+                ),
+                ArtifactEntry(
+                    name="prediction_change_mask_tif",
+                    path=str(tiled_result.mask_path),
+                    media_type="image/tiff",
+                    description="Tiled building-change mask raster",
+                ),
+                ArtifactEntry(
+                    name="building_change_polygons_geojsonl",
+                    path=str(tiled_result.geojsonl_path),
+                    media_type="application/x-ndjson",
+                    description="Streaming tiled building-change polygons",
+                ),
+                ArtifactEntry(
+                    name="building_change_polygons_geojson",
+                    path=str(change_polygons_path),
+                    media_type="application/geo+json",
+                    description="Building-change polygons for browser display",
+                ),
+                ArtifactEntry(
+                    name="tiled_inference_metadata_json",
+                    path=str(tiled_result.metadata_path),
+                    media_type="application/json",
+                    description="Tiled inference metadata and progress summary",
+                ),
+                ArtifactEntry(
+                    name="wayback_pair_summary_csv",
+                    path=str(summary_csv),
+                    media_type="text/csv",
+                    description="Wayback pair summary",
+                ),
+            ]
+            backend_diagnostics["bandon"] = {
+                "effective_backend": settings.inference_backend,
+                "runner_family": "bandon_mps",
+                "checkpoint_path": run_identity.get("checkpoint_path"),
+                "checkpoint_sha256": run_identity.get("checkpoint_sha256"),
+                "threshold": change_threshold,
+                "config_path": run_identity.get("config_path"),
+                "mode": "tiled",
+                "tiled_inference": tiled_result.metadata,
+            }
+            tabular_metrics = TabularMetrics(
+                summary_rows=pair_summary_df.to_dict(orient="records"),
+                change_rows=[feature.get("properties", {}) for feature in change_polygons_geojson.get("features", [])],
+            )
+            total_change_area = float(
+                sum(
+                    float((feature.get("properties") or {}).get("area_m2") or 0.0)
+                    for feature in change_polygons_geojson.get("features", [])
+                )
+            )
+            response = RunResponse(
+                success=True,
+                summary=SummaryStats(
+                    request_hash=prepared.request_hash,
+                    mode=request.mode,
+                    model_backend=model_backend,
+                    result_semantics="building_change",
+                    estimated_area_m2=round(prepared.area_m2, 2),
+                    tile_count_t1=scene_t1.tile_count,
+                    tile_count_t2=scene_t2.tile_count,
+                    total_new_buildings=0,
+                    total_building_blocks=0,
+                    total_new_building_area_m2=0.0,
+                    total_building_block_area_m2=0.0,
+                    total_change_polygons=int(total_feature_count),
+                    total_change_area_m2=round(total_change_area, 2),
+                    release_date_t1=str(prepared.t1_release.release_date),
+                    release_date_t2="current_basemap" if use_mapbox_t2 else str(prepared.t2_release.release_date),
+                    dominant_src_date_t1=scene_t1_metadata.dominant_src_date,
+                    dominant_src_date_t2=scene_t2_metadata.dominant_src_date,
+                    dominant_src_res_m_t1=scene_t1_metadata.dominant_src_res_m,
+                    dominant_src_res_m_t2=scene_t2_metadata.dominant_src_res_m,
+                ),
+                preview_images=PreviewImages(),
+                change_polygons_geojson=change_polygons_geojson,
+                tabular_metrics=tabular_metrics,
+                artifacts=artifacts,
+                diagnostics=DiagnosticMetadata(
+                    cache_hit=False,
+                    stage_seconds=timings.values,
+                    tile_counts={
+                        "t1": scene_t1.tile_count,
+                        "t2": scene_t2.tile_count,
+                        "total": scene_t1.tile_count + scene_t2.tile_count,
+                    },
+                    patch_count=tiled_result.processed_tiles,
+                    thresholds={
+                        "change_threshold": change_threshold,
+                        "semantic_threshold": semantic_threshold,
+                        "old_building_mask_dilation_pixels": float(old_building_mask_dilation_pixels),
+                        "new_building_core_distance_pixels": float(new_building_core_distance_pixels),
+                    },
+                    min_new_building_pixels=min_pixels,
+                    alignment={"method": "prealigned_windowed_read", "coregistration_skipped": True},
+                    backend=backend_diagnostics,
+                    warnings=run_warnings,
+                    coverage={
+                        "t1": _coverage_entry(prepared.t1_release.identifier, resolved_t1.zoom, scene_t1_metadata, tilemap_t1),
+                        "t2": _coverage_entry(
+                            MAPBOX_SOURCE_ID if use_mapbox_t2 else prepared.t2_release.identifier,
+                            resolved_t2.zoom,
+                            scene_t2_metadata,
+                            tilemap_t2,
+                        ),
+                    },
+                ),
+            )
+            save_cached_response(settings, prepared.request_hash, response)
+            _write_manifest_with_timing(
+                timing=timing,
+                result_dir=result_dir,
+                artifacts=artifacts,
+                extra_artifacts=_source_manifest_entries_for_scenes(
+                    request_dir=result_dir,
+                    run_id=prepared.request_hash,
+                    scenes=[scene_t1, scene_t2],
+                ),
+                run_metadata={**run_identity, "inference_mode": "tiled", "tiled_inference": tiled_result.metadata},
+            )
+            try:
+                response.downloadable_zip_path = str(create_export_bundle_from_manifest(result_dir))
+                save_cached_response(settings, prepared.request_hash, response)
+            except Exception as exc:  # Export bundle is optional for the heavy tiled path.
+                LOGGER.warning("TILED_INFERENCE_EXPORT_BUNDLE_SKIPPED runId=%s reason=%s", prepared.request_hash, exc)
+            _report(progress, 1.0, "Completed")
+            run_succeeded = True
+            return response
 
         _report(progress, 0.35, "Aligning mosaics")
         try:

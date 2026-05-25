@@ -9,7 +9,9 @@ from functools import lru_cache
 
 import pandas as pd
 import requests
+from requests.adapters import HTTPAdapter
 from lxml import etree
+from urllib3.util.retry import Retry
 from shapely.geometry import LinearRing, MultiPolygon, Polygon
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
@@ -68,6 +70,19 @@ def build_session(settings: Settings) -> requests.Session:
             "Accept": "*/*",
         }
     )
+    retry = Retry(
+        total=max(settings.wayback_releases_retries, 0),
+        connect=max(settings.wayback_releases_retries, 0),
+        read=max(settings.wayback_releases_retries, 0),
+        status=max(settings.wayback_releases_retries, 0),
+        backoff_factor=max(settings.wayback_releases_retry_backoff_seconds, 0.0),
+        status_forcelist=(408, 429, 500, 502, 503, 504),
+        allowed_methods=frozenset({"GET", "HEAD"}),
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
     session.request_timeout_sec = settings.request_timeout_sec  # type: ignore[attr-defined]
     session.wayback_metadata_workers = settings.wayback_metadata_workers  # type: ignore[attr-defined]
     return session

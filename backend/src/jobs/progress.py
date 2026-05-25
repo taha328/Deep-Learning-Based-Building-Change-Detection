@@ -10,7 +10,14 @@ def update_progress(
     stage: str,
     message: str | None = None,
     *,
+    details: dict[str, object] | None = None,
     settings: Settings | None = None,
 ) -> None:
-    update_job_progress(job_id=job_id, progress=progress, stage=stage, message=message, settings=settings)
-
+    update_job_progress(
+        job_id=job_id,
+        progress=progress,
+        stage=stage,
+        message=message,
+        progress_details=details,
+        settings=settings,
+    )

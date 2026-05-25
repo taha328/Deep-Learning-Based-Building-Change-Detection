@@ -28,6 +28,12 @@ _memory_cache_lock = Lock()
 _memory_cache: dict[str, "CachedReleasesSnapshot"] = {}
 
 
+def parse_wmts_capabilities(session: requests.Session, url: str) -> list[WaybackRelease]:
+    response = session.get(url, timeout=getattr(session, "request_timeout_sec", 120))
+    response.raise_for_status()
+    return list(parse_wmts_capabilities_xml(response.text))
+
+
 @dataclass(frozen=True)
 class ReleaseServiceError(Exception):
     code: str
@@ -187,10 +193,12 @@ def _fetch_live_capabilities_xml(settings: Settings) -> str:
 
 
 def _fetch_live_releases(settings: Settings) -> CachedReleasesSnapshot:
-    xml = _fetch_live_capabilities_xml(settings)
+    session = _build_release_session(settings)
+    try:
+        releases = tuple(parse_wmts_capabilities(session, settings.wmts_capabilities_url))
+    finally:
+        session.close()
     fetched_at = datetime.now(UTC)
-    releases = tuple(parse_wmts_capabilities_xml(xml))
-    _write_capabilities_cache(settings, xml)
     snapshot = CachedReleasesSnapshot(
         releases=releases,
         fetched_at=fetched_at,

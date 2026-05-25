@@ -40,6 +40,7 @@ function localizeProgressDetail(detail: string, t: (key: string) => string): str
 export function RunProgressPanel({ progress }: { progress: RunProgressState }) {
   const { t } = useI18n();
   const eta = formatEta(progress.etaSeconds);
+  const tileEta = formatEta(progress.tileDetails?.etaSeconds ?? null);
   const statusText = formatRunStatus(progress, t);
   const visibleStages = PIPELINE_STAGES.filter((stage) => stage.key !== "queue");
 
@@ -57,6 +58,29 @@ export function RunProgressPanel({ progress }: { progress: RunProgressState }) {
       </div>
 
       <Progress value={progress.percent} className="h-2 bg-secondary" indicatorClassName="bg-primary" />
+
+      {progress.tileDetails ? (
+        <div className="rounded-md border border-border bg-card px-3 py-2 text-xs text-muted-foreground">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+            <span className="font-medium text-foreground">Wayback tiles</span>
+            <span>{progress.tileDetails.processedTileCount}/{progress.tileDetails.totalTileCount}</span>
+            <span>{progress.tileDetails.tileRatePerSec !== null ? `${progress.tileDetails.tileRatePerSec.toFixed(1)} tiles/s` : "rate pending"}</span>
+            <span>{tileEta ? `ETA ${tileEta}` : "ETA pending"}</span>
+          </div>
+          <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1">
+            <span>release {progress.tileDetails.releaseIdentifier ?? "unknown"}</span>
+            <span>z{progress.tileDetails.effectiveZoom ?? "?"}</span>
+            {progress.tileDetails.fallbackApplied ? <span>fallback from z{progress.tileDetails.preferredZoom ?? "?"}</span> : null}
+            <span>{progress.tileDetails.cacheHitCount} cache hits</span>
+            <span>{progress.tileDetails.downloadedTileCount} downloaded</span>
+            <span>{progress.tileDetails.missingTileCount} missing</span>
+            <span>{progress.tileDetails.failedTileCount} failed</span>
+            <span>{progress.tileDetails.retryCount} retries</span>
+            <span>{progress.tileDetails.throttleCount} throttles</span>
+            <span>{progress.tileDetails.timeoutCount} timeouts</span>
+          </div>
+        </div>
+      ) : null}
 
       <div className="space-y-2">
         {visibleStages.map((stage) => {

@@ -6,12 +6,15 @@ import base64
 import calendar
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import lru_cache
 import hashlib
 import json
 import logging
+import math
 from pathlib import Path
 import re
 import shutil
+import subprocess
 import tempfile
 import time
 from urllib.parse import quote
@@ -23,12 +26,14 @@ from typing import Any, Callable
 import orjson
 from osgeo import ogr, osr
 import rasterio
-from shapely.geometry import GeometryCollection, MultiPolygon, Polygon, mapping, shape
+from rasterio.warp import transform_bounds
+from shapely.geometry import GeometryCollection, MultiPolygon, Polygon, box, mapping, shape
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
+from shapely.strtree import STRtree
 
 from src.config import Settings
-from src.domain.cache import load_cached_response
+from src.domain.cache import load_cached_response, request_result_dir, save_cached_response
 from src.domain.imagery_providers import EsriWaybackProvider, MapboxCurrentProvider
 from src.domain.mapbox_current import MAPBOX_SOURCE_ID
 from src.domain.stage_timing import StageTimingRecorder
@@ -254,6 +259,55 @@ def temporal_project_response_payload(project: TemporalProject, settings: Settin
     return payload
 
 
+def _complete_reference_imagery_metadata_payload(
+    *,
+    project_id: str,
+    payload: dict[str, Any],
+    project_dir: Path,
+) -> bool:
+    milestones = payload.get("milestones")
+    if not isinstance(milestones, list):
+        return False
+    changed = False
+    for milestone in milestones:
+        if not isinstance(milestone, dict):
+            continue
+        release_identifier = milestone.get("release_identifier")
+        if not isinstance(release_identifier, str) or not release_identifier:
+            continue
+        reference_payload = milestone.get("reference_imagery")
+        source_reference = None
+        if isinstance(reference_payload, dict):
+            try:
+                source_reference = TemporalReferenceImagery.model_validate(reference_payload)
+            except Exception:
+                source_reference = None
+        cog_path_value = source_reference.cog_path if source_reference and source_reference.cog_path else None
+        cog_path = Path(cog_path_value).expanduser() if cog_path_value else project_dir / "milestones" / release_identifier / "reference_imagery_cog.tif"
+        if not cog_path.is_file():
+            continue
+        needs_completion = (
+            not isinstance(reference_payload, dict)
+            or not reference_payload.get("raster_bounds_wgs84")
+            or reference_payload.get("minzoom") is None
+            or reference_payload.get("maxzoom") is None
+            or not reference_payload.get("tiles_url_template")
+            or "%7B" in str(reference_payload.get("tiles_url_template"))
+            or "%7D" in str(reference_payload.get("tiles_url_template"))
+        )
+        if not needs_completion:
+            continue
+        completed = _reference_imagery_from_cog_path(
+            project_id=project_id,
+            release_identifier=release_identifier,
+            cog_path=cog_path,
+            source_reference=source_reference,
+        )
+        milestone["reference_imagery"] = completed.model_dump(mode="json")
+        changed = True
+    return changed
+
+
 def load_temporal_project_response_payload(project_id: str, settings: Settings) -> dict[str, Any]:
     started_at = time.perf_counter()
     path = _project_json_path(settings, project_id)
@@ -267,9 +321,43 @@ def load_temporal_project_response_payload(project_id: str, settings: Settings) 
         payload.pop(field, None)
     payload.setdefault("project_id", project_id)
     payload.setdefault("project_dir", str(path.parent))
+    project_dir = Path(str(payload.get("project_dir") or path.parent)).expanduser().resolve()
+    artifact_metadata_before = json.dumps(payload.get("milestones"), sort_keys=True, default=str)
+    externalized_count, empty_baseline_artifacts_removed = _externalize_temporal_artifact_payloads_in_payload(
+        project_id=project_id,
+        payload=payload,
+        project_dir=project_dir,
+    )
+    if externalized_count or empty_baseline_artifacts_removed:
+        logger.info(
+            "TEMPORAL_PROJECT_METADATA_PAYLOAD_EXTERNALIZED projectId=%s source=response_payload externalizedArtifacts=%s emptyBaselineArtifactsRemoved=%s",
+            project_id,
+            externalized_count,
+            empty_baseline_artifacts_removed,
+        )
+    artifact_metadata_repaired = _repair_temporal_artifact_metadata_payload(
+        project_id=project_id,
+        payload=payload,
+        project_dir=project_dir,
+    )
+    reference_metadata_repaired = _complete_reference_imagery_metadata_payload(
+        project_id=project_id,
+        payload=payload,
+        project_dir=project_dir,
+    )
     milestones = payload.get("milestones")
     if isinstance(milestones, list):
         milestones.sort(key=lambda item: str(item.get("release_date") or "") if isinstance(item, dict) else "")
+    artifact_metadata_changed = artifact_metadata_before != json.dumps(payload.get("milestones"), sort_keys=True, default=str)
+    if artifact_metadata_changed or artifact_metadata_repaired or reference_metadata_repaired or externalized_count or empty_baseline_artifacts_removed:
+        try:
+            path.write_text(json.dumps(payload, indent=2))
+            manifest_path = path.with_name("project_manifest.json")
+            if manifest_path.exists():
+                manifest_path.write_text(json.dumps(payload, indent=2))
+            _write_project_summary(TemporalProject.model_validate(payload), path)
+        except Exception:
+            logger.debug("TEMPORAL_OUTPUT_ARTIFACT_METADATA_REPAIR_PERSIST_FAILED projectId=%s", project_id, exc_info=True)
     reference_layer_count = _reference_layer_count_for_project(project_id, settings, project_dir=payload.get("project_dir"))
     payload["has_reference_layers"] = reference_layer_count > 0
     payload["reference_layer_count"] = reference_layer_count
@@ -504,6 +592,537 @@ def _write_geojson(path: Path, payload: dict[str, Any] | None) -> str | None:
     return str(path)
 
 
+TEMPORAL_LAYER_ARTIFACTS: dict[str, tuple[str, str, str, str]] = {
+    "automated_additions": (
+        "automated_additions_geojson",
+        "automated_additions.geojson",
+        "Automated additions footprint",
+        "application/geo+json",
+    ),
+    "automated_candidate_footprint": (
+        "automated_candidate_footprint_geojson",
+        "automated_candidate_footprint.geojson",
+        "Automated cumulative candidate footprint",
+        "application/geo+json",
+    ),
+    "automated_building_blocks": (
+        "automated_building_blocks_geojson",
+        "automated_building_blocks.geojson",
+        "Automated building-level blocks",
+        "application/geo+json",
+    ),
+    "manual_override": ("manual_override_geojson", "manual_override.geojson", "Manual milestone override", "application/geo+json"),
+    "additions": ("additions_geojson", "additions.geojson", "Effective additions since previous milestone", "application/geo+json"),
+    "effective_building_blocks": (
+        "effective_building_blocks_geojson",
+        "effective_building_blocks.geojson",
+        "Grouped blocks built from effective additions",
+        "application/geo+json",
+    ),
+    "effective_footprint": (
+        "effective_footprint_geojson",
+        "effective_footprint.geojson",
+        "Effective footprint at this milestone",
+        "application/geo+json",
+    ),
+    "building_change_buffer_10m": (
+        "buffer_layers_geojson.10m",
+        "building_change_buffer_10m.geojson",
+        "Building-change buffer 10 m",
+        "application/geo+json",
+    ),
+    "building_change_buffer_15m": (
+        "buffer_layers_geojson.15m",
+        "building_change_buffer_15m.geojson",
+        "Building-change buffer 15 m",
+        "application/geo+json",
+    ),
+    "building_change_buffer_20m": (
+        "buffer_layers_geojson.20m",
+        "building_change_buffer_20m.geojson",
+        "Building-change buffer 20 m",
+        "application/geo+json",
+    ),
+    "cumulative_union": ("cumulative_union_geojson", "cumulative_union.geojson", "Cumulative union up to this milestone", "application/geo+json"),
+    "cumulative_convex_hull": (
+        "cumulative_convex_hull_geojson",
+        "cumulative_convex_hull.geojson",
+        "Convex hull of cumulative union up to this milestone",
+        "application/geo+json",
+    ),
+    "cumulative_growth_blocks": (
+        "cumulative_growth_blocks_geojson",
+        "cumulative_growth_blocks.geojson",
+        "Grouped blocks built from cumulative union",
+        "application/geo+json",
+    ),
+    "cumulative_growth_envelope": (
+        "cumulative_growth_envelope_geojson",
+        "cumulative_growth_envelope.geojson",
+        "Smoothed cumulative growth envelope",
+        "application/geo+json",
+    ),
+}
+
+TEMPORAL_VECTOR_TILE_SOURCE_LAYER = "results"
+TEMPORAL_VECTOR_TILE_MINZOOM = 0
+TEMPORAL_VECTOR_TILE_MAXZOOM = 18
+TEMPORAL_VECTOR_TILE_EXTENT = 4096
+TEMPORAL_VECTOR_TILE_METADATA_THRESHOLD_BYTES = 10_000_000
+TEMPORAL_VECTOR_TILE_METADATA_THRESHOLD_FEATURES = 20_000
+TEMPORAL_QGIS_GPKG_CONVERSION_VERSION = "gpkg1"
+TEMPORAL_QGIS_GPKG_MEDIA_TYPE = "application/geopackage+sqlite3"
+TEMPORAL_QGIS_EMPTY_GEOJSON_THRESHOLD_BYTES = 256
+
+
+@dataclass
+class TemporalVectorTileFeatureIndex:
+    feature_count: int
+    bbox: list[float] | None
+    geometries: tuple[BaseGeometry, ...]
+    properties: tuple[dict[str, Any], ...]
+    tree: STRtree
+
+
+def _temporal_vector_tilejson_route(project_id: str, release_identifier: str, artifact_key: str) -> str:
+    return (
+        f"/api/temporal-projects/{quote(project_id, safe='')}"
+        f"/milestones/{quote(release_identifier, safe='')}"
+        f"/artifacts/{quote(artifact_key, safe='')}/tilejson.json"
+    )
+
+
+def _temporal_vector_tiles_route(project_id: str, release_identifier: str, artifact_key: str) -> str:
+    return (
+        f"/api/temporal-projects/{quote(project_id, safe='')}"
+        f"/milestones/{quote(release_identifier, safe='')}"
+        f"/artifacts/{quote(artifact_key, safe='')}/tiles"
+        "/{z}/{x}/{y}.mvt"
+    )
+
+
+def _should_advertise_vector_tiles(feature_count: int | None, size_bytes: int | None) -> bool:
+    return (feature_count or 0) >= TEMPORAL_VECTOR_TILE_METADATA_THRESHOLD_FEATURES or (
+        size_bytes or 0
+    ) >= TEMPORAL_VECTOR_TILE_METADATA_THRESHOLD_BYTES
+
+
+def _artifact_payload_for_milestone(milestone: TemporalMilestone, field_path: str) -> dict[str, Any] | None:
+    if field_path.startswith("buffer_layers_geojson."):
+        key = field_path.split(".", 1)[1]
+        return milestone.buffer_layers_geojson.get(key)
+    return getattr(milestone, field_path, None)
+
+
+def _clear_artifact_payload_for_milestone(milestone: TemporalMilestone, field_path: str) -> None:
+    if field_path.startswith("buffer_layers_geojson."):
+        key = field_path.split(".", 1)[1]
+        milestone.buffer_layers_geojson.pop(key, None)
+        return
+    setattr(milestone, field_path, None)
+
+
+def _artifact_payload_for_milestone_payload(milestone: dict[str, Any], field_path: str) -> dict[str, Any] | None:
+    if field_path.startswith("buffer_layers_geojson."):
+        key = field_path.split(".", 1)[1]
+        buffer_layers = milestone.get("buffer_layers_geojson")
+        if isinstance(buffer_layers, dict):
+            payload = buffer_layers.get(key)
+            return payload if isinstance(payload, dict) else None
+        return None
+    payload = milestone.get(field_path)
+    return payload if isinstance(payload, dict) else None
+
+
+def _clear_artifact_payload_for_milestone_payload(milestone: dict[str, Any], field_path: str) -> None:
+    if field_path.startswith("buffer_layers_geojson."):
+        key = field_path.split(".", 1)[1]
+        buffer_layers = milestone.get("buffer_layers_geojson")
+        if isinstance(buffer_layers, dict):
+            buffer_layers.pop(key, None)
+            if not buffer_layers:
+                milestone["buffer_layers_geojson"] = {}
+        return
+    milestone[field_path] = None
+
+
+def _externalize_temporal_artifact_payloads_in_payload(
+    *,
+    project_id: str,
+    payload: dict[str, Any],
+    project_dir: Path,
+) -> tuple[int, int]:
+    milestones = payload.get("milestones")
+    if not isinstance(milestones, list):
+        return 0, 0
+    baseline_release_identifier = None
+    for milestone in milestones:
+        if isinstance(milestone, dict):
+            release_identifier = milestone.get("release_identifier")
+            if isinstance(release_identifier, str) and release_identifier:
+                baseline_release_identifier = release_identifier
+                break
+
+    externalized_count = 0
+    empty_baseline_artifacts_removed = 0
+    for milestone in milestones:
+        if not isinstance(milestone, dict):
+            continue
+        release_identifier = milestone.get("release_identifier")
+        if not isinstance(release_identifier, str) or not release_identifier:
+            continue
+        artifacts = milestone.get("artifacts")
+        if not isinstance(artifacts, list):
+            artifacts = []
+        artifacts_by_key = {
+            artifact.get("key"): artifact
+            for artifact in artifacts
+            if isinstance(artifact, dict) and artifact.get("key")
+        }
+        for artifact_key, (field_path, filename, description, media_type) in TEMPORAL_LAYER_ARTIFACTS.items():
+            artifact_path = _artifact_path_for_milestone(project_dir, release_identifier, filename)
+            artifact_payload = _artifact_payload_for_milestone_payload(milestone, field_path)
+            if isinstance(artifact_payload, dict) and artifact_payload.get("type") == "FeatureCollection":
+                artifact_path.parent.mkdir(parents=True, exist_ok=True)
+                _write_geojson(artifact_path, artifact_payload)
+                externalized_count += 1
+            if artifact_path.is_file():
+                size_bytes = artifact_path.stat().st_size
+                compute_geojson_metadata = (
+                    media_type != "application/geo+json"
+                    or size_bytes < TEMPORAL_VECTOR_TILE_METADATA_THRESHOLD_BYTES
+                )
+                artifact_entry = _temporal_artifact_entry_payload(
+                    project_id=project_id,
+                    release_identifier=release_identifier,
+                    artifact_key=artifact_key,
+                    path=artifact_path,
+                    description=description,
+                    media_type=media_type,
+                    compute_geojson_metadata=compute_geojson_metadata,
+                )
+                if (
+                    release_identifier == baseline_release_identifier
+                    and media_type == "application/geo+json"
+                    and compute_geojson_metadata
+                    and (artifact_entry.get("feature_count") or 0) == 0
+                ):
+                    if artifacts_by_key.pop(artifact_key, None) is not None:
+                        empty_baseline_artifacts_removed += 1
+                else:
+                    artifacts_by_key[artifact_key] = artifact_entry
+            _clear_artifact_payload_for_milestone_payload(milestone, field_path)
+        milestone["artifacts"] = list(artifacts_by_key.values())
+    qgis_artifact_count = 0
+    releases_with_qgis_artifacts: set[str] = set()
+    for milestone in milestones:
+        if not isinstance(milestone, dict):
+            continue
+        release_identifier = str(milestone.get("release_identifier") or "")
+        for artifact in milestone.get("artifacts") or []:
+            if isinstance(artifact, dict) and artifact.get("qgis_preferred_url"):
+                qgis_artifact_count += 1
+                if release_identifier:
+                    releases_with_qgis_artifacts.add(release_identifier)
+    logger.info(
+        "QGIS_GPKG_METADATA_SUMMARY project_id=%s releases_with_qgis_artifacts=%s qgis_artifact_count=%s empty_artifact_skipped_count=%s duration_ms=0",
+        project_id,
+        len(releases_with_qgis_artifacts),
+        qgis_artifact_count,
+        empty_baseline_artifacts_removed,
+    )
+    return externalized_count, empty_baseline_artifacts_removed
+
+
+def _externalize_temporal_artifact_payloads_in_project(
+    *,
+    project: TemporalProject,
+    project_dir: Path,
+) -> tuple[int, int]:
+    externalized_count = 0
+    empty_baseline_artifacts_removed = 0
+    baseline_release_identifier = project.milestones[0].release_identifier if project.milestones else None
+    for milestone in project.milestones:
+        artifacts_by_key = {artifact.key: artifact for artifact in milestone.artifacts if artifact.key}
+        for artifact_key, (field_path, filename, description, media_type) in TEMPORAL_LAYER_ARTIFACTS.items():
+            artifact_path = _artifact_path_for_milestone(project_dir, milestone.release_identifier, filename)
+            artifact_payload = _artifact_payload_for_milestone(milestone, field_path)
+            if isinstance(artifact_payload, dict) and artifact_payload.get("type") == "FeatureCollection":
+                artifact_path.parent.mkdir(parents=True, exist_ok=True)
+                _write_geojson(artifact_path, artifact_payload)
+                externalized_count += 1
+            if artifact_path.is_file():
+                size_bytes = artifact_path.stat().st_size
+                compute_geojson_metadata = (
+                    media_type != "application/geo+json"
+                    or size_bytes < TEMPORAL_VECTOR_TILE_METADATA_THRESHOLD_BYTES
+                )
+                artifact_entry = _temporal_artifact_entry(
+                    project_id=project.project_id,
+                    release_identifier=milestone.release_identifier,
+                    artifact_key=artifact_key,
+                    path=artifact_path,
+                    description=description,
+                    media_type=media_type,
+                    compute_geojson_metadata=compute_geojson_metadata,
+                )
+                if (
+                    milestone.release_identifier == baseline_release_identifier
+                    and media_type == "application/geo+json"
+                    and compute_geojson_metadata
+                    and (artifact_entry.feature_count or 0) == 0
+                ):
+                    if artifacts_by_key.pop(artifact_key, None) is not None:
+                        empty_baseline_artifacts_removed += 1
+                else:
+                    artifacts_by_key[artifact_key] = artifact_entry
+            _clear_artifact_payload_for_milestone(milestone, field_path)
+        milestone.artifacts = list(artifacts_by_key.values())
+    qgis_artifact_count = 0
+    releases_with_qgis_artifacts: set[str] = set()
+    for milestone in project.milestones:
+        for artifact in milestone.artifacts:
+            if artifact.qgis_preferred_url:
+                qgis_artifact_count += 1
+                releases_with_qgis_artifacts.add(milestone.release_identifier)
+    logger.info(
+        "QGIS_GPKG_METADATA_SUMMARY project_id=%s releases_with_qgis_artifacts=%s qgis_artifact_count=%s empty_artifact_skipped_count=%s duration_ms=0",
+        project.project_id,
+        len(releases_with_qgis_artifacts),
+        qgis_artifact_count,
+        empty_baseline_artifacts_removed,
+    )
+    return externalized_count, empty_baseline_artifacts_removed
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _geojson_feature_count_and_bbox(path: Path) -> tuple[int | None, list[float] | None]:
+    if path.is_file():
+        stat = path.stat()
+        try:
+            index = _load_geojson_index_for_vector_tiles(str(path), stat.st_mtime_ns, stat.st_size)
+            return index.feature_count, index.bbox
+        except Exception:
+            logger.debug("TEMPORAL_VECTOR_TILE_METADATA_INDEX_FAILED path=%s", path, exc_info=True)
+    payload = _load_geojson_file(path)
+    if not isinstance(payload, dict):
+        return None, None
+    features = payload.get("features")
+    if not isinstance(features, list):
+        return None, None
+    bounds: tuple[float, float, float, float] | None = None
+    for feature in features:
+        geometry_payload = feature.get("geometry") if isinstance(feature, dict) else None
+        if not geometry_payload:
+            continue
+        try:
+            geometry = shape(geometry_payload)
+        except Exception:
+            continue
+        if geometry.is_empty:
+            continue
+        geom_bounds = geometry.bounds
+        if bounds is None:
+            bounds = geom_bounds
+        else:
+            bounds = (
+                min(bounds[0], geom_bounds[0]),
+                min(bounds[1], geom_bounds[1]),
+                max(bounds[2], geom_bounds[2]),
+                max(bounds[3], geom_bounds[3]),
+            )
+    return len(features), list(bounds) if bounds is not None else None
+
+
+def _temporal_artifact_entry(
+    *,
+    project_id: str,
+    release_identifier: str,
+    artifact_key: str,
+    path: Path,
+    description: str,
+    media_type: str,
+    compute_geojson_metadata: bool = True,
+) -> TemporalArtifactEntry:
+    size_bytes = path.stat().st_size if path.is_file() else None
+    feature_count, bbox = (
+        _geojson_feature_count_and_bbox(path)
+        if compute_geojson_metadata and media_type == "application/geo+json"
+        else (None, None)
+    )
+    tilejson_url = None
+    tiles_url_template = None
+    vector_source_layer = None
+    if media_type == "application/geo+json" and _should_advertise_vector_tiles(feature_count, size_bytes):
+        tilejson_url = _temporal_vector_tilejson_route(project_id, release_identifier, artifact_key)
+        tiles_url_template = _temporal_vector_tiles_route(project_id, release_identifier, artifact_key)
+        vector_source_layer = TEMPORAL_VECTOR_TILE_SOURCE_LAYER
+    artifact_url = f"/api/temporal-projects/{project_id}/milestones/{release_identifier}/artifacts/{artifact_key}"
+    geojson_url = f"{artifact_url}.geojson" if media_type == "application/geo+json" else None
+    empty_qgis_artifact = media_type == "application/geo+json" and _is_empty_qgis_geojson_artifact(
+        path=path,
+        feature_count=feature_count,
+        size_bytes=size_bytes,
+    )
+    if empty_qgis_artifact:
+        logger.info(
+            "QGIS_GPKG_METADATA_SKIPPED_EMPTY release_identifier=%s artifact_key=%s reason=empty_artifact source_size_bytes=%s feature_count=%s",
+            release_identifier,
+            artifact_key,
+            size_bytes,
+            feature_count,
+        )
+    gpkg_url = f"{artifact_url}.gpkg" if media_type == "application/geo+json" and not empty_qgis_artifact else None
+    source_mtime_ns = path.stat().st_mtime_ns if path.is_file() else None
+    qgis_cache_key = (
+        f"{source_mtime_ns}-{size_bytes}-{TEMPORAL_QGIS_GPKG_CONVERSION_VERSION}"
+        if gpkg_url and source_mtime_ns is not None and size_bytes is not None
+        else None
+    )
+    if gpkg_url:
+        logger.debug(
+            "QGIS_GPKG_METADATA_EXPOSED project_id=%s release_identifier=%s artifact_key=%s source_geojson_path=%s gpkg_url=%s source_size_bytes=%s source_mtime_ns=%s",
+            project_id,
+            release_identifier,
+            artifact_key,
+            path,
+            gpkg_url,
+            size_bytes,
+            source_mtime_ns,
+        )
+    return TemporalArtifactEntry(
+        name=f"{release_identifier}_{artifact_key}",
+        path=str(path),
+        media_type=media_type,
+        description=description,
+        key=artifact_key,
+        feature_count=feature_count,
+        size_bytes=size_bytes,
+        source_mtime_ns=source_mtime_ns,
+        qgis_cache_key=qgis_cache_key,
+        bbox=bbox,
+        sha256=_sha256_file(path) if path.is_file() else None,
+        artifact_url=artifact_url,
+        geojson_url=geojson_url,
+        download_url=geojson_url or artifact_url,
+        gpkg_url=gpkg_url,
+        qgis_preferred_url=None if empty_qgis_artifact else (gpkg_url or geojson_url or artifact_url),
+        qgis_preferred_format="gpkg" if gpkg_url else None,
+        qgis_compatible=media_type == "application/geo+json" and not empty_qgis_artifact,
+        tilejson_url=tilejson_url,
+        tiles_url_template=tiles_url_template,
+        vector_source_layer=vector_source_layer,
+    )
+
+
+def _is_empty_qgis_geojson_artifact(*, path: Path | None = None, feature_count: int | None, size_bytes: int | None) -> bool:
+    if feature_count == 0:
+        return True
+    if feature_count is None and size_bytes is not None and size_bytes <= TEMPORAL_QGIS_EMPTY_GEOJSON_THRESHOLD_BYTES:
+        if path is None:
+            return True
+        payload = _load_geojson_file(path)
+        features = payload.get("features") if isinstance(payload, dict) else None
+        return isinstance(features, list) and len(features) == 0
+    return False
+
+
+def _temporal_artifact_entry_payload(
+    *,
+    project_id: str,
+    release_identifier: str,
+    artifact_key: str,
+    path: Path,
+    description: str,
+    media_type: str,
+    compute_geojson_metadata: bool,
+) -> dict[str, Any]:
+    return _temporal_artifact_entry(
+        project_id=project_id,
+        release_identifier=release_identifier,
+        artifact_key=artifact_key,
+        path=path,
+        description=description,
+        media_type=media_type,
+        compute_geojson_metadata=compute_geojson_metadata,
+    ).model_dump(mode="json")
+
+
+def _repair_temporal_artifact_metadata_payload(
+    *,
+    project_id: str,
+    payload: dict[str, Any],
+    project_dir: Path,
+) -> bool:
+    milestones = payload.get("milestones")
+    if not isinstance(milestones, list):
+        return False
+    changed = False
+    baseline_release_identifier = None
+    for milestone in milestones:
+        if isinstance(milestone, dict):
+            baseline_release_identifier = milestone.get("release_identifier")
+            break
+
+    for milestone in milestones:
+        if not isinstance(milestone, dict):
+            continue
+        release_identifier = milestone.get("release_identifier")
+        if not isinstance(release_identifier, str) or not release_identifier:
+            continue
+        artifacts = milestone.get("artifacts")
+        if not isinstance(artifacts, list):
+            artifacts = []
+        artifacts_by_key = {artifact.get("key"): artifact for artifact in artifacts if isinstance(artifact, dict) and artifact.get("key")}
+        repaired_count = 0
+        for artifact_key, (_field_path, filename, description, media_type) in TEMPORAL_LAYER_ARTIFACTS.items():
+            artifact_path = _artifact_path_for_milestone(project_dir, release_identifier, filename)
+            if not artifact_path.is_file():
+                continue
+            size_bytes = artifact_path.stat().st_size
+            compute_geojson_metadata = media_type != "application/geo+json" or size_bytes < TEMPORAL_VECTOR_TILE_METADATA_THRESHOLD_BYTES
+            candidate = _temporal_artifact_entry_payload(
+                project_id=project_id,
+                release_identifier=release_identifier,
+                artifact_key=artifact_key,
+                path=artifact_path,
+                description=description,
+                media_type=media_type,
+                compute_geojson_metadata=compute_geojson_metadata,
+            )
+            if (
+                release_identifier == baseline_release_identifier
+                and media_type == "application/geo+json"
+                and compute_geojson_metadata
+                and (candidate.get("feature_count") or 0) == 0
+            ):
+                if artifacts_by_key.pop(artifact_key, None) is not None:
+                    changed = True
+                continue
+            existing = artifacts_by_key.get(artifact_key)
+            if existing != candidate:
+                artifacts_by_key[artifact_key] = candidate
+                repaired_count += 1
+                changed = True
+        if changed:
+            milestone["artifacts"] = list(artifacts_by_key.values())
+        if repaired_count:
+            logger.info(
+                "TEMPORAL_OUTPUT_ARTIFACT_METADATA_REPAIRED projectId=%s releaseIdentifier=%s repairedCount=%s source=milestone_files",
+                project_id,
+                release_identifier,
+                repaired_count,
+            )
+    return changed
+
+
 def _png_file_to_data_url(path: str | None) -> str | None:
     if not path:
         return None
@@ -637,18 +1256,58 @@ def _reference_imagery_from_cog_path(
     cog_path: Path,
     source_reference: TemporalReferenceImagery | None = None,
 ) -> TemporalReferenceImagery:
+    raster_bounds_wgs84 = source_reference.raster_bounds_wgs84 if source_reference else None
+    minzoom = source_reference.minzoom if source_reference else None
+    maxzoom = source_reference.maxzoom if source_reference else None
+    tile_size = source_reference.tile_size if source_reference and source_reference.tile_size else 256
+    cog_crs = None
+    cog_width = None
+    cog_height = None
+    try:
+        with rasterio.open(cog_path) as src:
+            cog_crs = str(src.crs) if src.crs else None
+            cog_width = int(src.width)
+            cog_height = int(src.height)
+            if raster_bounds_wgs84 is None and src.crs is not None:
+                raster_bounds_wgs84 = [
+                    float(value)
+                    for value in transform_bounds(src.crs, "EPSG:4326", *src.bounds, densify_pts=21)
+                ]
+            minzoom = 0 if minzoom is None else minzoom
+            maxzoom = 18 if maxzoom is None else maxzoom
+    except Exception:
+        logger.debug(
+            "TEMPORAL_REFERENCE_METADATA_COMPLETION_FAILED projectId=%s releaseIdentifier=%s cogPath=%s",
+            project_id,
+            release_identifier,
+            cog_path,
+            exc_info=True,
+        )
+    logger.info(
+        "TEMPORAL_REFERENCE_METADATA_COMPLETED projectId=%s releaseIdentifier=%s bounds=%s minzoom=%s maxzoom=%s tileSize=%s cogPath=%s crs=%s width=%s height=%s",
+        project_id,
+        release_identifier,
+        raster_bounds_wgs84,
+        minzoom,
+        maxzoom,
+        tile_size,
+        cog_path,
+        cog_crs,
+        cog_width,
+        cog_height,
+    )
     return TemporalReferenceImagery(
         image_path=source_reference.image_path if source_reference else None,
         image_png_data_url=None,
-        raster_bounds_wgs84=source_reference.raster_bounds_wgs84 if source_reference else None,
+        raster_bounds_wgs84=raster_bounds_wgs84,
         storage_strategy="raster_tiles",
         cog_path=str(cog_path),
         cog_url=f"/api/files?path={quote(str(cog_path))}",
         tilejson_url=_temporal_reference_route(project_id, release_identifier, "tilejson.json"),
         tiles_url_template=_temporal_reference_route(project_id, release_identifier, "tiles/{z}/{x}/{y}.png"),
-        minzoom=source_reference.minzoom if source_reference else None,
-        maxzoom=source_reference.maxzoom if source_reference else None,
-        tile_size=source_reference.tile_size if source_reference and source_reference.tile_size else 256,
+        minzoom=minzoom,
+        maxzoom=maxzoom,
+        tile_size=tile_size,
     )
 
 
@@ -662,6 +1321,38 @@ def _link_or_copy_reference_cog(source_path: Path, target_path: Path) -> str:
     except OSError:
         shutil.copy2(source_path, target_path)
         return "copied"
+
+
+def _temporal_reference_transform_is_identity(transform: Any) -> bool:
+    try:
+        return (
+            math.isclose(float(transform.a), 1.0)
+            and math.isclose(float(transform.b), 0.0)
+            and math.isclose(float(transform.c), 0.0)
+            and math.isclose(float(transform.d), 0.0)
+            and math.isclose(float(transform.e), 1.0)
+            and math.isclose(float(transform.f), 0.0)
+        )
+    except Exception:
+        return False
+
+
+def _reference_raster_is_project_reusable(source_path: Path) -> tuple[bool, str]:
+    try:
+        with rasterio.open(source_path) as src:
+            if src.crs is None:
+                return False, "missing_crs"
+            if _temporal_reference_transform_is_identity(src.transform):
+                return False, "identity_transform"
+            if src.width <= 0 or src.height <= 0:
+                return False, "empty_dimensions"
+            if not src.is_tiled:
+                return False, "not_tiled"
+            if not src.bounds or src.bounds.left == src.bounds.right or src.bounds.bottom == src.bounds.top:
+                return False, "empty_bounds"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"open_failed:{exc.__class__.__name__}"
+    return True, "tiled_local_raster"
 
 
 def _find_matching_project_reference_cog(
@@ -682,6 +1373,19 @@ def _find_matching_project_reference_cog(
     for project_json_path in sorted(settings.temporal_projects_dir.glob("*/project.json")):
         source_project_id = project_json_path.parent.name
         if source_project_id == project.project_id:
+            continue
+        try:
+            project_json_size = project_json_path.stat().st_size
+        except OSError:
+            continue
+        if project_json_size > TEMPORAL_VECTOR_TILE_METADATA_THRESHOLD_BYTES:
+            logger.info(
+                "REFERENCE_REUSE_PROJECT_SCAN_SKIPPED projectId=%s releaseIdentifier=%s sourceProjectId=%s reason=metadata_too_large bytes=%s",
+                project.project_id,
+                release_identifier,
+                source_project_id,
+                project_json_size,
+            )
             continue
         try:
             payload = json.loads(project_json_path.read_text())
@@ -868,13 +1572,34 @@ def _persist_temporal_project_reference_repair(project: TemporalProject, setting
     project.updated_at = _utc_now_iso()
     project_dir = _resolve_project_dir(settings, project.project_id, project.project_dir)
     project.project_dir = str(project_dir)
+    externalized_count, empty_baseline_artifacts_removed = _externalize_temporal_artifact_payloads_in_project(
+        project=project,
+        project_dir=project_dir,
+    )
+    if externalized_count or empty_baseline_artifacts_removed:
+        logger.info(
+            "TEMPORAL_PROJECT_METADATA_PAYLOAD_EXTERNALIZED projectId=%s source=reference_repair externalizedArtifacts=%s emptyBaselineArtifactsRemoved=%s",
+            project.project_id,
+            externalized_count,
+            empty_baseline_artifacts_removed,
+        )
     payload = project.model_dump(mode="json")
     project_json_path = project_dir / "project.json"
     project_json_path.write_text(json.dumps(payload, indent=2))
     manifest_path = project_dir / "project_manifest.json"
     if manifest_path.exists():
         manifest_path.write_text(json.dumps(payload, indent=2))
+        logger.info(
+            "TEMPORAL_PROJECT_MANIFEST_UPDATED projectId=%s path=%s reason=reference_imagery_repair",
+            project.project_id,
+            manifest_path,
+        )
     _write_project_summary(project, project_json_path)
+    logger.info(
+        "TEMPORAL_PROJECT_SUMMARY_UPDATED projectId=%s path=%s reason=reference_imagery_repair",
+        project.project_id,
+        _project_summary_json_path(project_json_path),
+    )
 
 
 def repair_temporal_project_reference_imagery(project_id: str, settings: Settings) -> tuple[TemporalProject, int]:
@@ -890,6 +1615,12 @@ def repair_temporal_project_reference_imagery(project_id: str, settings: Setting
     project_dir = _resolve_project_dir(settings, project.project_id, project.project_dir)
     aoi_hash = _temporal_reference_aoi_hash(project.aoi_geojson)
     repaired_count = 0
+    logger.info(
+        "TEMPORAL_REFERENCE_REPAIR_START projectId=%s aoiHash=%s milestoneCount=%s",
+        project.project_id,
+        aoi_hash,
+        len(project.milestones),
+    )
     logger.info("REFERENCE_REUSE_LOOKUP_START projectId=%s aoiHash=%s", project.project_id, aoi_hash)
 
     for milestone in project.milestones:
@@ -904,6 +1635,12 @@ def repair_temporal_project_reference_imagery(project_id: str, settings: Setting
         if milestone.reference_imagery and milestone.reference_imagery.cog_path and Path(milestone.reference_imagery.cog_path).is_file():
             continue
         if target_cog_path.is_file():
+            logger.info(
+                "TEMPORAL_REFERENCE_SOURCE_RESOLVED projectId=%s releaseIdentifier=%s source=project_local_cog sourcePath=%s",
+                project.project_id,
+                release_identifier,
+                target_cog_path,
+            )
             milestone.reference_imagery = _reference_imagery_from_cog_path(
                 project_id=project.project_id,
                 release_identifier=release_identifier,
@@ -911,6 +1648,13 @@ def repair_temporal_project_reference_imagery(project_id: str, settings: Setting
                 source_reference=milestone.reference_imagery,
             )
             repaired_count += 1
+            logger.info(
+                "TEMPORAL_REFERENCE_METADATA_REGISTERED projectId=%s releaseIdentifier=%s cogPath=%s tilejsonUrl=%s",
+                project.project_id,
+                release_identifier,
+                target_cog_path,
+                milestone.reference_imagery.tilejson_url if milestone.reference_imagery else None,
+            )
             logger.info(
                 "REFERENCE_REUSE_COG_LINKED projectId=%s releaseIdentifier=%s aoiHash=%s sourcePath=%s targetPath=%s reason=project_local_cog",
                 project.project_id,
@@ -929,6 +1673,13 @@ def repair_temporal_project_reference_imagery(project_id: str, settings: Setting
         )
         if match is not None:
             source_project_id, source_path, source_reference = match
+            logger.info(
+                "TEMPORAL_REFERENCE_SOURCE_RESOLVED projectId=%s releaseIdentifier=%s source=project_reference_reuse sourceProjectId=%s sourcePath=%s",
+                project.project_id,
+                release_identifier,
+                source_project_id,
+                source_path,
+            )
             action = _link_or_copy_reference_cog(source_path, target_cog_path)
             milestone.reference_imagery = _reference_imagery_from_cog_path(
                 project_id=project.project_id,
@@ -937,6 +1688,13 @@ def repair_temporal_project_reference_imagery(project_id: str, settings: Setting
                 source_reference=source_reference,
             )
             repaired_count += 1
+            logger.info(
+                "TEMPORAL_REFERENCE_METADATA_REGISTERED projectId=%s releaseIdentifier=%s cogPath=%s tilejsonUrl=%s",
+                project.project_id,
+                release_identifier,
+                target_cog_path,
+                milestone.reference_imagery.tilejson_url if milestone.reference_imagery else None,
+            )
             logger.info(
                 "REFERENCE_REUSE_COG_%s projectId=%s releaseIdentifier=%s aoiHash=%s sourceProjectId=%s sourcePath=%s targetPath=%s durationMs=%s",
                 "LINKED" if action == "linked" else "COPIED",
@@ -958,22 +1716,55 @@ def repair_temporal_project_reference_imagery(project_id: str, settings: Setting
         )
         if shared is not None:
             source_raster_path, valid_mask_path = shared
-            reference = build_temporal_reference_imagery(
-                project_id=project.project_id,
-                project_dir=project_dir,
-                release_identifier=release_identifier,
-                source=TemporalReferenceSource(
-                    image_path=None,
-                    image_png_data_url=None,
-                    raster_bounds_wgs84=None,
-                    source_raster_path=str(source_raster_path),
-                    valid_mask_path=str(valid_mask_path) if valid_mask_path else None,
-                    aoi_geojson=project.aoi_geojson,
-                ),
+            logger.info(
+                "TEMPORAL_REFERENCE_SOURCE_RESOLVED projectId=%s releaseIdentifier=%s source=shared_wayback_mosaic sourcePath=%s validMaskPath=%s",
+                project.project_id,
+                release_identifier,
+                source_raster_path,
+                valid_mask_path,
             )
+            reusable, reusable_reason = _reference_raster_is_project_reusable(source_raster_path)
+            if reusable:
+                action = _link_or_copy_reference_cog(source_raster_path, target_cog_path)
+                logger.info(
+                    "TEMPORAL_REFERENCE_COG_WRITTEN projectId=%s releaseIdentifier=%s action=%s reason=%s sourcePath=%s cogPath=%s",
+                    project.project_id,
+                    release_identifier,
+                    action,
+                    reusable_reason,
+                    source_raster_path,
+                    target_cog_path,
+                )
+                reference = _reference_imagery_from_cog_path(
+                    project_id=project.project_id,
+                    release_identifier=release_identifier,
+                    cog_path=target_cog_path,
+                    source_reference=milestone.reference_imagery,
+                )
+            else:
+                reference = build_temporal_reference_imagery(
+                    project_id=project.project_id,
+                    project_dir=project_dir,
+                    release_identifier=release_identifier,
+                    source=TemporalReferenceSource(
+                        image_path=None,
+                        image_png_data_url=None,
+                        raster_bounds_wgs84=None,
+                        source_raster_path=str(source_raster_path),
+                        valid_mask_path=str(valid_mask_path) if valid_mask_path else None,
+                        aoi_geojson=project.aoi_geojson,
+                    ),
+                )
             if reference and reference.cog_path:
                 milestone.reference_imagery = reference
                 repaired_count += 1
+                logger.info(
+                    "TEMPORAL_REFERENCE_METADATA_REGISTERED projectId=%s releaseIdentifier=%s cogPath=%s tilejsonUrl=%s",
+                    project.project_id,
+                    release_identifier,
+                    reference.cog_path,
+                    reference.tilejson_url,
+                )
                 if release_identifier == (project.milestones[0].release_identifier if project.milestones else None):
                     logger.info(
                         "REFERENCE_BASELINE_IMAGERY_COG_GENERATED projectId=%s releaseIdentifier=%s aoiHash=%s sourcePath=%s targetPath=%s",
@@ -1019,6 +1810,836 @@ def repair_temporal_project_reference_imagery(project_id: str, settings: Setting
         "repaired" if repaired_count else "no_reference_imagery_source",
     )
     return project, repaired_count
+
+
+def _reference_cog_metadata(cog_path: Path) -> dict[str, Any]:
+    with rasterio.open(cog_path) as src:
+        compression = src.compression.value if src.compression is not None else None
+        return {
+            "path": str(cog_path),
+            "size_bytes": cog_path.stat().st_size,
+            "crs": str(src.crs) if src.crs else None,
+            "width": src.width,
+            "height": src.height,
+            "count": src.count,
+            "compression": compression,
+            "bounds": [src.bounds.left, src.bounds.bottom, src.bounds.right, src.bounds.top],
+        }
+
+
+def repair_temporal_project_reference_imagery_for_publication(
+    project_id: str,
+    settings: Settings,
+) -> dict[str, Any]:
+    """Repair milestone COG references and return validation metadata for publication scripts."""
+
+    project, repaired_count = repair_temporal_project_reference_imagery(project_id, settings)
+    project_dir = _resolve_project_dir(settings, project.project_id, project.project_dir)
+    milestones: dict[str, dict[str, Any]] = {}
+    available_count = 0
+    for milestone in project.milestones:
+        release_identifier = milestone.release_identifier
+        cog_path = project_dir / "milestones" / release_identifier / "reference_imagery_cog.tif"
+        if not cog_path.is_file():
+            logger.info(
+                "TEMPORAL_PROJECT_REFERENCE_COG_MISSING projectId=%s releaseIdentifier=%s path=%s",
+                project.project_id,
+                release_identifier,
+                cog_path,
+            )
+            milestones[release_identifier] = {
+                "available": False,
+                "path": str(cog_path),
+                "reason": "missing_cog",
+            }
+            continue
+        try:
+            metadata = _reference_cog_metadata(cog_path)
+        except Exception as exc:  # noqa: BLE001
+            logger.info(
+                "TEMPORAL_PROJECT_REFERENCE_COG_MISSING projectId=%s releaseIdentifier=%s path=%s reason=invalid_cog error=%s",
+                project.project_id,
+                release_identifier,
+                cog_path,
+                exc.__class__.__name__,
+            )
+            milestones[release_identifier] = {
+                "available": False,
+                "path": str(cog_path),
+                "reason": "invalid_cog",
+                "error": str(exc),
+            }
+            continue
+        available_count += 1
+        milestones[release_identifier] = {"available": True, **metadata}
+        logger.info(
+            "TEMPORAL_PROJECT_REFERENCE_COG_VALIDATED projectId=%s releaseIdentifier=%s path=%s sizeBytes=%s crs=%s width=%s height=%s compression=%s",
+            project.project_id,
+            release_identifier,
+            cog_path,
+            metadata["size_bytes"],
+            metadata["crs"],
+            metadata["width"],
+            metadata["height"],
+            metadata["compression"],
+        )
+
+    logger.info(
+        "TEMPORAL_PROJECT_REFERENCE_IMAGERY_AVAILABLE projectId=%s availableCount=%s milestoneCount=%s repairedCount=%s",
+        project.project_id,
+        available_count,
+        len(project.milestones),
+        repaired_count,
+    )
+    return {
+        "project_id": project.project_id,
+        "repaired_count": repaired_count,
+        "available_count": available_count,
+        "milestone_count": len(project.milestones),
+        "milestones": milestones,
+    }
+
+
+def _load_geojson_file(path: Path) -> dict[str, Any] | None:
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _geojson_property_area_m2(payload: dict[str, Any] | None) -> float | None:
+    if not isinstance(payload, dict):
+        return None
+    total = 0.0
+    seen = False
+    for feature in payload.get("features", []) or []:
+        properties = feature.get("properties") if isinstance(feature, dict) else None
+        if not isinstance(properties, dict):
+            continue
+        value = properties.get("area_m2") or properties.get("area_sqm") or properties.get("area")
+        if value is None:
+            continue
+        try:
+            total += float(value)
+            seen = True
+        except (TypeError, ValueError):
+            continue
+    return total if seen else None
+
+
+def _geojson_union_area_m2(payload: dict[str, Any] | None) -> float | None:
+    if not isinstance(payload, dict):
+        return None
+    geometry = _geometry_from_geojson(payload)
+    if geometry.is_empty:
+        return 0.0
+    return geodesic_area_m2(geometry)
+
+
+def _audit_metric_layer(
+    *,
+    project_id: str,
+    release_identifier: str,
+    layer_key: str,
+    path: Path,
+) -> dict[str, Any]:
+    payload = _load_geojson_file(path)
+    feature_count = len(payload.get("features", [])) if isinstance(payload, dict) and isinstance(payload.get("features"), list) else 0
+    property_area = _geojson_property_area_m2(payload)
+    geometry_area = _geojson_union_area_m2(payload)
+    layer_result = {
+        "path": str(path),
+        "feature_count": feature_count,
+        "property_area_m2": round(property_area, 2) if property_area is not None else None,
+        "geometry_area_m2": round(geometry_area, 2) if geometry_area is not None else None,
+        "geometry_area_km2": round(geometry_area / 1_000_000, 6) if geometry_area is not None else None,
+    }
+    logger.info(
+        "TEMPORAL_PROJECT_METRIC_AUDIT_LAYER projectId=%s releaseIdentifier=%s layer=%s path=%s featureCount=%s propertyAreaM2=%s geometryAreaM2=%s",
+        project_id,
+        release_identifier,
+        layer_key,
+        path,
+        layer_result["feature_count"],
+        layer_result["property_area_m2"],
+        layer_result["geometry_area_m2"],
+    )
+    return layer_result
+
+
+def audit_temporal_project_metrics(
+    *,
+    project_id: str,
+    target_release: str,
+    settings: Settings,
+) -> dict[str, Any]:
+    logger.info(
+        "TEMPORAL_PROJECT_METRIC_AUDIT_START projectId=%s targetRelease=%s",
+        project_id,
+        target_release,
+    )
+    project = _load_project(
+        settings,
+        project_id,
+        hydrate_reference_imagery=False,
+        hydrate_buffer_layers=False,
+        refresh_derived_layers=False,
+        write_side_effects=False,
+    )
+    project_dir = _resolve_project_dir(settings, project.project_id, project.project_dir)
+    milestone = next((item for item in project.milestones if item.release_identifier == target_release), None)
+    if milestone is None:
+        raise ValueError(f"Target release {target_release} is not present in project {project_id}.")
+    milestone_dir = project_dir / "milestones" / target_release
+    layers = {
+        "additions": _audit_metric_layer(
+            project_id=project.project_id,
+            release_identifier=target_release,
+            layer_key="additions",
+            path=milestone_dir / "additions.geojson",
+        ),
+        "automated_additions": _audit_metric_layer(
+            project_id=project.project_id,
+            release_identifier=target_release,
+            layer_key="automated_additions",
+            path=milestone_dir / "automated_additions.geojson",
+        ),
+        "effective_building_blocks": _audit_metric_layer(
+            project_id=project.project_id,
+            release_identifier=target_release,
+            layer_key="effective_building_blocks",
+            path=milestone_dir / "effective_building_blocks.geojson",
+        ),
+        "cumulative_growth_blocks": _audit_metric_layer(
+            project_id=project.project_id,
+            release_identifier=target_release,
+            layer_key="cumulative_growth_blocks",
+            path=milestone_dir / "cumulative_growth_blocks.geojson",
+        ),
+    }
+    metrics_payload = milestone.metrics.model_dump(mode="json") if milestone.metrics is not None else {}
+    ui_added_area_m2 = float(metrics_payload.get("added_area_m2") or 0.0)
+    additions_geometry_area = layers["additions"].get("geometry_area_m2")
+    mismatch = (
+        additions_geometry_area is not None
+        and abs(float(additions_geometry_area) - ui_added_area_m2) > 1.0
+    )
+    if mismatch:
+        logger.warning(
+            "TEMPORAL_PROJECT_METRIC_MISMATCH projectId=%s releaseIdentifier=%s uiAddedAreaM2=%s additionsGeometryAreaM2=%s",
+            project.project_id,
+            target_release,
+            ui_added_area_m2,
+            additions_geometry_area,
+        )
+    result = {
+        "project_id": project.project_id,
+        "target_release": target_release,
+        "metrics": metrics_payload,
+        "ui_added_area_m2": round(ui_added_area_m2, 2),
+        "ui_added_area_km2": round(ui_added_area_m2 / 1_000_000, 6),
+        "layers": layers,
+        "mismatch": mismatch,
+    }
+    logger.info(
+        "TEMPORAL_PROJECT_METRIC_AUDIT_DONE projectId=%s targetRelease=%s uiAddedAreaM2=%s uiAddedAreaKm2=%s mismatch=%s",
+        project.project_id,
+        target_release,
+        result["ui_added_area_m2"],
+        result["ui_added_area_km2"],
+        mismatch,
+    )
+    return result
+
+
+def audit_temporal_project_metadata_bloat(
+    *,
+    project_id: str,
+    settings: Settings,
+    repair_metadata: bool = False,
+    threshold_bytes: int = 100_000_000,
+) -> dict[str, Any]:
+    project_dir = _resolve_project_dir(settings, project_id, None)
+    project_json_path = project_dir / "project.json"
+    manifest_path = project_dir / "project_manifest.json"
+    project_size = project_json_path.stat().st_size if project_json_path.is_file() else 0
+    manifest_size = manifest_path.stat().st_size if manifest_path.is_file() else 0
+    bloated = project_size > threshold_bytes or manifest_size > threshold_bytes
+    result = {
+        "project_id": project_id,
+        "project_json": str(project_json_path),
+        "project_json_size_bytes": project_size,
+        "project_manifest": str(manifest_path),
+        "project_manifest_size_bytes": manifest_size,
+        "threshold_bytes": threshold_bytes,
+        "bloated": bloated,
+        "repair_metadata_requested": repair_metadata,
+        "repair_metadata_applied": False,
+        "reason": None,
+    }
+    if bloated:
+        logger.warning(
+            "TEMPORAL_PROJECT_METADATA_BLOAT_DETECTED projectId=%s projectJsonBytes=%s manifestBytes=%s thresholdBytes=%s likelyCause=embedded_feature_collections",
+            project_id,
+            project_size,
+            manifest_size,
+            threshold_bytes,
+        )
+    if repair_metadata:
+        externalized = externalize_temporal_project_metadata(project_id=project_id, settings=settings, threshold_bytes=threshold_bytes)
+        result.update(externalized)
+        result["reason"] = "externalized_feature_collections"
+        result["repair_metadata_applied"] = True
+        logger.info(
+            "TEMPORAL_PROJECT_METADATA_REFERENCES_WRITTEN projectId=%s written=true reason=%s projectJsonBeforeBytes=%s projectJsonAfterBytes=%s manifestBeforeBytes=%s manifestAfterBytes=%s",
+            project_id,
+            result["reason"],
+            externalized["project_json_before_bytes"],
+            externalized["project_json_after_bytes"],
+            externalized["project_manifest_before_bytes"],
+            externalized["project_manifest_after_bytes"],
+        )
+    return result
+
+
+def externalize_temporal_project_metadata(
+    *,
+    project_id: str,
+    settings: Settings,
+    threshold_bytes: int = 100_000_000,
+) -> dict[str, Any]:
+    project = _load_project(
+        settings,
+        project_id,
+        hydrate_reference_imagery=False,
+        hydrate_buffer_layers=False,
+        refresh_derived_layers=False,
+        write_side_effects=False,
+    )
+    project_dir = _resolve_project_dir(settings, project.project_id, project.project_dir)
+    project.project_dir = str(project_dir)
+    before_project_json = project_dir / "project.json"
+    before_manifest = project_dir / "project_manifest.json"
+    before_project_size = before_project_json.stat().st_size if before_project_json.is_file() else 0
+    before_manifest_size = before_manifest.stat().st_size if before_manifest.is_file() else 0
+    externalized_count = 0
+    bytes_externalized = 0
+    baseline_release_identifier = project.milestones[0].release_identifier if project.milestones else None
+    empty_baseline_artifacts_removed = 0
+    for milestone in project.milestones:
+        artifacts_by_key = {artifact.key: artifact for artifact in milestone.artifacts if artifact.key}
+        for artifact_key, (field_path, filename, description, media_type) in TEMPORAL_LAYER_ARTIFACTS.items():
+            artifact_path = _artifact_path_for_milestone(project_dir, milestone.release_identifier, filename)
+            payload = _artifact_payload_for_milestone(milestone, field_path)
+            if isinstance(payload, dict) and payload.get("type") == "FeatureCollection":
+                artifact_path.parent.mkdir(parents=True, exist_ok=True)
+                written_path = _write_geojson(artifact_path, payload)
+                if written_path:
+                    bytes_externalized += artifact_path.stat().st_size
+                    externalized_count += 1
+            if artifact_path.is_file():
+                size_bytes = artifact_path.stat().st_size
+                compute_geojson_metadata = media_type != "application/geo+json" or size_bytes < TEMPORAL_VECTOR_TILE_METADATA_THRESHOLD_BYTES
+                artifact_entry = _temporal_artifact_entry(
+                    project_id=project.project_id,
+                    release_identifier=milestone.release_identifier,
+                    artifact_key=artifact_key,
+                    path=artifact_path,
+                    description=description,
+                    media_type=media_type,
+                    compute_geojson_metadata=compute_geojson_metadata,
+                )
+                if (
+                    milestone.release_identifier == baseline_release_identifier
+                    and media_type == "application/geo+json"
+                    and compute_geojson_metadata
+                    and (artifact_entry.feature_count or 0) == 0
+                ):
+                    artifacts_by_key.pop(artifact_key, None)
+                    empty_baseline_artifacts_removed += 1
+                    logger.info(
+                        "BASELINE_EMPTY_OUTPUT_ARTIFACT_FILTERED projectId=%s releaseIdentifier=%s artifactKey=%s path=%s",
+                        project.project_id,
+                        milestone.release_identifier,
+                        artifact_key,
+                        artifact_path,
+                    )
+                else:
+                    artifacts_by_key[artifact_key] = artifact_entry
+            _clear_artifact_payload_for_milestone(milestone, field_path)
+        milestone.artifacts = list(artifacts_by_key.values())
+    project.updated_at = _utc_now_iso()
+    payload = project.model_dump(mode="json")
+    before_project_json.write_text(json.dumps(payload, indent=2))
+    before_manifest.write_text(json.dumps(payload, indent=2))
+    _write_project_summary(project, before_project_json)
+    after_project_size = before_project_json.stat().st_size
+    after_manifest_size = before_manifest.stat().st_size
+    logger.info(
+        "PROJECT_METADATA_EXTERNALIZED projectId=%s externalizedArtifacts=%s bytesExternalized=%s emptyBaselineArtifactsRemoved=%s projectJsonBefore=%s projectJsonAfter=%s manifestBefore=%s manifestAfter=%s",
+        project.project_id,
+        externalized_count,
+        bytes_externalized,
+        empty_baseline_artifacts_removed,
+        before_project_size,
+        after_project_size,
+        before_manifest_size,
+        after_manifest_size,
+    )
+    if after_project_size > threshold_bytes or after_manifest_size > threshold_bytes:
+        logger.warning(
+            "PROJECT_METADATA_BLOAT_DETECTED projectId=%s projectJsonBytes=%s manifestBytes=%s thresholdBytes=%s phase=after_externalize",
+            project.project_id,
+            after_project_size,
+            after_manifest_size,
+            threshold_bytes,
+        )
+    return {
+        "project_id": project.project_id,
+        "externalized_artifacts": externalized_count,
+        "bytes_externalized": bytes_externalized,
+        "empty_baseline_artifacts_removed": empty_baseline_artifacts_removed,
+        "project_json_before_bytes": before_project_size,
+        "project_json_after_bytes": after_project_size,
+        "project_manifest_before_bytes": before_manifest_size,
+        "project_manifest_after_bytes": after_manifest_size,
+        "project_summary": str(_project_summary_json_path(before_project_json)),
+    }
+
+
+def resolve_temporal_project_artifact_path(
+    *,
+    project_id: str,
+    release_identifier: str,
+    artifact_key: str,
+    settings: Settings,
+    access_mode: str = "direct_download",
+) -> tuple[Path, str]:
+    if artifact_key.endswith(".gpkg"):
+        artifact_key = artifact_key[: -len(".gpkg")]
+        source_path, source_media_type = resolve_temporal_project_artifact_path(
+            project_id=project_id,
+            release_identifier=release_identifier,
+            artifact_key=artifact_key,
+            settings=settings,
+            access_mode="qgis_gpkg_source",
+        )
+        if source_media_type != "application/geo+json":
+            raise FileNotFoundError(f"GeoPackage export is only available for GeoJSON artifacts: {artifact_key}")
+        feature_count, _bbox = _geojson_feature_count_and_bbox(source_path)
+        source_size = source_path.stat().st_size
+        if _is_empty_qgis_geojson_artifact(path=source_path, feature_count=feature_count, size_bytes=source_size):
+            logger.info(
+                "QGIS_GPKG_METADATA_SKIPPED_EMPTY release_identifier=%s artifact_key=%s reason=empty_artifact source_size_bytes=%s feature_count=%s",
+                release_identifier,
+                artifact_key,
+                source_size,
+                feature_count,
+            )
+            raise FileNotFoundError(f"GeoPackage export is not available for empty GeoJSON artifact: {artifact_key}")
+        gpkg_path = ensure_temporal_project_artifact_gpkg(
+            project_id=project_id,
+            release_identifier=release_identifier,
+            artifact_key=artifact_key,
+            source_geojson_path=source_path,
+            settings=settings,
+        )
+        return gpkg_path, TEMPORAL_QGIS_GPKG_MEDIA_TYPE
+    if artifact_key.endswith(".geojson"):
+        artifact_key = artifact_key[: -len(".geojson")]
+    if artifact_key not in TEMPORAL_LAYER_ARTIFACTS:
+        raise FileNotFoundError(f"Unknown temporal artifact key: {artifact_key}")
+    _, filename, _, media_type = TEMPORAL_LAYER_ARTIFACTS[artifact_key]
+    project_dir = _resolve_project_dir(settings, project_id, None)
+    project_dir = project_dir.resolve()
+    path = (project_dir / "milestones" / release_identifier / filename).resolve()
+    try:
+        path.relative_to(project_dir)
+    except ValueError as exc:
+        raise FileNotFoundError(f"Invalid temporal artifact path: {artifact_key}") from exc
+    if not path.is_file():
+        raise FileNotFoundError(f"Temporal artifact not found: {artifact_key}")
+    size_bytes = path.stat().st_size
+    if access_mode == "vector_tile":
+        logger.info(
+            "PROJECT_LAYER_ARTIFACT_VECTOR_TILE_SOURCE_RESOLVED projectId=%s releaseIdentifier=%s artifactKey=%s path=%s bytes=%s",
+            project_id,
+            release_identifier,
+            artifact_key,
+            path,
+            size_bytes,
+        )
+    elif access_mode == "qgis_gpkg_source":
+        logger.info(
+            "QGIS_GPKG_SOURCE_RESOLVED projectId=%s releaseIdentifier=%s artifactKey=%s path=%s bytes=%s",
+            project_id,
+            release_identifier,
+            artifact_key,
+            path,
+            size_bytes,
+        )
+    else:
+        logger.info(
+            "PROJECT_LAYER_ARTIFACT_LAZY_FETCH projectId=%s releaseIdentifier=%s artifactKey=%s path=%s bytes=%s",
+            project_id,
+            release_identifier,
+            artifact_key,
+            path,
+            size_bytes,
+        )
+    return path, media_type
+
+
+def _qgis_gpkg_cache_path(
+    *,
+    project_id: str,
+    release_identifier: str,
+    artifact_key: str,
+    source_geojson_path: Path,
+    settings: Settings,
+) -> Path:
+    stat = source_geojson_path.stat()
+    return (
+        settings.runtime_cache_dir
+        / "qgis_artifacts"
+        / project_id
+        / release_identifier
+        / artifact_key
+        / f"{stat.st_mtime_ns}-{stat.st_size}-{TEMPORAL_QGIS_GPKG_CONVERSION_VERSION}"
+        / f"{artifact_key}.gpkg"
+    )
+
+
+def ensure_temporal_project_artifact_gpkg(
+    *,
+    project_id: str,
+    release_identifier: str,
+    artifact_key: str,
+    source_geojson_path: Path,
+    settings: Settings,
+) -> Path:
+    started_at = time.perf_counter()
+    stat = source_geojson_path.stat()
+    gpkg_path = _qgis_gpkg_cache_path(
+        project_id=project_id,
+        release_identifier=release_identifier,
+        artifact_key=artifact_key,
+        source_geojson_path=source_geojson_path,
+        settings=settings,
+    )
+    logger.info(
+        "QGIS_GPKG_REQUEST_START project_id=%s release_identifier=%s artifact_key=%s source_geojson_path=%s gpkg_path=%s source_size_bytes=%s source_mtime_ns=%s",
+        project_id,
+        release_identifier,
+        artifact_key,
+        source_geojson_path,
+        gpkg_path,
+        stat.st_size,
+        stat.st_mtime_ns,
+    )
+    if gpkg_path.is_file() and gpkg_path.stat().st_size > 0:
+        logger.info(
+            "QGIS_GPKG_CACHE_HIT project_id=%s release_identifier=%s artifact_key=%s source_geojson_path=%s gpkg_path=%s source_size_bytes=%s source_mtime_ns=%s duration_ms=%s",
+            project_id,
+            release_identifier,
+            artifact_key,
+            source_geojson_path,
+            gpkg_path,
+            stat.st_size,
+            stat.st_mtime_ns,
+            round((time.perf_counter() - started_at) * 1000, 2),
+        )
+        return gpkg_path
+    logger.info(
+        "QGIS_GPKG_CACHE_MISS project_id=%s release_identifier=%s artifact_key=%s source_geojson_path=%s gpkg_path=%s source_size_bytes=%s source_mtime_ns=%s",
+        project_id,
+        release_identifier,
+        artifact_key,
+        source_geojson_path,
+        gpkg_path,
+        stat.st_size,
+        stat.st_mtime_ns,
+    )
+    gpkg_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = gpkg_path.with_suffix(".tmp.gpkg")
+    if tmp_path.exists():
+        tmp_path.unlink()
+    command = [
+        "ogr2ogr",
+        "-f",
+        "GPKG",
+        str(tmp_path),
+        str(source_geojson_path),
+        "-nln",
+        "results",
+        "-lco",
+        "SPATIAL_INDEX=YES",
+    ]
+    logger.info(
+        "QGIS_GPKG_GENERATION_START project_id=%s release_identifier=%s artifact_key=%s source_geojson_path=%s gpkg_path=%s source_size_bytes=%s source_mtime_ns=%s",
+        project_id,
+        release_identifier,
+        artifact_key,
+        source_geojson_path,
+        gpkg_path,
+        stat.st_size,
+        stat.st_mtime_ns,
+    )
+    try:
+        subprocess.run(command, check=True, capture_output=True, text=True)
+        tmp_path.replace(gpkg_path)
+    except Exception as exc:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        logger.exception(
+            "QGIS_GPKG_GENERATION_FAILED project_id=%s release_identifier=%s artifact_key=%s source_geojson_path=%s gpkg_path=%s source_size_bytes=%s source_mtime_ns=%s duration_ms=%s error=%s",
+            project_id,
+            release_identifier,
+            artifact_key,
+            source_geojson_path,
+            gpkg_path,
+            stat.st_size,
+            stat.st_mtime_ns,
+            round((time.perf_counter() - started_at) * 1000, 2),
+            exc,
+        )
+        raise
+    logger.info(
+        "QGIS_GPKG_GENERATION_DONE project_id=%s release_identifier=%s artifact_key=%s source_geojson_path=%s gpkg_path=%s source_size_bytes=%s source_mtime_ns=%s gpkg_size_bytes=%s duration_ms=%s",
+        project_id,
+        release_identifier,
+        artifact_key,
+        source_geojson_path,
+        gpkg_path,
+        stat.st_size,
+        stat.st_mtime_ns,
+        gpkg_path.stat().st_size,
+        round((time.perf_counter() - started_at) * 1000, 2),
+    )
+    return gpkg_path
+
+
+def _xyz_tile_bounds_wgs84(z: int, x: int, y: int) -> tuple[float, float, float, float]:
+    n = 2**z
+
+    def tile_lon(tile_x: int) -> float:
+        return tile_x / n * 360.0 - 180.0
+
+    def tile_lat(tile_y: int) -> float:
+        radians = math.atan(math.sinh(math.pi * (1 - 2 * tile_y / n)))
+        return math.degrees(radians)
+
+    west = tile_lon(x)
+    east = tile_lon(x + 1)
+    north = tile_lat(y)
+    south = tile_lat(y + 1)
+    return west, south, east, north
+
+
+@lru_cache(maxsize=32)
+def _load_geojson_index_for_vector_tiles(path: str, mtime_ns: int, size_bytes: int) -> TemporalVectorTileFeatureIndex:
+    del mtime_ns, size_bytes
+    payload = _load_geojson_file(Path(path))
+    features = payload.get("features") if isinstance(payload, dict) else None
+    if not isinstance(features, list):
+        return TemporalVectorTileFeatureIndex(feature_count=0, bbox=None, geometries=(), properties=(), tree=STRtree([]))
+    geometries: list[BaseGeometry] = []
+    properties: list[dict[str, Any]] = []
+    bounds: tuple[float, float, float, float] | None = None
+    for feature in features:
+        if not isinstance(feature, dict):
+            continue
+        geometry_payload = feature.get("geometry")
+        if not geometry_payload:
+            continue
+        try:
+            geometry = shape(geometry_payload)
+        except Exception:
+            continue
+        if geometry.is_empty:
+            continue
+        geometries.append(geometry)
+        feature_properties = feature.get("properties")
+        properties.append(feature_properties if isinstance(feature_properties, dict) else {})
+        geom_bounds = geometry.bounds
+        if bounds is None:
+            bounds = geom_bounds
+        else:
+            bounds = (
+                min(bounds[0], geom_bounds[0]),
+                min(bounds[1], geom_bounds[1]),
+                max(bounds[2], geom_bounds[2]),
+                max(bounds[3], geom_bounds[3]),
+            )
+    return TemporalVectorTileFeatureIndex(
+        feature_count=len(features),
+        bbox=list(bounds) if bounds is not None else None,
+        geometries=tuple(geometries),
+        properties=tuple(properties),
+        tree=STRtree(geometries),
+    )
+
+
+def build_temporal_artifact_vector_tilejson(
+    *,
+    project_id: str,
+    release_identifier: str,
+    artifact_key: str,
+    settings: Settings,
+    base_url: str | None = None,
+) -> dict[str, Any]:
+    path, media_type = resolve_temporal_project_artifact_path(
+        project_id=project_id,
+        release_identifier=release_identifier,
+        artifact_key=artifact_key,
+        settings=settings,
+        access_mode="vector_tile",
+    )
+    if media_type != "application/geo+json":
+        raise FileNotFoundError(f"Temporal artifact is not vector-tile capable: {artifact_key}")
+    feature_count, bbox = _geojson_feature_count_and_bbox(path)
+    tile_url = _temporal_vector_tiles_route(project_id, release_identifier, artifact_key)
+    if base_url:
+        tile_url = f"{base_url.rstrip('/')}{tile_url}"
+    stat = path.stat()
+    tile_url = f"{tile_url}?v={stat.st_mtime_ns}-{stat.st_size}"
+    payload: dict[str, Any] = {
+        "tilejson": "3.0.0",
+        "name": f"{project_id}:{release_identifier}:{artifact_key}",
+        "version": "1.0.0",
+        "scheme": "xyz",
+        "tiles": [tile_url],
+        "minzoom": TEMPORAL_VECTOR_TILE_MINZOOM,
+        "maxzoom": TEMPORAL_VECTOR_TILE_MAXZOOM,
+        "vector_layers": [
+            {
+                "id": TEMPORAL_VECTOR_TILE_SOURCE_LAYER,
+                "description": f"{release_identifier} {artifact_key}",
+                "fields": {},
+            }
+        ],
+        "feature_count": feature_count or 0,
+    }
+    if bbox:
+        payload["bounds"] = bbox
+    return payload
+
+
+def render_temporal_artifact_vector_tile(
+    *,
+    project_id: str,
+    release_identifier: str,
+    artifact_key: str,
+    z: int,
+    x: int,
+    y: int,
+    settings: Settings,
+) -> bytes:
+    started_at = time.perf_counter()
+    try:
+        from mapbox_vector_tile import encode
+    except ImportError as exc:  # pragma: no cover - dependency validation catches this.
+        raise RuntimeError("mapbox-vector-tile is required for temporal vector tile exports.") from exc
+
+    path, media_type = resolve_temporal_project_artifact_path(
+        project_id=project_id,
+        release_identifier=release_identifier,
+        artifact_key=artifact_key,
+        settings=settings,
+        access_mode="vector_tile",
+    )
+    if media_type != "application/geo+json":
+        raise FileNotFoundError(f"Temporal artifact is not vector-tile capable: {artifact_key}")
+    stat = path.stat()
+    tile_bounds = _xyz_tile_bounds_wgs84(z, x, y)
+    tile_geom = box(*tile_bounds)
+    source_index = _load_geojson_index_for_vector_tiles(str(path), stat.st_mtime_ns, stat.st_size)
+    encoded_features: list[dict[str, Any]] = []
+    candidate_indexes = source_index.tree.query(tile_geom)
+    for candidate_index in candidate_indexes:
+        geometry = source_index.geometries[int(candidate_index)]
+        if geometry.is_empty or not geometry.intersects(tile_geom):
+            continue
+        clipped = geometry.intersection(tile_geom)
+        if clipped.is_empty:
+            continue
+        properties = source_index.properties[int(candidate_index)]
+        clipped_parts = clipped.geoms if isinstance(clipped, GeometryCollection) else (clipped,)
+        for clipped_part in clipped_parts:
+            if clipped_part.is_empty or clipped_part.geom_type not in {"Polygon", "MultiPolygon"}:
+                continue
+            encoded_features.append({"geometry": mapping(clipped_part), "properties": properties})
+    logger.info(
+        "TEMPORAL_ARTIFACT_VECTOR_TILE_RENDER projectId=%s releaseIdentifier=%s artifactKey=%s z=%s x=%s y=%s features=%s sourceFeatures=%s candidateFeatures=%s durationMs=%.2f",
+        project_id,
+        release_identifier,
+        artifact_key,
+        z,
+        x,
+        y,
+        len(encoded_features),
+        source_index.feature_count,
+        len(candidate_indexes),
+        (time.perf_counter() - started_at) * 1000,
+    )
+    if not encoded_features:
+        return b""
+    return encode(
+        [{"name": TEMPORAL_VECTOR_TILE_SOURCE_LAYER, "features": encoded_features}],
+        default_options={
+            "quantize_bounds": tile_bounds,
+            "extents": TEMPORAL_VECTOR_TILE_EXTENT,
+        },
+    )
+
+
+def remove_empty_baseline_output_artifacts_from_metadata(*, project_id: str, settings: Settings) -> dict[str, Any]:
+    project = _load_project(
+        settings,
+        project_id,
+        hydrate_reference_imagery=False,
+        hydrate_buffer_layers=False,
+        refresh_derived_layers=False,
+        write_side_effects=False,
+    )
+    if not project.milestones:
+        return {"project_id": project_id, "removed": 0}
+    baseline = project.milestones[0]
+    before_count = len(baseline.artifacts)
+    baseline.artifacts = [
+        artifact
+        for artifact in baseline.artifacts
+        if not (
+            artifact.key in TEMPORAL_LAYER_ARTIFACTS
+            and artifact.media_type == "application/geo+json"
+            and (artifact.feature_count or 0) == 0
+        )
+    ]
+    removed = before_count - len(baseline.artifacts)
+    if removed:
+        project.updated_at = _utc_now_iso()
+        project_dir = _resolve_project_dir(settings, project.project_id, project.project_dir)
+        payload = project.model_dump(mode="json")
+        (project_dir / "project.json").write_text(json.dumps(payload, indent=2))
+        (project_dir / "project_manifest.json").write_text(json.dumps(payload, indent=2))
+        _write_project_summary(project, project_dir / "project.json")
+    logger.info(
+        "BASELINE_EMPTY_OUTPUT_ARTIFACTS_METADATA_FILTERED projectId=%s releaseIdentifier=%s removed=%s before=%s after=%s",
+        project_id,
+        baseline.release_identifier,
+        removed,
+        before_count,
+        len(baseline.artifacts),
+    )
+    return {
+        "project_id": project_id,
+        "release_identifier": baseline.release_identifier,
+        "removed": removed,
+        "before": before_count,
+        "after": len(baseline.artifacts),
+    }
 
 
 def temporal_reference_imagery_layers(project: TemporalProject) -> list[ReferenceLayer]:
@@ -1316,15 +2937,26 @@ def _refresh_temporal_derived_geometry_layers(project: TemporalProject) -> Tempo
 
 
 def _refresh_project_bundle(project: TemporalProject, settings: Settings) -> TemporalProject:
+    started_at = time.perf_counter()
+    logger.info(
+        "TEMPORAL_PROJECT_PUBLICATION_START projectId=%s milestoneCount=%s",
+        project.project_id,
+        len(project.milestones),
+    )
     project = _hydrate_reference_imagery(project, settings)
     project = _hydrate_milestone_buffer_layers(project, settings)
     project = _refresh_temporal_derived_geometry_layers(project)
+    logger.info(
+        "TEMPORAL_PROJECT_PUBLICATION_USING_EXISTING_FINALIZER projectId=%s finalizer=_refresh_project_bundle",
+        project.project_id,
+    )
     project_dir = _resolve_project_dir(settings, project.project_id, project.project_dir)
     bundle_path = project_dir / "temporal_project_bundle.zip"
     manifest_path = project_dir / "project_manifest.json"
 
     for milestone in project.milestones:
         milestone_artifacts: list[TemporalArtifactEntry] = []
+        cached_pair_response = load_cached_response(settings, milestone.pair_request_hash) if milestone.pair_request_hash else None
         for name, description, payload in (
             ("automated_additions.geojson", "Automated additions footprint", milestone.automated_additions_geojson),
             ("automated_candidate_footprint.geojson", "Automated cumulative candidate footprint", milestone.automated_candidate_footprint_geojson),
@@ -1344,6 +2976,15 @@ def _refresh_project_bundle(project: TemporalProject, settings: Settings) -> Tem
             artifact_path = _artifact_path_for_milestone(project_dir, milestone.release_identifier, name)
             written_path = _write_geojson(artifact_path, payload)
             if written_path:
+                feature_count = len(payload.get("features", [])) if isinstance(payload, dict) and isinstance(payload.get("features"), list) else 0
+                logger.info(
+                    "TEMPORAL_PROJECT_PUBLICATION_LAYER_WRITTEN projectId=%s releaseIdentifier=%s filename=%s path=%s featureCount=%s",
+                    project.project_id,
+                    milestone.release_identifier,
+                    name,
+                    written_path,
+                    feature_count,
+                )
                 milestone_artifacts.append(
                     TemporalArtifactEntry(
                         name=f"{milestone.release_identifier}_{name.replace('.geojson', '')}",
@@ -1353,11 +2994,50 @@ def _refresh_project_bundle(project: TemporalProject, settings: Settings) -> Tem
                     )
                 )
 
+        if cached_pair_response is not None and cached_pair_response.downloadable_zip_path:
+            zip_path = Path(cached_pair_response.downloadable_zip_path)
+            if zip_path.is_file():
+                milestone_artifacts.append(
+                    TemporalArtifactEntry(
+                        name=f"{milestone.release_identifier}_export_bundle",
+                        path=str(zip_path),
+                        media_type="application/zip",
+                        description="Pairwise request export bundle used to publish this milestone",
+                    )
+                )
+                logger.info(
+                    "TEMPORAL_PROJECT_PUBLICATION_BUNDLE_REGISTERED projectId=%s releaseIdentifier=%s path=%s bytes=%s",
+                    project.project_id,
+                    milestone.release_identifier,
+                    zip_path,
+                    zip_path.stat().st_size,
+                )
         milestone.artifacts = milestone_artifacts
 
+    externalized_count, empty_baseline_artifacts_removed = _externalize_temporal_artifact_payloads_in_project(
+        project=project,
+        project_dir=project_dir,
+    )
+    if externalized_count or empty_baseline_artifacts_removed:
+        logger.info(
+            "TEMPORAL_PROJECT_METADATA_PAYLOAD_EXTERNALIZED projectId=%s source=project_bundle externalizedArtifacts=%s emptyBaselineArtifactsRemoved=%s",
+            project.project_id,
+            externalized_count,
+            empty_baseline_artifacts_removed,
+        )
     manifest_payload = project.model_dump(mode="json")
     manifest_path.write_text(json.dumps(manifest_payload, indent=2))
+    logger.info(
+        "TEMPORAL_PROJECT_PUBLICATION_MANIFEST_UPDATED projectId=%s path=%s",
+        project.project_id,
+        manifest_path,
+    )
     project.download_bundle_path = str(bundle_path) if bundle_path.exists() else None
+    logger.info(
+        "TEMPORAL_PROJECT_PUBLICATION_DONE projectId=%s durationMs=%s",
+        project.project_id,
+        round((time.perf_counter() - started_at) * 1000, 2),
+    )
     return project
 
 
@@ -2015,8 +3695,29 @@ def _load_project(
         project_id,
         round((time.perf_counter() - layer_availability_started_at) * 1000, 2),
     )
+    metadata_externalized = False
+    if write_side_effects:
+        project_dir = _resolve_project_dir(settings, project.project_id, project.project_dir)
+        project.project_dir = str(project_dir)
+        externalized_count, empty_baseline_artifacts_removed = _externalize_temporal_artifact_payloads_in_project(
+            project=project,
+            project_dir=project_dir,
+        )
+        metadata_externalized = bool(externalized_count or empty_baseline_artifacts_removed)
+        if metadata_externalized:
+            logger.info(
+                "TEMPORAL_PROJECT_METADATA_PAYLOAD_EXTERNALIZED projectId=%s source=load_project externalizedArtifacts=%s emptyBaselineArtifactsRemoved=%s",
+                project.project_id,
+                externalized_count,
+                empty_baseline_artifacts_removed,
+            )
     final_project_payload = json.dumps(project.model_dump(mode="json"), sort_keys=True) if write_side_effects else None
-    if write_side_effects and (should_compact_project_json or stripped_fields or final_project_payload != initial_project_payload):
+    if write_side_effects and (
+        metadata_externalized
+        or should_compact_project_json
+        or stripped_fields
+        or final_project_payload != initial_project_payload
+    ):
         path.write_text(json.dumps(project.model_dump(mode="json"), indent=2))
         manifest_path = path.with_name("project_manifest.json")
         if manifest_path.exists():
@@ -2045,12 +3746,28 @@ def _save_project(project: TemporalProject, settings: Settings) -> TemporalProje
     project.updated_at = _utc_now_iso()
     project_dir = _resolve_project_dir(settings, project.project_id, project.project_dir)
     project.project_dir = str(project_dir)
+    externalized_count, empty_baseline_artifacts_removed = _externalize_temporal_artifact_payloads_in_project(
+        project=project,
+        project_dir=project_dir,
+    )
+    if externalized_count or empty_baseline_artifacts_removed:
+        logger.info(
+            "TEMPORAL_PROJECT_METADATA_PAYLOAD_EXTERNALIZED projectId=%s source=save_project externalizedArtifacts=%s emptyBaselineArtifactsRemoved=%s",
+            project.project_id,
+            externalized_count,
+            empty_baseline_artifacts_removed,
+        )
     registry = _load_project_registry(settings)
     registry[project.project_id] = str(project_dir)
     _save_project_registry(settings, registry)
     path = project_dir / "project.json"
     path.write_text(json.dumps(project.model_dump(mode="json"), indent=2))
     _write_project_summary(project, path)
+    logger.info(
+        "TEMPORAL_PROJECT_PUBLICATION_SUMMARY_UPDATED projectId=%s path=%s",
+        project.project_id,
+        _project_summary_json_path(path),
+    )
     return project
 
 
@@ -2499,6 +4216,301 @@ def _apply_pair_response_to_milestone(
     ]
 
 
+_CANONICAL_MILESTONE_ARTIFACTS: tuple[tuple[str, str], ...] = (
+    ("automated_additions.geojson", "Automated additions footprint"),
+    ("automated_candidate_footprint.geojson", "Automated cumulative candidate footprint"),
+    ("automated_building_blocks.geojson", "Automated building-level blocks"),
+    ("additions.geojson", "Effective additions since previous milestone"),
+    ("effective_building_blocks.geojson", "Grouped blocks built from effective additions"),
+    ("effective_footprint.geojson", "Effective footprint at this milestone"),
+    ("building_change_buffer_10m.geojson", "Building-change buffer 10 m"),
+    ("building_change_buffer_15m.geojson", "Building-change buffer 15 m"),
+    ("building_change_buffer_20m.geojson", "Building-change buffer 20 m"),
+    ("cumulative_union.geojson", "Cumulative union up to this milestone"),
+    ("cumulative_convex_hull.geojson", "Convex hull of cumulative union up to this milestone"),
+    ("cumulative_growth_blocks.geojson", "Grouped blocks built from cumulative union"),
+    ("cumulative_growth_envelope.geojson", "Smoothed cumulative growth envelope"),
+)
+
+
+def _published_milestone_feature_counts(project_dir: Path, release_identifier: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    milestone_dir = project_dir / "milestones" / release_identifier
+    for filename, _description in _CANONICAL_MILESTONE_ARTIFACTS:
+        path = milestone_dir / filename
+        if not path.is_file():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            counts[filename] = -1
+            continue
+        features = payload.get("features") if isinstance(payload, dict) else None
+        counts[filename] = len(features) if isinstance(features, list) else -1
+    return counts
+
+
+def _ensure_existing_milestone_artifacts_registered(
+    *,
+    project: TemporalProject,
+    project_dir: Path,
+    milestone: TemporalMilestone,
+    response: RunResponse,
+    feature_counts: dict[str, int],
+) -> None:
+    artifact_by_path = {artifact.path: artifact for artifact in milestone.artifacts}
+    for filename, description in _CANONICAL_MILESTONE_ARTIFACTS:
+        path = project_dir / "milestones" / milestone.release_identifier / filename
+        if not path.is_file():
+            continue
+        artifact_path = str(path)
+        artifact_key = next((key for key, (_field, candidate, _description, _media) in TEMPORAL_LAYER_ARTIFACTS.items() if candidate == filename), filename.replace(".geojson", ""))
+        entry = _temporal_artifact_entry(
+            project_id=project.project_id,
+            release_identifier=milestone.release_identifier,
+            artifact_key=artifact_key,
+            path=path,
+            description=description,
+            media_type="application/geo+json",
+        )
+        if artifact_path in artifact_by_path:
+            milestone.artifacts = [
+                entry if artifact.path == artifact_path else artifact
+                for artifact in milestone.artifacts
+            ]
+        else:
+            milestone.artifacts.append(entry)
+            artifact_by_path[artifact_path] = entry
+        logger.info(
+            "TEMPORAL_PROJECT_PUBLICATION_LAYER_WRITTEN projectId=%s releaseIdentifier=%s filename=%s path=%s featureCount=%s source=existing_published_artifact",
+            project.project_id,
+            milestone.release_identifier,
+            filename,
+            path,
+            feature_counts.get(filename),
+        )
+
+    if response.downloadable_zip_path:
+        zip_path = Path(response.downloadable_zip_path)
+        if zip_path.is_file():
+            zip_artifact_name = f"{milestone.release_identifier}_export_bundle"
+            if all(artifact.name != zip_artifact_name for artifact in milestone.artifacts):
+                milestone.artifacts.append(
+                    TemporalArtifactEntry(
+                        name=zip_artifact_name,
+                        path=str(zip_path),
+                        media_type="application/zip",
+                        description="Pairwise request export bundle used to publish this milestone",
+                    )
+                )
+            logger.info(
+                "TEMPORAL_PROJECT_PUBLICATION_BUNDLE_REGISTERED projectId=%s releaseIdentifier=%s path=%s bytes=%s",
+                project.project_id,
+                milestone.release_identifier,
+                zip_path,
+                zip_path.stat().st_size,
+            )
+
+
+def publish_completed_tiled_request(
+    *,
+    request_id: str,
+    project_id: str,
+    target_release: str,
+    baseline_release: str | None,
+    settings: Settings,
+) -> dict[str, Any]:
+    """Publish an already completed tiled request through the temporal project finalizer.
+
+    This intentionally reuses the existing temporal project recompute and bundle refresh
+    path instead of teaching clients to read directly from runtime_cache/requests.
+    """
+
+    started_at = time.perf_counter()
+    logger.info(
+        "TEMPORAL_PROJECT_PUBLICATION_START projectId=%s requestId=%s targetRelease=%s baselineRelease=%s source=completed_tiled_request",
+        project_id,
+        request_id,
+        target_release,
+        baseline_release,
+    )
+    try:
+        request_dir = request_result_dir(settings, request_id)
+        required_paths = {
+            "run_response": request_dir / "run_response.json",
+            "building_change_polygons": request_dir / "building_change_polygons.geojson",
+            "prediction_change_mask": request_dir / "prediction_change_mask.tif",
+            "prediction_change_probability": request_dir / "prediction_change_probability.tif",
+        }
+        missing = [name for name, path in required_paths.items() if not path.is_file()]
+        if missing:
+            raise FileNotFoundError(f"Completed tiled request is missing required outputs: {', '.join(missing)}")
+
+        response = load_cached_response(settings, request_id)
+        if response is None or not response.success:
+            raise ValueError(f"Cached run response is not successful for request {request_id}.")
+        if not _has_features(response.change_polygons_geojson or response.new_buildings_geojson):
+            raise ValueError(f"Cached run response has no change polygons for request {request_id}.")
+        if response.downloadable_zip_path:
+            bundle_path = Path(response.downloadable_zip_path)
+        else:
+            bundle_path = request_dir / "export_bundle.zip"
+            if bundle_path.is_file():
+                response.downloadable_zip_path = str(bundle_path)
+                save_cached_response(settings, request_id, response)
+        logger.info(
+            "TEMPORAL_PROJECT_PUBLICATION_INPUTS_VALIDATED projectId=%s requestId=%s requestDir=%s exportBundle=%s",
+            project_id,
+            request_id,
+            request_dir,
+            response.downloadable_zip_path,
+        )
+
+        project = _load_project(
+            settings,
+            project_id,
+            hydrate_reference_imagery=False,
+            hydrate_buffer_layers=False,
+            refresh_derived_layers=False,
+            write_side_effects=False,
+        )
+        if project.aoi_geojson is None:
+            raise ValueError(f"Temporal project {project_id} has no AOI geometry.")
+        _sort_temporal_milestones(project)
+        target_index = next(
+            (index for index, milestone in enumerate(project.milestones) if milestone.release_identifier == target_release),
+            None,
+        )
+        if target_index is None:
+            raise ValueError(f"Target release {target_release} is not present in project {project_id}.")
+        if baseline_release is not None and project.milestones:
+            first_release = project.milestones[0].release_identifier
+            if first_release != baseline_release:
+                raise ValueError(
+                    f"Baseline release mismatch for {project_id}: expected first milestone {baseline_release}, found {first_release}."
+                )
+
+        project_dir = _resolve_project_dir(settings, project.project_id, project.project_dir)
+        target_milestone = project.milestones[target_index]
+        existing_feature_counts = _published_milestone_feature_counts(project_dir, target_release)
+        fast_path_ready = (
+            target_milestone.pair_request_hash == request_id
+            and existing_feature_counts.get("additions.geojson", 0) > 0
+            and existing_feature_counts.get("building_change_buffer_10m.geojson", 0) > 0
+        )
+        if fast_path_ready:
+            logger.info(
+                "TEMPORAL_PROJECT_PUBLICATION_USING_EXISTING_FINALIZER projectId=%s requestId=%s finalizer=existing_milestone_artifact_refresh",
+                project_id,
+                request_id,
+            )
+            _ensure_existing_milestone_artifacts_registered(
+                project=project,
+                project_dir=project_dir,
+                milestone=target_milestone,
+                response=response,
+                feature_counts=existing_feature_counts,
+            )
+            project.updated_at = _utc_now_iso()
+            project.project_dir = str(project_dir)
+            externalized_count, empty_baseline_artifacts_removed = _externalize_temporal_artifact_payloads_in_project(
+                project=project,
+                project_dir=project_dir,
+            )
+            if externalized_count or empty_baseline_artifacts_removed:
+                logger.info(
+                    "TEMPORAL_PROJECT_METADATA_PAYLOAD_EXTERNALIZED projectId=%s source=publication externalizedArtifacts=%s emptyBaselineArtifactsRemoved=%s",
+                    project.project_id,
+                    externalized_count,
+                    empty_baseline_artifacts_removed,
+                )
+            project_json_path = project_dir / "project.json"
+            payload = project.model_dump(mode="json")
+            project_json_path.write_text(json.dumps(payload, indent=2))
+            manifest_path = project_dir / "project_manifest.json"
+            manifest_path.write_text(json.dumps(payload, indent=2))
+            logger.info(
+                "TEMPORAL_PROJECT_PUBLICATION_MANIFEST_UPDATED projectId=%s path=%s",
+                project.project_id,
+                manifest_path,
+            )
+            _write_project_summary(project, project_json_path)
+            logger.info(
+                "TEMPORAL_PROJECT_PUBLICATION_SUMMARY_UPDATED projectId=%s path=%s",
+                project.project_id,
+                _project_summary_json_path(project_json_path),
+            )
+        else:
+            aoi_geometry = parse_aoi_geometry(project.aoi_geojson)
+            if project.milestones:
+                _normalize_baseline_milestone(project.milestones[0])
+                project = _recompute_project_outputs_from_index(project, aoi_geometry, 0, 0)
+            previous_cumulative = (
+                GeometryCollection()
+                if target_index == 0
+                else _geometry_from_geojson(project.milestones[target_index - 1].cumulative_union_geojson)
+            )
+            _apply_pair_response_to_milestone(
+                project.milestones[target_index],
+                response=response,
+                previous_cumulative=previous_cumulative,
+                aoi_geometry=aoi_geometry,
+                request_hash=request_id,
+            )
+            project = _recompute_project_outputs_from_index(project, aoi_geometry, target_index)
+            project.updated_at = _utc_now_iso()
+            logger.info(
+                "TEMPORAL_PROJECT_PUBLICATION_USING_EXISTING_FINALIZER projectId=%s requestId=%s finalizer=_refresh_project_bundle",
+                project_id,
+                request_id,
+            )
+            project = _refresh_project_bundle(project, settings)
+            project = _save_project(project, settings)
+        if settings.persistence_backend == "postgres":
+            from src.repositories.temporal_project_repository import save_project as save_project_record
+
+            save_project_record(project, settings=settings)
+
+        artifact_counts: dict[str, int] = {}
+        for artifact in target_milestone.artifacts:
+            path = Path(artifact.path)
+            if path.suffix.lower() == ".geojson" and path.is_file():
+                try:
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                    artifact_counts[path.name] = len(payload.get("features", [])) if isinstance(payload.get("features"), list) else 0
+                except Exception:
+                    artifact_counts[path.name] = -1
+        result = {
+            "project_id": project.project_id,
+            "request_id": request_id,
+            "target_release": target_release,
+            "project_dir": str(project_dir),
+            "project_json": str(project_dir / "project.json"),
+            "project_manifest": str(project_dir / "project_manifest.json"),
+            "project_summary": str(project_dir / "project_summary.json"),
+            "artifact_counts": artifact_counts,
+            "export_bundle_path": response.downloadable_zip_path,
+        }
+        logger.info(
+            "TEMPORAL_PROJECT_PUBLICATION_DONE projectId=%s requestId=%s targetRelease=%s artifactCount=%s durationMs=%s",
+            project_id,
+            request_id,
+            target_release,
+            len(target_milestone.artifacts),
+            round((time.perf_counter() - started_at) * 1000, 2),
+        )
+        return result
+    except Exception as exc:
+        logger.exception(
+            "TEMPORAL_PROJECT_PUBLICATION_FAILED projectId=%s requestId=%s targetRelease=%s error=%s",
+            project_id,
+            request_id,
+            target_release,
+            exc,
+        )
+        raise
+
+
 def _buffer_layer_geojson(buffer_layers_geojson: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
     if not buffer_layers_geojson:
         return None
@@ -2873,6 +4885,18 @@ def _timeline_requests(
 
 
 def list_temporal_projects(settings: Settings, *, include_cached_runs: bool = False) -> list[TemporalProjectSummary]:
+    if settings.persistence_backend == "postgres":
+        from src.repositories.temporal_project_repository import list_project_summaries
+
+        summaries = list_project_summaries(settings=settings)
+        if include_cached_runs:
+            seen_project_ids = {summary.project_id for summary in summaries}
+            for cached_run_summary in _iter_cached_run_projects(settings):
+                if cached_run_summary.project_id not in seen_project_ids:
+                    summaries.append(cached_run_summary)
+        summaries.sort(key=lambda item: item.updated_at, reverse=True)
+        return summaries
+
     summaries: list[TemporalProjectSummary] = []
     seen_project_ids: set[str] = set()
     registry = _load_project_registry(settings)

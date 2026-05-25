@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import dataclass
+from functools import lru_cache
+import hashlib
 from io import BytesIO
+import json
 import math
 import os
 from pathlib import Path
@@ -17,7 +20,7 @@ from PIL import Image
 import rasterio
 from affine import Affine
 from rasterio.errors import NotGeoreferencedWarning
-from rasterio.enums import Resampling
+from rasterio.enums import ColorInterp, Resampling
 from rasterio.warp import transform_bounds
 from rio_tiler.errors import TileOutsideBounds
 from rio_tiler.io import Reader
@@ -33,7 +36,8 @@ WEB_MERCATOR_INITIAL_RESOLUTION = 156_543.03392804097
 DEFAULT_TILE_SIZE = 256
 DEFAULT_MIN_ZOOM = 0
 DEFAULT_MAX_ZOOM = 22
-REFERENCE_COG_FORMAT_VERSION = 3
+REFERENCE_COG_FORMAT_VERSION = 4
+REFERENCE_TILE_RENDERER_VERSION = 3
 logger = logging.getLogger(__name__)
 
 
@@ -63,6 +67,8 @@ class TemporalReferenceCogInfo:
     cog_height: int | None = None
     is_tiled: bool | None = None
     has_overviews: bool | None = None
+    has_alpha_band: bool | None = None
+    has_internal_mask: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -110,6 +116,7 @@ class ReferenceTileRenderResult:
     output_png_has_alpha: bool = False
     transparent_pixel_count: int = 0
     opaque_pixel_count: int = 0
+    alpha_source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -289,6 +296,8 @@ def ensure_reference_imagery_cog(
     *,
     valid_mask_path: Path | None = None,
     aoi_geojson: dict[str, object] | None = None,
+    project_id: str | None = None,
+    release_identifier: str | None = None,
 ) -> Path:
     started_at = time.perf_counter()
     source_raster_path = source_raster_path.resolve()
@@ -302,6 +311,7 @@ def ensure_reference_imagery_cog(
             cog_stat = cog_path.stat()
             if (
                 metadata.format_version == REFERENCE_COG_FORMAT_VERSION
+                and metadata.has_alpha_band
                 and cog_stat.st_mtime_ns >= source_stat.st_mtime_ns
                 and (
                     valid_mask_mtime_ns is None
@@ -324,9 +334,14 @@ def ensure_reference_imagery_cog(
                     raise ValueError(f"Reference imagery source raster has no CRS: {source_raster_path}")
                 if _is_identity_transform(src.transform):
                     raise ValueError(f"Reference imagery source raster has identity transform: {source_raster_path}")
+                source_band_count = min(src.count, 3)
+                if source_band_count < 3:
+                    raise ValueError(f"Reference imagery source raster must have at least three RGB bands: {source_raster_path}")
                 profile = src.profile.copy()
                 profile.update(
                     driver="GTiff",
+                    count=4,
+                    nodata=None,
                     tiled=True,
                     blockxsize=DEFAULT_TILE_SIZE,
                     blockysize=DEFAULT_TILE_SIZE,
@@ -336,41 +351,70 @@ def ensure_reference_imagery_cog(
                     BIGTIFF="IF_SAFER",
                 )
                 with rasterio.open(temp_path, "w", **profile) as dst:
-                    for band_index in range(1, src.count + 1):
-                        dst.write(src.read(band_index), band_index)
-                    mask = src.dataset_mask()
+                    aoi_mask = None
                     if aoi_geojson is not None:
                         aoi_mask = np.where(rasterize_aoi_mask_like(source_raster_path, aoi_geojson), 255, 0).astype(np.uint8)
-                        if aoi_mask.shape == (src.height, src.width):
-                            mask = np.minimum(mask.astype(np.uint8), aoi_mask)
-                            logger.info(
-                                "REFERENCE_IMAGERY_ALPHA_MASK_APPLIED rasterPath=%s outputPath=%s alphaBand=true transparentOutsideAoiPixelCount=%s opaqueInsideAoiPixelCount=%s",
-                                source_raster_path,
-                                cog_path,
-                                int((aoi_mask == 0).sum()),
-                                int((aoi_mask > 0).sum()),
-                            )
-                    if valid_mask_path is not None and valid_mask_path.is_file():
-                        with rasterio.open(valid_mask_path) as valid_src:
-                            valid = valid_src.read(1)
-                            if valid.shape == (src.height, src.width):
-                                alpha_mask = np.where(valid > 0, 255, 0).astype(np.uint8)
-                                mask = np.minimum(mask.astype(np.uint8), alpha_mask)
-                                logger.info(
-                                    "REFERENCE_IMAGERY_ALPHA_MASK_APPLIED rasterPath=%s outputPath=%s alphaBand=true transparentOutsideAoiPixelCount=%s opaqueInsideAoiPixelCount=%s",
-                                    source_raster_path,
-                                    cog_path,
-                                    int((alpha_mask == 0).sum()),
-                                    int((alpha_mask > 0).sum()),
-                                )
-                    if mask.size:
-                        dst.write_mask(mask)
-                    if src.colorinterp:
-                        dst.colorinterp = src.colorinterp
+                        if aoi_mask.shape != (src.height, src.width):
+                            aoi_mask = None
+                    valid_src = rasterio.open(valid_mask_path) if valid_mask_path is not None and valid_mask_path.is_file() else None
+                    has_source_alpha = bool(src.count >= 4 and src.colorinterp and src.colorinterp[3] == ColorInterp.alpha)
+                    has_source_internal_mask = any("per_dataset" in [flag.name for flag in flags] for flags in src.mask_flag_enums)
+                    has_authoritative_mask = bool(has_source_alpha or has_source_internal_mask or valid_src is not None or aoi_mask is not None)
+                    fallback_used = False
+                    alpha_zero_count = 0
+                    alpha_255_count = 0
+                    try:
+                        for _block_index, window in src.block_windows(1):
+                            rgb = src.read([1, 2, 3], window=window)
+                            dst.write(rgb, indexes=[1, 2, 3], window=window)
+                            if src.count >= 4 and src.colorinterp and src.colorinterp[3] == ColorInterp.alpha:
+                                alpha = src.read(4, window=window).astype(np.uint8)
+                            else:
+                                alpha = src.dataset_mask(window=window).astype(np.uint8)
+                            if valid_src is not None:
+                                valid = valid_src.read(1, window=window)
+                                if valid.shape == alpha.shape:
+                                    alpha = np.minimum(alpha, np.where(valid > 0, 255, 0).astype(np.uint8))
+                            if aoi_mask is not None:
+                                row_start = int(window.row_off)
+                                row_stop = row_start + int(window.height)
+                                col_start = int(window.col_off)
+                                col_stop = col_start + int(window.width)
+                                alpha = np.minimum(alpha, aoi_mask[row_start:row_stop, col_start:col_stop])
+                            if not has_authoritative_mask and not np.any(alpha == 0):
+                                fallback_alpha = np.where(np.any(rgb != 0, axis=0), 255, 0).astype(np.uint8)
+                                if np.any(fallback_alpha == 0):
+                                    alpha = fallback_alpha
+                                    fallback_used = True
+                            alpha_zero_count += int((alpha == 0).sum())
+                            alpha_255_count += int((alpha == 255).sum())
+                            dst.write(alpha, 4, window=window)
+                    finally:
+                        if valid_src is not None:
+                            valid_src.close()
+                    dst.colorinterp = (ColorInterp.red, ColorInterp.green, ColorInterp.blue, ColorInterp.alpha)
+                    logger.info(
+                        "REFERENCE_COG_ALPHA_CONFIRMED project_id=%s release_identifier=%s cog_path=%s band_count=4 alpha_zero_count=%s alpha_255_count=%s duration_ms=%s",
+                        project_id or "unknown",
+                        release_identifier or "unknown",
+                        cog_path,
+                        alpha_zero_count,
+                        alpha_255_count,
+                        round((time.perf_counter() - started_at) * 1000, 2),
+                    )
+                    if fallback_used:
+                        logger.info(
+                            "REFERENCE_COG_MASK_FALLBACK_RGB_NONZERO_USED project_id=%s release_identifier=%s cog_path=%s band_count=4 alpha_zero_count=%s alpha_255_count=%s",
+                            project_id or "unknown",
+                            release_identifier or "unknown",
+                            cog_path,
+                            alpha_zero_count,
+                            alpha_255_count,
+                        )
                     if src.descriptions:
-                        dst.descriptions = src.descriptions
+                        dst.descriptions = tuple(list(src.descriptions[:3]) + ["Alpha"])
                     if src.units:
-                        dst.units = src.units
+                        dst.units = tuple(list(src.units[:3]) + [""])
                     dst.update_tags(
                         ns="building_change",
                         reference_cog_format_version=str(REFERENCE_COG_FORMAT_VERSION),
@@ -531,8 +575,10 @@ def resolve_temporal_reference_cog_cached(
         cog_width=metadata.width,
         cog_height=metadata.height,
         is_tiled=metadata.is_tiled,
-        has_overviews=metadata.has_overviews,
-    )
+            has_overviews=metadata.has_overviews,
+            has_alpha_band=metadata.has_alpha_band,
+            has_internal_mask=metadata.has_internal_mask,
+        )
     _REFERENCE_IMAGERY_METADATA_CACHE[cache_key] = _ReferenceImageryMetadataCacheEntry(
         info=info,
         cog_mtime=stat.st_mtime,
@@ -563,10 +609,60 @@ def _transparent_tile_png(tile_size: int) -> bytes:
     return output.getvalue()
 
 
+@lru_cache(maxsize=128)
+def _reference_cog_content_signature(cog_path: str, mtime_ns: int, size_bytes: int) -> str:
+    path = Path(cog_path)
+    sidecar_path = path.with_suffix(path.suffix + ".version.json")
+    sidecar_key = {"mtime_ns": mtime_ns, "size_bytes": size_bytes}
+    if sidecar_path.is_file():
+        try:
+            sidecar = json.loads(sidecar_path.read_text())
+            if (
+                int(sidecar.get("mtime_ns", -1)) == mtime_ns
+                and int(sidecar.get("size_bytes", -1)) == size_bytes
+                and isinstance(sidecar.get("content_signature"), str)
+            ):
+                return str(sidecar["content_signature"])
+        except Exception:
+            pass
+
+    digest = hashlib.sha256()
+    digest.update(str(mtime_ns).encode("ascii"))
+    digest.update(str(size_bytes).encode("ascii"))
+    sample_size = min(1024 * 1024, max(size_bytes, 0))
+    offsets = [0]
+    if size_bytes > sample_size:
+        offsets.append(max(0, (size_bytes // 2) - (sample_size // 2)))
+        offsets.append(max(0, size_bytes - sample_size))
+    with path.open("rb") as handle:
+        for offset in dict.fromkeys(offsets):
+            handle.seek(offset)
+            digest.update(handle.read(sample_size))
+    try:
+        metadata = _inspect_reference_cog(path)
+        digest.update(str(metadata.format_version).encode("ascii"))
+        digest.update(str(metadata.valid_mask_mtime_ns).encode("ascii"))
+        digest.update(str(metadata.has_alpha_band).encode("ascii"))
+        digest.update(str(metadata.has_internal_mask).encode("ascii"))
+        digest.update(str(metadata.bounds).encode("utf-8"))
+        digest.update(str(metadata.width).encode("ascii"))
+        digest.update(str(metadata.height).encode("ascii"))
+    except Exception:
+        pass
+    signature = digest.hexdigest()[:24]
+    try:
+        sidecar_path.write_text(json.dumps({**sidecar_key, "content_signature": signature}, indent=2))
+    except OSError:
+        pass
+    return signature
+
+
 def reference_imagery_version_token(cog_info: TemporalReferenceCogInfo) -> str:
-    stat_mtime = int(cog_info.cog_mtime) if cog_info.cog_mtime is not None else int(cog_info.cog_path.stat().st_mtime)
-    stat_size = int(cog_info.cog_size) if cog_info.cog_size is not None else int(cog_info.cog_path.stat().st_size)
-    return f"{stat_mtime}-{stat_size}"
+    stat = cog_info.cog_path.stat()
+    stat_mtime_ns = stat.st_mtime_ns
+    stat_size = int(cog_info.cog_size) if cog_info.cog_size is not None else int(stat.st_size)
+    signature = _reference_cog_content_signature(str(cog_info.cog_path), stat_mtime_ns, stat_size)
+    return f"{stat_mtime_ns}-{stat_size}-{signature}-renderer{REFERENCE_TILE_RENDERER_VERSION}"
 
 
 def _safe_cache_component(value: str) -> str:
@@ -687,6 +783,10 @@ def _encode_png_with_optional_alpha(rgb_or_rgba: np.ndarray, alpha: np.ndarray |
     return output.getvalue(), False, 0, int(rgb_or_rgba.shape[0] * rgb_or_rgba.shape[1])
 
 
+def _fallback_black_padding_alpha(rgb: np.ndarray) -> np.ndarray:
+    return np.where(np.any(rgb[:, :, :3] != 0, axis=2), 255, 0).astype(np.uint8)
+
+
 def render_reference_tile_png_cached(
     *,
     project_id: str,
@@ -698,12 +798,12 @@ def render_reference_tile_png_cached(
 ) -> ReferenceTileRenderResult:
     total_started_at = time.perf_counter()
     stat = cog_info.cog_path.stat()
+    cog_version = reference_imagery_version_token(cog_info)
     cache_key = (
         project_id,
         release_identifier,
         str(cog_info.cog_path),
-        stat.st_mtime,
-        stat.st_size,
+        cog_version,
         z,
         x,
         y,
@@ -733,6 +833,7 @@ def render_reference_tile_png_cached(
             output_png_has_alpha=bool(cached_meta.get("output_png_has_alpha", False)),
             transparent_pixel_count=int(cached_meta.get("transparent_pixel_count", 0)),
             opaque_pixel_count=int(cached_meta.get("opaque_pixel_count", 0)),
+            alpha_source=str(cached_meta.get("alpha_source")) if cached_meta.get("alpha_source") else None,
         )
 
     warning_count = 0
@@ -743,6 +844,7 @@ def render_reference_tile_png_cached(
     output_png_has_alpha = False
     transparent_pixel_count = 0
     opaque_pixel_count = 0
+    alpha_source: str | None = None
     open_started_at = time.perf_counter()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always", NotGeoreferencedWarning)
@@ -761,8 +863,22 @@ def render_reference_tile_png_cached(
                 alpha = None
                 if dataset_has_alpha_band:
                     alpha = image_data.array[3].astype(np.uint8)
+                    alpha_source = "dataset_alpha"
                 elif image_data.mask is not None:
                     alpha = np.asarray(image_data.mask, dtype=np.uint8)
+                    alpha_source = "dataset_mask"
+                if alpha is None:
+                    alpha = np.full((rgb.shape[0], rgb.shape[1]), 255, dtype=np.uint8)
+                    alpha_source = "opaque_default"
+                alpha_has_transparency = bool(np.any(alpha == 0))
+                has_authoritative_alpha = bool(dataset_has_alpha_band or cog_info.has_internal_mask)
+                if not alpha_has_transparency and not has_authoritative_alpha:
+                    fallback_alpha = _fallback_black_padding_alpha(rgb)
+                    fallback_transparent_count = int((fallback_alpha == 0).sum())
+                    if fallback_transparent_count > 0:
+                        alpha = fallback_alpha
+                        alpha_source = "black_padding_without_mask"
+                        tile_has_mask = True
                 tile_bytes, output_png_has_alpha, transparent_pixel_count, opaque_pixel_count = _encode_png_with_optional_alpha(rgb, alpha)
                 encode_ms = round((time.perf_counter() - encode_started_at) * 1000, 2)
         except TileOutsideBounds:
@@ -774,6 +890,7 @@ def render_reference_tile_png_cached(
             output_png_has_alpha = True
             transparent_pixel_count = cog_info.tile_size * cog_info.tile_size
             opaque_pixel_count = 0
+            alpha_source = "outside_bounds"
         warning_count = sum(1 for item in caught if issubclass(item.category, NotGeoreferencedWarning))
 
     _cache_tile_bytes(
@@ -787,6 +904,7 @@ def render_reference_tile_png_cached(
             "output_png_has_alpha": output_png_has_alpha,
             "transparent_pixel_count": transparent_pixel_count,
             "opaque_pixel_count": opaque_pixel_count,
+            "alpha_source": alpha_source,
         },
     )
     return ReferenceTileRenderResult(
@@ -808,6 +926,7 @@ def render_reference_tile_png_cached(
         output_png_has_alpha=output_png_has_alpha,
         transparent_pixel_count=transparent_pixel_count,
         opaque_pixel_count=opaque_pixel_count,
+        alpha_source=alpha_source,
     )
 
 
@@ -842,7 +961,7 @@ def build_reference_tilejson_payload_cached(
     tiles_url: str,
 ) -> tuple[dict[str, object], bool]:
     stat = cog_info.cog_path.stat()
-    cache_key = (project_id, release_identifier, str(cog_info.cog_path), stat.st_mtime_ns, stat.st_size)
+    cache_key = (project_id, release_identifier, str(cog_info.cog_path), reference_imagery_version_token(cog_info))
     cached = _TILEJSON_PAYLOAD_CACHE.get(cache_key)
     if cached:
         return cached.payload, True

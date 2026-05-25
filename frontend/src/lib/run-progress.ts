@@ -1,5 +1,23 @@
 export type RunPhase = "idle" | "queued" | "running" | "complete" | "error";
 
+export interface WaybackTileProgressDetails {
+  releaseIdentifier: string | null;
+  preferredZoom: number | null;
+  effectiveZoom: number | null;
+  fallbackApplied: boolean;
+  processedTileCount: number;
+  totalTileCount: number;
+  cacheHitCount: number;
+  downloadedTileCount: number;
+  missingTileCount: number;
+  failedTileCount: number;
+  retryCount: number;
+  throttleCount: number;
+  timeoutCount: number;
+  tileRatePerSec: number | null;
+  etaSeconds: number | null;
+}
+
 export interface RunProgressState {
   phase: RunPhase;
   percent: number;
@@ -10,6 +28,7 @@ export interface RunProgressState {
   eventId: string | null;
   rawEvent: string | null;
   updatedAt: number | null;
+  tileDetails: WaybackTileProgressDetails | null;
 }
 
 export interface PipelineStage {
@@ -71,6 +90,7 @@ export function createIdleRunProgress(): RunProgressState {
     eventId: null,
     rawEvent: null,
     updatedAt: null,
+    tileDetails: null,
   };
 }
 
@@ -85,6 +105,7 @@ export function createActiveRunProgress(): RunProgressState {
     eventId: null,
     rawEvent: null,
     updatedAt: Date.now(),
+    tileDetails: null,
   };
 }
 
@@ -99,6 +120,7 @@ export function createCompletedRunProgress(): RunProgressState {
     eventId: null,
     rawEvent: "process_completed",
     updatedAt: Date.now(),
+    tileDetails: null,
   };
 }
 
@@ -113,6 +135,7 @@ export function createErrorRunProgress(message: string): RunProgressState {
     eventId: null,
     rawEvent: "error",
     updatedAt: Date.now(),
+    tileDetails: null,
   };
 }
 

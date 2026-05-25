@@ -1,4 +1,5 @@
 import { getFastApiBaseUrl } from "@/lib/env";
+import { normalizeTileTemplatePlaceholders } from "@/lib/tile-template";
 
 export function buildBackendFileUrl(_backendUrl: string, filePath: string): string {
   const params = new URLSearchParams({ path: filePath });
@@ -13,7 +14,7 @@ export function resolveBackendUrl(backendUrl: string, value: string | null | und
     return value;
   }
   if (/^https?:\/\//i.test(value)) {
-    return value;
+    return normalizeTileTemplatePlaceholders(value);
   }
-  return new URL(value, backendUrl).toString();
+  return normalizeTileTemplatePlaceholders(new URL(value, backendUrl).toString());
 }

@@ -27,7 +27,7 @@ def list_jobs(
     status_filter: str | None = Query(default=None, alias="status"),
     job_kind: str | None = Query(default=None),
     settings: Settings = Depends(get_app_settings),
-) -> list[JobResponse]:
+) -> list[dict[str, object]]:
     from src.jobs.service import list_job_responses
 
     return list_job_responses(settings=settings, limit=limit, status=status_filter, job_kind=job_kind)

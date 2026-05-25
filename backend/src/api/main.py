@@ -4,9 +4,11 @@ import logging
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import PlainTextResponse
 
 from src.api.routes import backends, cache, detection, dev, files, health, jobs, releases, temporal_projects
 from src.config import get_settings
+from src.domain.wayback_metrics import render_prometheus_text
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +36,14 @@ def create_fastapi_app() -> FastAPI:
     app.include_router(dev.router, prefix="/api/dev", tags=["dev"])
     app.include_router(cache.router, prefix="/api/cache", tags=["cache"])
     app.include_router(files.router, prefix="/api/files", tags=["files"])
+
+    @app.get("/metrics", include_in_schema=False)
+    def metrics() -> PlainTextResponse:
+        return PlainTextResponse(
+            render_prometheus_text(),
+            media_type="text/plain; version=0.0.4; charset=utf-8",
+        )
+
     logger.info("BACKEND_STARTUP_STAGE routes_registered")
     logger.info("BACKEND_STARTUP_STAGE app_created")
 

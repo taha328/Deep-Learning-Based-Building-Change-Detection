@@ -19,9 +19,21 @@ export interface TemporalReferenceImageryPresentation {
   tileSize: number;
 }
 
+export interface TemporalOutputArtifactPresentation {
+  key: string;
+  featureCount: number | null;
+  sizeBytes: number | null;
+  bbox: [number, number, number, number] | null;
+  artifactUrl: string | null;
+  tilejsonUrl: string | null;
+  tilesUrlTemplate: string | null;
+  vectorSourceLayer: string | null;
+}
+
 export interface TemporalAddedOverlayPresentation {
   releaseIdentifier: string;
   status: "pending" | "validated" | "complete" | "error" | null;
+  artifacts: Record<string, TemporalOutputArtifactPresentation>;
   additions: FeatureCollection;
   buffer10m: FeatureCollection;
   buffer15m: FeatureCollection;

@@ -59,13 +59,13 @@ def _validate_thresholds(request: ValidationRequest, settings: Settings) -> tupl
 
 def _pixel_area_estimate_m2(normalized_aoi: dict, settings: Settings) -> float:
     geometry = parse_aoi_geometry(normalized_aoi)
-    x_min, _, y_min, _ = tile_range_for_bbox(bounds_dict(geometry), settings.zoom)
-    pixel_width_m, pixel_height_m = pixel_size_m_at_tile(x_min, y_min, settings.zoom)
+    x_min, _, y_min, _ = tile_range_for_bbox(bounds_dict(geometry), settings.wayback_preferred_inference_zoom)
+    pixel_width_m, pixel_height_m = pixel_size_m_at_tile(x_min, y_min, settings.wayback_preferred_inference_zoom)
     return max(pixel_width_m * pixel_height_m, 0.01)
 
 
 def _estimated_inference_patch_count(bbox: dict[str, float], settings: Settings) -> int:
-    x_min, x_max, y_min, y_max = tile_range_for_bbox(bbox, settings.zoom)
+    x_min, x_max, y_min, y_max = tile_range_for_bbox(bbox, settings.wayback_preferred_inference_zoom)
     width = (x_max - x_min + 1) * 256
     height = (y_max - y_min + 1) * 256
     return estimate_patch_count(height, width, settings.patch_size, settings.stride)
@@ -120,7 +120,7 @@ def validate_request(
 
     area_m2 = geodesic_area_m2(geometry)
     bbox = bounds_dict(geometry)
-    tile_count = scene_tile_count(bbox, settings.zoom)
+    tile_count = scene_tile_count(bbox, settings.wayback_preferred_inference_zoom)
     mapbox_tile_count = tile_count
     mapbox_zoom = min(settings.mapbox_current_imagery_default_zoom, settings.mapbox_current_imagery_max_zoom)
     if uses_mapbox_current:
@@ -173,6 +173,12 @@ def validate_request(
             f"guidance of {mode_limits.max_inference_patches_per_scene}. The request remains allowed, "
             "but local inference may take longer."
         )
+    heavy_batch = tile_count > settings.wayback_heavy_batch_tile_threshold
+    if heavy_batch:
+        warnings.append(
+            f"AOI requires {tile_count} Wayback tiles per date at z={settings.wayback_preferred_inference_zoom}; "
+            "this is classified as a heavy imagery download batch."
+        )
 
     if request.mode == "fast_preview" and full_ok and not preview_ok:
         warnings.append("AOI fits Full Run but exceeds Fast Preview. Switch modes to continue.")
@@ -195,6 +201,15 @@ def validate_request(
         warnings=warnings,
         blocking_errors=blocking_errors,
         recommended_mode=recommended_mode,
+        details={
+            "preferred_zoom": settings.wayback_preferred_inference_zoom,
+            "min_zoom": settings.min_zoom,
+            "tile_count_per_scene": tile_count,
+            "inference_patch_count": patch_count,
+            "heavy_batch": heavy_batch,
+            "heavy_batch_tile_threshold": settings.wayback_heavy_batch_tile_threshold,
+            "recommended_tile_concurrency": settings.wayback_tile_max_concurrency,
+        },
     )
 
     if blocking_errors:
@@ -205,6 +220,11 @@ def validate_request(
         "inference_backend": settings.inference_backend,
         "patch_size": settings.patch_size,
         "stride": settings.stride,
+        "inference_tiled_mode_auto": settings.inference_tiled_mode_auto,
+        "inference_tile_size": settings.inference_tile_size,
+        "inference_tile_overlap": settings.inference_tile_overlap,
+        "inference_max_in_memory_pixels": settings.inference_max_in_memory_pixels,
+        "inference_heavy_batch_tile_threshold": settings.inference_heavy_batch_tile_threshold,
         "aoi_geojson": normalized,
         "t1_release": t1_release.identifier,
         "t2_release": t2_release.identifier,

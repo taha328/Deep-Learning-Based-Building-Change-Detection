@@ -79,9 +79,18 @@ def _cancel_if_requested(job_id: str, settings: Settings) -> None:
             raise JobCancelledError("Job cancelled at a safe phase boundary.")
 
 
-def _publish_progress(self: Any, job_id: str, progress: int, stage: str, message: str, settings: Settings) -> None:
+def _publish_progress(
+    self: Any,
+    job_id: str,
+    progress: int,
+    stage: str,
+    message: str,
+    settings: Settings,
+    *,
+    details: dict[str, object] | None = None,
+) -> None:
     _cancel_if_requested(job_id, settings)
-    update_progress(job_id, progress, stage, message, settings=settings)
+    update_progress(job_id, progress, stage, message, details=details, settings=settings)
 
 
 def _artifact_summaries(items: list[Any]) -> list[dict[str, Any]]:
@@ -180,7 +189,28 @@ def run_temporal_project_job(self, job_id: str, project_id: str, settings_payloa
         _publish_progress(self, job_id, 12, "preflight", "Validating project state before the temporal run.", settings)
         timer.mark("preflight")
         _publish_progress(self, job_id, 25, "fetching_imagery", "Fetching or reusing milestone imagery.", settings)
-        response = run_temporal_project_api(project_id, settings=settings, x_ip_token=None)
+
+        def progress_callback(fraction: float, message: str, details: dict[str, object] | None = None) -> None:
+            stage = "inference"
+            if fraction < 0.35:
+                stage = "fetching_imagery"
+            elif fraction < 0.65:
+                stage = "inference"
+            elif fraction < 0.8:
+                stage = "vectorizing"
+            elif fraction < 0.92:
+                stage = "building_buffers"
+            else:
+                stage = "saving_artifacts"
+            progress_value = max(25, min(92, int(round(fraction * 100))))
+            _publish_progress(self, job_id, progress_value, stage, message, settings, details=details)
+
+        response = run_temporal_project_api(
+            project_id,
+            settings=settings,
+            progress_callback=progress_callback,
+            x_ip_token=None,
+        )
         timer.mark("processing")
         _publish_progress(self, job_id, 90, "saving_artifacts", "Saving temporal outputs and generated artifacts.", settings)
         result_run_id = _latest_temporal_run_id(response.project.project_id, settings) if response.success else None
@@ -234,7 +264,7 @@ def run_detection_job(self, job_id: str, request_payload: dict[str, Any], settin
         timer.mark("preflight")
         _publish_progress(self, job_id, 25, "fetching_imagery", "Fetching or reusing source imagery.", settings)
 
-        def progress_callback(fraction: float, message: str) -> None:
+        def progress_callback(fraction: float, message: str, details: dict[str, object] | None = None) -> None:
             stage = "inference"
             if fraction < 0.35:
                 stage = "fetching_imagery"
@@ -247,7 +277,7 @@ def run_detection_job(self, job_id: str, request_payload: dict[str, Any], settin
             else:
                 stage = "saving_artifacts"
             progress_value = max(25, min(92, int(round(fraction * 100))))
-            _publish_progress(self, job_id, progress_value, stage, message, settings)
+            _publish_progress(self, job_id, progress_value, stage, message, settings, details=details)
 
         response = run_detection_api(
             request,

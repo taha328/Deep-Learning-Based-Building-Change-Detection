@@ -8,20 +8,23 @@ import warnings
 
 from fastapi.testclient import TestClient
 import numpy as np
+from osgeo import ogr
 from PIL import Image
 from pydantic import ValidationError
 import pytest
 import rasterio
 from affine import Affine
 from rasterio.errors import NotGeoreferencedWarning
+from rasterio.enums import ColorInterp
 from rasterio.transform import from_origin
 
 from src.api.deps import get_app_settings
 from src.api.main import app
 from src.config import Settings
 from src.domain.tiling import tile_range_for_bbox
-from src.schemas import TemporalProject, TemporalReferenceImagery
+from src.schemas import TemporalMilestone, TemporalProject, TemporalReferenceImagery
 from src.services.temporal_projects import get_temporal_project, repair_temporal_project_reference_imagery, save_temporal_project
+import src.services.temporal_projects as temporal_projects_service
 from src.utils.geometry import bounds_dict, parse_aoi_geometry
 import src.services.temporal_reference_imagery as reference_imagery_service
 from src.services.temporal_reference_imagery import (
@@ -55,6 +58,27 @@ def _write_rgb_raster(path: Path) -> None:
         dtype="uint8",
         crs="EPSG:3857",
         transform=from_origin(-1000.0, 1000.0, 10.0, 10.0),
+    ) as dst:
+        dst.write(data)
+
+
+def _write_black_padded_web_mercator_raster(path: Path) -> None:
+    half_world = 20_037_508.342789244
+    resolution = (2 * half_world) / 256
+    data = np.zeros((3, 256, 256), dtype=np.uint8)
+    data[0, 96:160, 96:160] = 24
+    data[1, 96:160, 96:160] = 120
+    data[2, 96:160, 96:160] = 200
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        width=256,
+        height=256,
+        count=3,
+        dtype="uint8",
+        crs="EPSG:3857",
+        transform=from_origin(-half_world, half_world, resolution, resolution),
     ) as dst:
         dst.write(data)
 
@@ -242,6 +266,130 @@ def _clear_dependency_overrides() -> None:
     app.dependency_overrides.clear()
 
 
+def test_temporal_artifact_metadata_exposes_qgis_geojson_url_and_preserves_mvt(caplog, monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(temporal_projects_service, "TEMPORAL_VECTOR_TILE_METADATA_THRESHOLD_BYTES", 1)
+    settings = Settings(runtime_cache_dir=tmp_path / "runtime_cache", persistence_backend="filesystem")
+    project_id = "temporal-qgis-artifacts"
+    project_dir = settings.temporal_projects_dir / project_id
+    milestone_dir = project_dir / "milestones" / "WB_2026_R04"
+    milestone_dir.mkdir(parents=True, exist_ok=True)
+    additions_path = milestone_dir / "additions.geojson"
+    additions_path.write_text(
+        json.dumps(
+            {
+                "type": "FeatureCollection",
+                "features": [
+                    {
+                        "type": "Feature",
+                        "geometry": _test_aoi(),
+                        "properties": {"layer": "additions"},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    project = TemporalProject(
+        project_id=project_id,
+        name="QGIS artifact compatibility",
+        project_dir=str(project_dir),
+        aoi_geojson=_test_aoi(),
+        created_at="2026-01-01T00:00:00Z",
+        updated_at="2026-01-01T00:00:00Z",
+        milestones=[
+            TemporalMilestone(release_identifier="WB_2020_R04", release_date="2020-03-23"),
+            TemporalMilestone(release_identifier="WB_2026_R04", release_date="2026-04-30"),
+        ],
+    )
+    (project_dir / "project.json").write_text(json.dumps(project.model_dump(mode="json"), indent=2), encoding="utf-8")
+
+    client = _client_with_settings(settings)
+    try:
+        response = client.get(f"/api/temporal-projects/{project_id}")
+        assert response.status_code == 200
+        payload = response.json()
+        target = next(milestone for milestone in payload["milestones"] if milestone["release_identifier"] == "WB_2026_R04")
+        additions = next(artifact for artifact in target["artifacts"] if artifact["key"] == "additions")
+
+        assert additions["artifact_url"].endswith("/artifacts/additions")
+        assert additions["geojson_url"].endswith("/artifacts/additions.geojson")
+        assert additions["download_url"] == additions["geojson_url"]
+        assert additions["gpkg_url"].endswith("/artifacts/additions.gpkg")
+        assert additions["qgis_preferred_url"] == additions["gpkg_url"]
+        assert additions["qgis_preferred_format"] == "gpkg"
+        assert additions["qgis_compatible"] is True
+        assert additions["qgis_cache_key"]
+        assert additions["source_mtime_ns"]
+        assert additions["tilejson_url"].endswith("/artifacts/additions/tilejson.json")
+        assert additions["tiles_url_template"].endswith("/artifacts/additions/tiles/{z}/{x}/{y}.mvt")
+
+        artifact_response = client.get(additions["geojson_url"])
+        assert artifact_response.status_code == 200
+        assert artifact_response.headers["content-type"].startswith("application/geo+json")
+        caplog.clear()
+        with caplog.at_level("INFO"):
+            gpkg_response = client.get(additions["gpkg_url"])
+        assert gpkg_response.status_code == 200
+        assert gpkg_response.headers["content-type"].startswith("application/geopackage+sqlite3")
+        assert "QGIS_GPKG_SOURCE_RESOLVED" in caplog.text
+        assert "QGIS_GPKG_REQUEST_START" in caplog.text
+        assert "PROJECT_LAYER_ARTIFACT_LAZY_FETCH" not in caplog.text
+        gpkg_path = next((settings.runtime_cache_dir / "qgis_artifacts" / project_id / "WB_2026_R04" / "additions").glob("*/*.gpkg"))
+        datasource = ogr.Open(str(gpkg_path))
+        assert datasource is not None
+        assert datasource.GetLayerByName("results") is not None
+    finally:
+        _clear_dependency_overrides()
+
+
+def test_empty_baseline_artifact_does_not_expose_or_generate_qgis_gpkg(caplog, tmp_path: Path) -> None:
+    settings = Settings(runtime_cache_dir=tmp_path / "runtime_cache", persistence_backend="filesystem")
+    project_id = "temporal-empty-baseline-qgis"
+    project_dir = settings.temporal_projects_dir / project_id
+    milestone_dir = project_dir / "milestones" / "WB_2020_R04"
+    milestone_dir.mkdir(parents=True, exist_ok=True)
+    (milestone_dir / "additions.geojson").write_text(
+        json.dumps({"type": "FeatureCollection", "features": []}),
+        encoding="utf-8",
+    )
+    project = TemporalProject(
+        project_id=project_id,
+        name="Empty baseline",
+        project_dir=str(project_dir),
+        aoi_geojson=_test_aoi(),
+        created_at="2026-01-01T00:00:00Z",
+        updated_at="2026-01-01T00:00:00Z",
+        milestones=[TemporalMilestone(release_identifier="WB_2020_R04", release_date="2020-03-23")],
+    )
+    (project_dir / "project.json").write_text(json.dumps(project.model_dump(mode="json"), indent=2), encoding="utf-8")
+
+    client = _client_with_settings(settings)
+    try:
+        with caplog.at_level("INFO"):
+            response = client.get(f"/api/temporal-projects/{project_id}")
+        assert response.status_code == 200
+        payload = response.json()
+        baseline = payload["milestones"][0]
+        additions = next((artifact for artifact in baseline["artifacts"] if artifact["key"] == "additions"), None)
+        assert additions is None or additions["gpkg_url"] is None
+        assert additions is None or additions["qgis_preferred_url"] is None
+        assert additions is None or additions["qgis_preferred_format"] is None
+        assert "QGIS_GPKG_METADATA_SKIPPED_EMPTY" in caplog.text
+
+        caplog.clear()
+        with caplog.at_level("INFO"):
+            gpkg_response = client.get(
+                f"/api/temporal-projects/{project_id}/milestones/WB_2020_R04/artifacts/additions.gpkg"
+            )
+        assert gpkg_response.status_code == 404
+        assert not list((settings.runtime_cache_dir / "qgis_artifacts").glob("**/*.gpkg"))
+        assert "QGIS_GPKG_REQUEST_START" not in caplog.text
+        assert "PROJECT_LAYER_ARTIFACT_LAZY_FETCH" not in caplog.text
+        assert "QGIS_GPKG_SOURCE_RESOLVED" in caplog.text
+    finally:
+        _clear_dependency_overrides()
+
+
 def test_build_temporal_reference_imagery_prefers_raster_tiles_when_source_raster_exists(tmp_path: Path) -> None:
     project_dir = tmp_path / "project"
     source_raster_path = tmp_path / "source.tif"
@@ -320,6 +468,20 @@ def test_render_reference_tile_png_returns_png_bytes(tmp_path: Path) -> None:
 
     assert rendered.format == "PNG"
     assert rendered.size == (256, 256)
+    assert rendered.mode in {"RGBA", "RGB"}
+
+
+def test_render_reference_tile_png_transparently_encodes_black_padding_without_mask(tmp_path: Path) -> None:
+    raster_path = tmp_path / "black_padded.tif"
+    _write_black_padded_web_mercator_raster(raster_path)
+
+    tile_bytes = render_reference_tile_png(raster_path, 0, 0, 0, tile_size=256)
+    rendered = Image.open(BytesIO(tile_bytes)).convert("RGBA")
+    rgba = np.array(rendered)
+    alpha = rgba[:, :, 3]
+
+    assert int(alpha[0, 0]) == 0
+    assert int(alpha[128, 128]) == 255
 
 
 def test_render_reference_tile_png_cached_hits_process_cache(tmp_path: Path) -> None:
@@ -387,10 +549,35 @@ def test_ensure_reference_imagery_cog_applies_valid_mask_as_alpha(tmp_path: Path
     ensure_reference_imagery_cog(source_raster_path, cog_path, valid_mask_path=valid_mask_path)
 
     with rasterio.open(cog_path) as src:
+        assert src.count == 4
+        assert src.colorinterp[3] == ColorInterp.alpha
         mask = src.dataset_mask()
         assert mask.shape == (512, 512)
         assert int(mask[0, 0]) == 0
         assert int(mask[256, 256]) == 255
+        alpha = src.read(4)
+        assert int(alpha[0, 0]) == 0
+        assert int(alpha[256, 256]) == 255
+
+
+def test_ensure_reference_imagery_cog_repairs_rgb_black_padding_to_alpha(tmp_path: Path, caplog) -> None:
+    source_raster_path = tmp_path / "black_padded.tif"
+    cog_path = tmp_path / "cog" / "reference_imagery_cog.tif"
+    _write_black_padded_web_mercator_raster(source_raster_path)
+
+    with caplog.at_level("INFO"):
+        ensure_reference_imagery_cog(source_raster_path, cog_path)
+
+    with rasterio.open(cog_path) as src:
+        assert src.count == 4
+        assert src.colorinterp[3] == ColorInterp.alpha
+        alpha = src.read(4)
+        assert int(alpha[0, 0]) == 0
+        assert int(alpha[128, 128]) == 255
+        assert src.crs.to_string() == "EPSG:3857"
+        assert src.width == 256
+        assert src.height == 256
+    assert "REFERENCE_COG_MASK_FALLBACK_RGB_NONZERO_USED" in caplog.text
 
 
 def test_ensure_reference_imagery_cog_rejects_ungeoreferenced_source(tmp_path: Path) -> None:
@@ -1204,7 +1391,9 @@ def test_tilejson_includes_version_token_and_is_revalidatable(tmp_path: Path) ->
         _clear_dependency_overrides()
 
     assert response.status_code == 200
-    assert response.headers["Cache-Control"] == "public, max-age=0, must-revalidate"
+    assert response.headers["Cache-Control"] == "public, max-age=300, stale-while-revalidate=86400"
+    assert response.headers["ETag"]
     payload = response.json()
     assert len(payload["tiles"]) == 1
     assert "?v=" in payload["tiles"][0]
+    assert "renderer2" in payload["tiles"][0]

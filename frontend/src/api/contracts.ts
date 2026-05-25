@@ -123,6 +123,7 @@ export const validationResponseSchema = z.object({
   warnings: z.array(z.string()),
   blocking_errors: z.array(z.string()),
   recommended_mode: modeSchema,
+  details: z.record(z.any()).default({}),
 });
 
 export const previewImagesSchema = z.object({
@@ -146,6 +147,23 @@ export const artifactSchema = z.object({
   path: z.string(),
   media_type: z.string(),
   description: z.string(),
+  key: z.string().nullable().optional(),
+  feature_count: z.number().int().nullable().optional(),
+  size_bytes: z.number().int().nullable().optional(),
+  source_mtime_ns: z.number().int().nullable().optional(),
+  qgis_cache_key: z.string().nullable().optional(),
+  bbox: z.array(z.number()).nullable().optional(),
+  sha256: z.string().nullable().optional(),
+  artifact_url: z.string().nullable().optional(),
+  geojson_url: z.string().nullable().optional(),
+  download_url: z.string().nullable().optional(),
+  gpkg_url: z.string().nullable().optional(),
+  qgis_preferred_url: z.string().nullable().optional(),
+  qgis_preferred_format: z.string().nullable().optional(),
+  qgis_compatible: z.boolean().default(false),
+  tilejson_url: z.string().nullable().optional(),
+  tiles_url_template: z.string().nullable().optional(),
+  vector_source_layer: z.string().nullable().optional(),
 });
 
 export const summarySchema = z.object({
@@ -234,6 +252,7 @@ export const jobResponseSchema = z.object({
   result_run_id: z.string().nullable().optional(),
   raw_request: z.record(z.any()).nullable().optional(),
   raw_result: z.record(z.any()).nullable().optional(),
+  progress_details: z.record(z.any()).nullable().optional(),
   cancel_requested: z.boolean().default(false),
   created_at: z.string(),
   updated_at: z.string(),
