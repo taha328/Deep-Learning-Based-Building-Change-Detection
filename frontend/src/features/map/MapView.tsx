@@ -10,14 +10,30 @@ import { useI18n } from "@/lib/i18n";
 import { Input } from "@/components/ui/input";
 import { createOpenStreetMapStyle, mapboxProvider } from "@/lib/basemap";
 import { buildBackendFileUrl } from "@/lib/backend-files";
+import { isDevClientLogEnabled } from "@/lib/client-log-config";
 import { relayClientLog } from "@/lib/client-log-relay";
 import { cn } from "@/lib/utils";
 import {
+  buildTemporalLayerLabels,
+  getIncludedAdditionReleasesForCumulativeLayer,
+  getIncludedTemporalMilestones,
+  getTemporalLayerExpectedReleases,
   getMilestoneColorMap,
   getTemporalLayerPaint,
+  temporalAdditionVisibilityReason,
   usesGeneratedMilestoneColors,
+  type IncludedTemporalMilestone,
+  type TemporalLayerPlanningKey,
+  type TemporalMilestoneColorInput,
   type TemporalStyledLayerKind,
 } from "@/features/map/temporal-layer-colors";
+import {
+  dedupeStable,
+  shouldApplyMapValue,
+  shouldSkipPostVisibilityLayerWork,
+  shouldSkipReferenceRegistration,
+  stableHash,
+} from "@/features/map/temporal-map-performance";
 import type {
   TemporalAddedOverlayPresentation,
   ReferenceLayerPresentation,
@@ -59,6 +75,7 @@ type LayerToggleKey =
   | "buffer15m"
   | "buffer20m"
   | "temporalAdditions"
+  | "selectedMilestoneAdditions"
   | "temporalCumulativeBuffer10m"
   | "temporalCumulativeBuffer15m"
   | "temporalCumulativeBuffer20m"
@@ -216,9 +233,84 @@ type TemporalOutputLayerSyncResult = {
   hiddenLayerIds: string[];
 };
 
+type TemporalReleaseSetByKind = Partial<Record<TemporalAddedLayerKind, string[]>>;
+
+type TemporalLayerContractSnapshot = {
+  uiLabel: string;
+  layerKey: LayerToggleKey | "allNewBuildings" | "selectedAdditions";
+  artifactKey: string;
+  mode: "selected" | "cumulative" | "selected_source_cumulative_artifact";
+  expectedReleases: string[];
+  registeredSources: string[];
+  registeredLayers: string[];
+  visibleLayers: string[];
+  unexpectedVisibleReleases: string[];
+  unexpectedRegisteredReleases: string[];
+};
+
+type TemporalRuntimeDebugSnapshot = {
+  projectId: string;
+  selectedRelease: string;
+  enabledLayerKeys: LayerToggleKey[];
+  layerContracts: TemporalLayerContractSnapshot[];
+  bufferLayers: Array<{
+    layerId: string;
+    lineLayerId: string;
+    sourceId: string;
+    layerKey: LayerToggleKey;
+    artifactKey: string;
+    releaseIdentifier: string;
+    expectedColor: string;
+    actualFillColor: unknown;
+    actualLineColor: unknown;
+    visibility: string | null;
+    lineVisibility: string | null;
+    expectedVisible: boolean;
+  }>;
+  layerIdCollisions: string[];
+  sourceIdCollisions: string[];
+  allNewBuildingsEnabled: boolean;
+  selectedAdditionsEnabled: boolean;
+  includedAdditionReleases: string[];
+  additionRegistrationPlans: string[];
+  registeredAdditionSources: string[];
+  registeredAdditionLayers: string[];
+  visibleAdditionLayers: string[];
+  hiddenFutureAdditionLayers: string[];
+  missing: string[];
+  releases: Record<
+    string,
+    {
+      sourceId: string;
+      layerId: string;
+      lineLayerId: string;
+      sourceExists: boolean;
+      layerExists: boolean;
+      lineLayerExists: boolean;
+      visibility: string | null;
+      lineVisibility: string | null;
+      filter: unknown;
+      color: unknown;
+      lineColor: unknown;
+      orderIndex: number;
+      aboveReferenceRaster: boolean | null;
+    }
+  >;
+};
+
+declare global {
+  interface Window {
+    __SATMONITOR_TEMPORAL_DEBUG__?: {
+      latest: TemporalRuntimeDebugSnapshot | null;
+      history: TemporalRuntimeDebugSnapshot[];
+      getLatest: () => TemporalRuntimeDebugSnapshot | null;
+    };
+  }
+}
+
 let pmtilesProtocolRegistered = false;
 let pmtilesProtocol: Protocol | null = null;
-const DEV_LOGGING = import.meta.env.DEV;
+const DEV_LOGGING = isDevClientLogEnabled(import.meta.env);
 let temporalRenderAuditModeLogged = false;
 
 function isTemporalRenderAuditEnabled(): boolean {
@@ -513,7 +605,7 @@ function applyLabelVisibility(map: MapLibreMap, showLabels: boolean) {
   const layers = map.getStyle()?.layers ?? [];
   layers.forEach((layer) => {
     if (layer.type === "symbol") {
-      map.setLayoutProperty(layer.id, "visibility", showLabels ? "visible" : "none");
+      setLayerLayoutPropertyIfChanged(map, layer.id, "visibility", showLabels ? "visible" : "none");
     }
   });
 }
@@ -589,8 +681,8 @@ function syncImageOverlay(
     );
   }
 
-  map.setPaintProperty(layerId, "raster-opacity", opacity);
-  map.setLayoutProperty(layerId, "visibility", visible ? "visible" : "none");
+  setPaintPropertyIfChanged(map, layerId, "raster-opacity", opacity);
+  setLayerLayoutPropertyIfChanged(map, layerId, "visibility", visible ? "visible" : "none");
 }
 
 function sanitizeMapLibreId(value: string): string {
@@ -656,7 +748,21 @@ function temporalAddedLineLayerId(projectId: string | null, releaseIdentifier: s
 }
 
 function isMilestoneStyledTemporalLayer(kind: TemporalAddedLayerKind): kind is TemporalStyledLayerKind {
-  return kind === "additions" || kind === "buffer10m";
+  return (
+    kind === "additions" ||
+    kind === "buffer10m" ||
+    kind === "buffer15m" ||
+    kind === "buffer20m" ||
+    kind === "cumulativeBuffer10m" ||
+    kind === "cumulativeBuffer15m" ||
+    kind === "cumulativeBuffer20m"
+  );
+}
+
+function isCumulativeBufferLayerKind(
+  kind: TemporalAddedLayerKind,
+): kind is "cumulativeBuffer10m" | "cumulativeBuffer15m" | "cumulativeBuffer20m" {
+  return kind === "cumulativeBuffer10m" || kind === "cumulativeBuffer15m" || kind === "cumulativeBuffer20m";
 }
 
 function temporalAddedLayerIds(projectId: string | null, releaseIdentifier: string, kind: TemporalAddedLayerKind): string[] {
@@ -674,19 +780,19 @@ const TEMPORAL_ADDED_LAYER_DEFINITIONS: TemporalAddedLayerDefinition[] = [
   {
     kind: "buffer10m",
     toggleKey: "buffer10m",
-    paint: { "fill-color": "#B91C1C", "fill-opacity": 0.3, "fill-outline-color": "#B91C1C" },
+    paint: { "fill-color": "#B91C1C", "fill-opacity": 1, "fill-outline-color": "rgba(0, 0, 0, 0)" },
     data: (overlay) => ensureFeatureCollection(overlay.buffer10m),
   },
   {
     kind: "buffer15m",
     toggleKey: "buffer15m",
-    paint: { "fill-color": BUILDING_CHANGE_BUFFER_FILL_COLORS["15m"], "fill-opacity": NON_CUMULATIVE_BUFFER_FILL_OPACITY },
+    paint: { "fill-color": BUILDING_CHANGE_BUFFER_FILL_COLORS["15m"], "fill-opacity": NON_CUMULATIVE_BUFFER_FILL_OPACITY, "fill-outline-color": "rgba(0, 0, 0, 0)" },
     data: (overlay) => ensureFeatureCollection(overlay.buffer15m),
   },
   {
     kind: "buffer20m",
     toggleKey: "buffer20m",
-    paint: { "fill-color": BUILDING_CHANGE_BUFFER_FILL_COLORS["20m"], "fill-opacity": NON_CUMULATIVE_BUFFER_FILL_OPACITY },
+    paint: { "fill-color": BUILDING_CHANGE_BUFFER_FILL_COLORS["20m"], "fill-opacity": NON_CUMULATIVE_BUFFER_FILL_OPACITY, "fill-outline-color": "rgba(0, 0, 0, 0)" },
     data: (overlay) => ensureFeatureCollection(overlay.buffer20m),
   },
   {
@@ -801,6 +907,112 @@ function temporalAddedArtifactKey(kind: TemporalAddedLayerKind): string {
   }
 }
 
+function temporalPlanningKeyForKind(kind: TemporalAddedLayerKind): TemporalLayerPlanningKey {
+  switch (kind) {
+    case "additions":
+      return "allNewBuildings";
+    case "buffer10m":
+      return "buffer10m";
+    case "buffer15m":
+      return "buffer15m";
+    case "buffer20m":
+      return "buffer20m";
+    case "cumulativeBuffer10m":
+      return "temporalCumulativeBuffer10m";
+    case "cumulativeBuffer15m":
+      return "temporalCumulativeBuffer15m";
+    case "cumulativeBuffer20m":
+      return "temporalCumulativeBuffer20m";
+    case "convexHull":
+      return "convexHull";
+    case "cumulative":
+      return "cumulativeUnion";
+    case "manualOverride":
+      return "manualOverride";
+    case "automated":
+    case "automatedBuildingBlocks":
+    case "effectiveBuildingBlocks":
+    case "cumulativeGrowthBlocks":
+    case "cumulativeGrowthEnvelope":
+      return "selectedAdditions";
+  }
+}
+
+function createEmptyTemporalReleaseSetByKind(): Record<TemporalAddedLayerKind, string[]> {
+  const empty = {} as Record<TemporalAddedLayerKind, string[]>;
+  for (const definition of TEMPORAL_ADDED_LAYER_DEFINITIONS) {
+    empty[definition.kind] = [];
+  }
+  return empty;
+}
+
+function buildAvailableReleaseIdentifiersByKind(
+  overlays: TemporalAddedOverlayPresentation[],
+): Record<TemporalAddedLayerKind, string[]> {
+  const availableByKind = createEmptyTemporalReleaseSetByKind();
+  for (const definition of TEMPORAL_ADDED_LAYER_DEFINITIONS) {
+    availableByKind[definition.kind] = overlays
+      .filter((overlay) => temporalAddedLayerAvailability(overlay, definition).available)
+      .map((overlay) => overlay.releaseIdentifier);
+  }
+  return availableByKind;
+}
+
+function buildExpectedTemporalReleaseSets(params: {
+  definitions: TemporalAddedLayerDefinition[];
+  milestones: TemporalMilestoneColorInput[];
+  selectedReleaseIdentifier: string | null | undefined;
+  availableByKind: Record<TemporalAddedLayerKind, string[]>;
+  includedAdditionReleaseIdentifiers: string[];
+  layerState: LayerToggleState;
+}): Record<TemporalAddedLayerKind, string[]> {
+  const releaseSets = createEmptyTemporalReleaseSetByKind();
+  const { definitions, milestones, selectedReleaseIdentifier, availableByKind, includedAdditionReleaseIdentifiers, layerState } =
+    params;
+  for (const definition of definitions) {
+    if (definition.kind === "additions") {
+      const releases = new Set<string>();
+      if (layerState.temporalAdditions) {
+        for (const releaseIdentifier of includedAdditionReleaseIdentifiers) {
+          releases.add(releaseIdentifier);
+        }
+      }
+      if (layerState.selectedMilestoneAdditions) {
+        for (const releaseIdentifier of getTemporalLayerExpectedReleases({
+          layerKey: "selectedAdditions",
+          milestones,
+          selectedReleaseIdentifier,
+          availableReleaseIdentifiers: availableByKind.additions,
+        })) {
+          releases.add(releaseIdentifier);
+        }
+      }
+      releaseSets.additions = Array.from(releases);
+      continue;
+    }
+
+    if (!layerState[definition.toggleKey]) {
+      releaseSets[definition.kind] = [];
+      continue;
+    }
+
+    releaseSets[definition.kind] = getTemporalLayerExpectedReleases({
+      layerKey: temporalPlanningKeyForKind(definition.kind),
+      milestones,
+      selectedReleaseIdentifier,
+      availableReleaseIdentifiers: availableByKind[definition.kind],
+    });
+  }
+  return releaseSets;
+}
+
+function temporalExpectedReleaseSetForKind(
+  releaseSetsByKind: TemporalReleaseSetByKind | null | undefined,
+  kind: TemporalAddedLayerKind,
+): Set<string> {
+  return new Set(releaseSetsByKind?.[kind] ?? []);
+}
+
 function shouldUseVectorTileArtifact(overlay: TemporalAddedOverlayPresentation, kind: TemporalAddedLayerKind): boolean {
   const artifact = overlay.artifacts[temporalAddedArtifactKey(kind)];
   return Boolean(artifact?.tilejsonUrl || artifact?.tilesUrlTemplate);
@@ -856,7 +1068,7 @@ function temporalAddedLayerAvailability(
     const artifactFeatureCount = artifact.featureCount ?? null;
     const artifactSizeBytes = artifact.sizeBytes ?? 0;
     return {
-      available: false,
+      available: (artifactFeatureCount ?? 0) > 0 && Boolean(artifact.artifactUrl),
       reason: artifactFeatureCount === 0 ? "empty_geojson" : "artifact_metadata_pending",
       featureCount: artifactFeatureCount ?? 0,
       payloadBytes: artifactSizeBytes,
@@ -887,7 +1099,11 @@ function buildTemporalOutputLayerPlan(params: {
     return { plan: null, availability };
   }
   const useVectorTiles = availability.useVectorTiles;
-  const enabledFromUi = Boolean(layerState[definition.toggleKey]);
+  const enabledFromUi = Boolean(
+    definition.kind === "additions"
+      ? layerState.temporalAdditions || layerState.selectedMilestoneAdditions
+      : layerState[definition.toggleKey],
+  );
   if (definition.toggleKey === "buffer10m") {
     devLog("TEMPORAL_OUTPUT_LAYER_CHECKBOX_STATE", {
       projectId,
@@ -950,12 +1166,12 @@ function applyTemporalAddedLayerStyle(
   const temporalLayerPaint = getTemporalLayerPaint(kind, milestoneColor);
   if (map.getLayer(fillLayerId)) {
     for (const [property, value] of Object.entries(temporalLayerPaint.fillPaint)) {
-      map.setPaintProperty(fillLayerId, property, value);
+      setPaintPropertyIfChanged(map, fillLayerId, property, value);
     }
   }
   if (map.getLayer(lineLayerId)) {
     for (const [property, value] of Object.entries(temporalLayerPaint.linePaint)) {
-      map.setPaintProperty(lineLayerId, property, value);
+      setPaintPropertyIfChanged(map, lineLayerId, property, value);
     }
   }
   devLog("TEMPORAL_OUTPUT_LAYER_STYLE_APPLY", {
@@ -968,6 +1184,281 @@ function applyTemporalAddedLayerStyle(
   });
 }
 
+function temporalLayerOrderIndex(map: MapLibreMap, layerId: string): number {
+  return map.getStyle()?.layers?.findIndex((layer) => layer.id === layerId) ?? -1;
+}
+
+function publishTemporalRuntimeDebugSnapshot(params: {
+  map: MapLibreMap;
+  projectId: string;
+  selectedReleaseIdentifier: string;
+  layerState: LayerToggleState;
+  includedAdditionReleaseIdentifiers: string[];
+  availableAdditionReleaseIdentifiers: string[];
+  colorByReleaseIdentifier: Record<string, string>;
+  additionRegistrationPlans: string[];
+  referenceReleaseIdentifier: string | null;
+  expectedReleaseIdentifiersByKind: TemporalReleaseSetByKind;
+  availableReleaseIdentifiersByKind: TemporalReleaseSetByKind;
+  labelByLayerKey: Partial<Record<LayerToggleKey | "allNewBuildings" | "selectedAdditions", string>>;
+}): TemporalRuntimeDebugSnapshot | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+  const debugEnabled =
+    import.meta.env.DEV ||
+    import.meta.env.VITE_TEMPORAL_RENDER_AUDIT === "true" ||
+    new URLSearchParams(window.location.search).has("debugRenderAudit");
+  if (!debugEnabled) {
+    return null;
+  }
+  const {
+    map,
+    projectId,
+    selectedReleaseIdentifier,
+    layerState,
+    includedAdditionReleaseIdentifiers,
+    availableAdditionReleaseIdentifiers,
+    colorByReleaseIdentifier,
+    additionRegistrationPlans,
+    referenceReleaseIdentifier,
+    expectedReleaseIdentifiersByKind,
+    availableReleaseIdentifiersByKind,
+    labelByLayerKey,
+  } = params;
+  const includedSet = new Set(includedAdditionReleaseIdentifiers);
+  const referenceLayerId = referenceReleaseIdentifier ? temporalReferenceLayerId(projectId, referenceReleaseIdentifier) : null;
+  const referenceLayerOrder = referenceLayerId ? temporalLayerOrderIndex(map, referenceLayerId) : -1;
+  const registeredAdditionSources: string[] = [];
+  const registeredAdditionLayers: string[] = [];
+  const visibleAdditionLayers: string[] = [];
+  const hiddenFutureAdditionLayers: string[] = [];
+  const missing: string[] = [];
+  const releases: TemporalRuntimeDebugSnapshot["releases"] = {};
+  const mapWithOptionalFilter = map as MapLibreMap & { getFilter?: (layerId: string) => unknown };
+
+  for (const releaseIdentifier of availableAdditionReleaseIdentifiers) {
+    const sourceId = temporalAddedSourceId(projectId, releaseIdentifier, "additions");
+    const layerId = temporalAddedLayerId(projectId, releaseIdentifier, "additions");
+    const lineLayerId = temporalAddedLineLayerId(projectId, releaseIdentifier, "additions");
+    const sourceExists = Boolean(map.getSource(sourceId));
+    const layerExists = Boolean(map.getLayer(layerId));
+    const lineLayerExists = Boolean(map.getLayer(lineLayerId));
+    const visibility =
+      layerExists && map.getLayoutProperty(layerId, "visibility") === "visible"
+        ? "visible"
+        : layerExists
+          ? "none"
+          : null;
+    const lineVisibility =
+      lineLayerExists && map.getLayoutProperty(lineLayerId, "visibility") === "visible"
+        ? "visible"
+        : lineLayerExists
+          ? "none"
+          : null;
+    const orderIndex = layerExists ? temporalLayerOrderIndex(map, layerId) : -1;
+    const aboveReferenceRaster =
+      layerExists && referenceLayerOrder >= 0 ? orderIndex > referenceLayerOrder : layerExists ? true : null;
+
+    if (sourceExists) {
+      registeredAdditionSources.push(releaseIdentifier);
+    }
+    if (layerExists) {
+      registeredAdditionLayers.push(releaseIdentifier);
+    }
+    if (visibility === "visible") {
+      visibleAdditionLayers.push(releaseIdentifier);
+    }
+    if (!includedSet.has(releaseIdentifier) && layerExists && visibility !== "visible") {
+      hiddenFutureAdditionLayers.push(releaseIdentifier);
+    }
+    if (includedSet.has(releaseIdentifier)) {
+      if (!sourceExists) {
+        missing.push(`${releaseIdentifier}:source`);
+      }
+      if (!layerExists) {
+        missing.push(`${releaseIdentifier}:layer`);
+      }
+      if (layerExists && visibility !== "visible" && layerState.temporalAdditions) {
+        missing.push(`${releaseIdentifier}:visible`);
+      }
+    }
+
+    releases[releaseIdentifier] = {
+      sourceId,
+      layerId,
+      lineLayerId,
+      sourceExists,
+      layerExists,
+      lineLayerExists,
+      visibility,
+      lineVisibility,
+      filter:
+        layerExists && typeof mapWithOptionalFilter.getFilter === "function"
+          ? mapWithOptionalFilter.getFilter(layerId) ?? null
+          : null,
+      color: layerExists ? map.getPaintProperty(layerId, "fill-color") ?? null : null,
+      lineColor: lineLayerExists ? map.getPaintProperty(lineLayerId, "line-color") ?? null : null,
+      orderIndex,
+      aboveReferenceRaster,
+    };
+  }
+
+  const enabledLayerKeys: LayerToggleKey[] = dedupeStable([
+    ...TEMPORAL_ADDED_LAYER_DEFINITIONS.filter((definition) =>
+      definition.kind === "additions"
+        ? layerState.temporalAdditions || layerState.selectedMilestoneAdditions
+        : layerState[definition.toggleKey],
+    ).map((definition) => definition.toggleKey),
+    ...(layerState.selectedMilestoneAdditions ? (["selectedMilestoneAdditions"] as const) : []),
+  ]);
+  const makeContract = (params: {
+    uiLabel: string;
+    layerKey: LayerToggleKey | "allNewBuildings" | "selectedAdditions";
+    kind: TemporalAddedLayerKind;
+    mode: TemporalLayerContractSnapshot["mode"];
+    expectedReleases: string[];
+    availableReleases: string[];
+  }): TemporalLayerContractSnapshot => {
+    const expectedReleaseSet = new Set(params.expectedReleases);
+    const registeredSources = params.availableReleases.filter((releaseIdentifier) =>
+      Boolean(map.getSource(temporalAddedSourceId(projectId, releaseIdentifier, params.kind))),
+    );
+    const registeredLayers = params.availableReleases.filter((releaseIdentifier) =>
+      temporalAddedLayerIds(projectId, releaseIdentifier, params.kind).some((layerId) => Boolean(map.getLayer(layerId))),
+    );
+    const visibleLayers = params.availableReleases.filter((releaseIdentifier) =>
+      temporalAddedLayerIds(projectId, releaseIdentifier, params.kind).some(
+        (layerId) => map.getLayer(layerId) && map.getLayoutProperty(layerId, "visibility") === "visible",
+      ),
+    );
+    return {
+      uiLabel: params.uiLabel,
+      layerKey: params.layerKey,
+      artifactKey: temporalAddedArtifactKey(params.kind),
+      mode: params.mode,
+      expectedReleases: params.expectedReleases,
+      registeredSources,
+      registeredLayers,
+      visibleLayers,
+      unexpectedVisibleReleases: visibleLayers.filter((releaseIdentifier) => !expectedReleaseSet.has(releaseIdentifier)),
+      unexpectedRegisteredReleases: registeredLayers.filter((releaseIdentifier) => !expectedReleaseSet.has(releaseIdentifier)),
+    };
+  };
+  const layerIdCounts = new Map<string, number>();
+  const sourceIdCounts = new Map<string, number>();
+  const bufferLayers: TemporalRuntimeDebugSnapshot["bufferLayers"] = [];
+  for (const definition of TEMPORAL_ADDED_LAYER_DEFINITIONS.filter(
+    (candidate) =>
+      candidate.kind === "buffer10m" ||
+      candidate.kind === "buffer15m" ||
+      candidate.kind === "buffer20m" ||
+      candidate.kind === "cumulativeBuffer10m" ||
+      candidate.kind === "cumulativeBuffer15m" ||
+      candidate.kind === "cumulativeBuffer20m",
+  )) {
+    const expectedReleaseSet = temporalExpectedReleaseSetForKind(expectedReleaseIdentifiersByKind, definition.kind);
+    const availableReleases = availableReleaseIdentifiersByKind[definition.kind] ?? [];
+    for (const releaseIdentifier of availableReleases) {
+      const sourceId = temporalAddedSourceId(projectId, releaseIdentifier, definition.kind);
+      const layerId = temporalAddedLayerId(projectId, releaseIdentifier, definition.kind);
+      const lineLayerId = temporalAddedLineLayerId(projectId, releaseIdentifier, definition.kind);
+      layerIdCounts.set(layerId, (layerIdCounts.get(layerId) ?? 0) + 1);
+      layerIdCounts.set(lineLayerId, (layerIdCounts.get(lineLayerId) ?? 0) + 1);
+      sourceIdCounts.set(sourceId, (sourceIdCounts.get(sourceId) ?? 0) + 1);
+      const expectedColor = colorByReleaseIdentifier[releaseIdentifier] ?? "#B91C1C";
+      bufferLayers.push({
+        layerId,
+        lineLayerId,
+        sourceId,
+        layerKey: definition.toggleKey,
+        artifactKey: temporalAddedArtifactKey(definition.kind),
+        releaseIdentifier,
+        expectedColor,
+        actualFillColor: map.getLayer(layerId) ? map.getPaintProperty(layerId, "fill-color") ?? null : null,
+        actualLineColor: map.getLayer(lineLayerId) ? map.getPaintProperty(lineLayerId, "line-color") ?? null : null,
+        visibility: map.getLayer(layerId) ? (map.getLayoutProperty(layerId, "visibility") as string | null) : null,
+        lineVisibility: map.getLayer(lineLayerId)
+          ? (map.getLayoutProperty(lineLayerId, "visibility") as string | null)
+          : null,
+        expectedVisible: expectedReleaseSet.has(releaseIdentifier) && Boolean(layerState[definition.toggleKey]),
+      });
+    }
+  }
+  const layerIdCollisions = Array.from(layerIdCounts.entries())
+    .filter(([, count]) => count > 1)
+    .map(([layerId]) => layerId);
+  const sourceIdCollisions = Array.from(sourceIdCounts.entries())
+    .filter(([, count]) => count > 1)
+    .map(([sourceId]) => sourceId);
+  const selectedAdditionExpectedReleases =
+    layerState.selectedMilestoneAdditions && selectedReleaseIdentifier && availableAdditionReleaseIdentifiers.includes(selectedReleaseIdentifier)
+      ? [selectedReleaseIdentifier]
+      : [];
+  const layerContracts: TemporalLayerContractSnapshot[] = [
+    makeContract({
+      uiLabel: labelByLayerKey.allNewBuildings ?? "All new buildings",
+      layerKey: "allNewBuildings",
+      kind: "additions",
+      mode: "cumulative",
+      expectedReleases: layerState.temporalAdditions ? includedAdditionReleaseIdentifiers : [],
+      availableReleases: availableAdditionReleaseIdentifiers,
+    }),
+    makeContract({
+      uiLabel: labelByLayerKey.selectedAdditions ?? "Added building",
+      layerKey: "selectedAdditions",
+      kind: "additions",
+      mode: "selected",
+      expectedReleases: selectedAdditionExpectedReleases,
+      availableReleases: availableAdditionReleaseIdentifiers,
+    }),
+    ...TEMPORAL_ADDED_LAYER_DEFINITIONS.filter((definition) => definition.kind !== "additions").map((definition) =>
+      makeContract({
+        uiLabel: labelByLayerKey[definition.toggleKey] ?? definition.toggleKey,
+        layerKey: definition.toggleKey,
+        kind: definition.kind,
+        mode:
+          definition.kind === "cumulative"
+            ? "selected_source_cumulative_artifact"
+            : isCumulativeBufferLayerKind(definition.kind)
+              ? "cumulative"
+              : "selected",
+        expectedReleases: expectedReleaseIdentifiersByKind[definition.kind] ?? [],
+        availableReleases: availableReleaseIdentifiersByKind[definition.kind] ?? [],
+      }),
+    ),
+  ];
+
+  const snapshot: TemporalRuntimeDebugSnapshot = {
+    projectId,
+    selectedRelease: selectedReleaseIdentifier,
+    enabledLayerKeys,
+    layerContracts,
+    bufferLayers,
+    layerIdCollisions,
+    sourceIdCollisions,
+    allNewBuildingsEnabled: layerState.temporalAdditions,
+    selectedAdditionsEnabled: layerState.selectedMilestoneAdditions,
+    includedAdditionReleases: includedAdditionReleaseIdentifiers,
+    additionRegistrationPlans,
+    registeredAdditionSources,
+    registeredAdditionLayers,
+    visibleAdditionLayers,
+    hiddenFutureAdditionLayers,
+    missing,
+    releases,
+  };
+  const existing = window.__SATMONITOR_TEMPORAL_DEBUG__;
+  const history = [...(existing?.history ?? []), snapshot].slice(-25);
+  window.__SATMONITOR_TEMPORAL_DEBUG__ = {
+    latest: snapshot,
+    history,
+    getLatest: () => window.__SATMONITOR_TEMPORAL_DEBUG__?.latest ?? null,
+  };
+  console.debug("SATMONITOR_TEMPORAL_DEBUG_SNAPSHOT", snapshot);
+  return snapshot;
+}
+
 function temporalVectorTileLayerMinzoom(
   kind: TemporalAddedLayerKind,
   layerType: "fill" | "line",
@@ -975,9 +1466,9 @@ function temporalVectorTileLayerMinzoom(
   _featureCount: number | null | undefined,
 ): number {
   if (layerType === "line") {
-    return kind === "additions" || kind === "buffer10m" ? 14 : 15;
+    return isMilestoneStyledTemporalLayer(kind) ? 14 : 15;
   }
-  return kind === "additions" || kind === "buffer10m" ? 11 : 12;
+  return isMilestoneStyledTemporalLayer(kind) ? 11 : 12;
 }
 
 function setLayerZoomRangeIfSupported(map: MapLibreMap, layerId: string, minzoom: number, maxzoom = 24): void {
@@ -1014,13 +1505,22 @@ function ensureTemporalAddedLayer(
   const vectorLineMinzoom = useVectorTiles
     ? temporalVectorTileLayerMinzoom(definition.kind, "line", vectorArtifact?.sizeBytes, vectorArtifact?.featureCount)
     : 0;
-  const data = useVectorTiles ? EMPTY_FEATURE_COLLECTION : definition.data(overlay);
+  const inlineData = useVectorTiles ? EMPTY_FEATURE_COLLECTION : definition.data(overlay);
+  const geojsonArtifactUrl =
+    !useVectorTiles && inlineData.features.length === 0 && vectorArtifact?.artifactUrl ? vectorArtifact.artifactUrl : null;
+  const data = inlineData;
   const dataStats = useVectorTiles
     ? {
         featureCount: vectorArtifact?.featureCount ?? 0,
         payloadBytes: vectorTileMetadataPayloadBytes(vectorArtifact),
         signature: `vector:explicit_tiles:${vectorArtifact?.tilejsonUrl ?? ""}:${vectorTilesUrlTemplate ?? ""}:${vectorArtifact?.featureCount ?? 0}:${vectorArtifact?.sizeBytes ?? 0}`,
       }
+    : geojsonArtifactUrl
+      ? {
+          featureCount: vectorArtifact?.featureCount ?? 0,
+          payloadBytes: vectorArtifact?.sizeBytes ?? 0,
+          signature: `geojson:url:${geojsonArtifactUrl}:${vectorArtifact?.featureCount ?? 0}:${vectorArtifact?.sizeBytes ?? 0}`,
+        }
     : temporalAddedDataStats(data);
   const { featureCount, payloadBytes, signature } = dataStats;
   const previousSignature = sourceSignatures[sourceId] ?? null;
@@ -1032,9 +1532,10 @@ function ensureTemporalAddedLayer(
     releaseIdentifier: overlay.releaseIdentifier,
     kind: definition.kind,
     sourceId,
-    source: useVectorTiles ? "vector_tile_artifact" : "inline_project_payload",
+    source: useVectorTiles ? "vector_tile_artifact" : geojsonArtifactUrl ? "geojson_artifact_url" : "inline_project_payload",
     artifactKey: temporalAddedArtifactKey(definition.kind),
     tilejsonUrl: vectorArtifact?.tilejsonUrl ?? null,
+    artifactUrl: geojsonArtifactUrl,
   });
   if (useVectorTiles) {
     devLog("TEMPORAL_GEOJSON_FETCH_SKIPPED_HUGE_ARTIFACT", {
@@ -1131,7 +1632,7 @@ function ensureTemporalAddedLayer(
     payloadBytes,
     fetchMs: 0,
     parseMs: 0,
-    source: useVectorTiles ? "vector_tile_artifact" : "inline_project_payload",
+    source: useVectorTiles ? "vector_tile_artifact" : geojsonArtifactUrl ? "geojson_artifact_url" : "inline_project_payload",
   });
 
   const existingVectorSourceSpec = useVectorTiles
@@ -1239,6 +1740,8 @@ function ensureTemporalAddedLayer(
       layerId,
       featureCount,
       payloadBytes,
+      source: geojsonArtifactUrl ? "geojson_artifact_url" : "inline_project_payload",
+      artifactUrl: geojsonArtifactUrl,
     });
     const setDataStartedAt = performance.now();
     devLog("TEMPORAL_ADDED_SETDATA_START", {
@@ -1251,7 +1754,7 @@ function ensureTemporalAddedLayer(
       payloadBytes,
       reason: "source_create",
     });
-    map.addSource(sourceId, { type: "geojson", data });
+    map.addSource(sourceId, { type: "geojson", data: geojsonArtifactUrl ?? data });
     devLog("TEMPORAL_ADDED_SETDATA_DONE", {
       projectId,
       releaseIdentifier: overlay.releaseIdentifier,
@@ -1276,7 +1779,7 @@ function ensureTemporalAddedLayer(
       payloadBytes,
       reason: "signature_changed",
     });
-    sourceAfterModeCheck.setData(data);
+    sourceAfterModeCheck.setData(geojsonArtifactUrl ?? data);
     devLog("TEMPORAL_ADDED_SETDATA_DONE", {
       projectId,
       releaseIdentifier: overlay.releaseIdentifier,
@@ -1336,7 +1839,7 @@ function ensureTemporalAddedLayer(
     }
   } else {
     for (const [property, value] of Object.entries(fillPaint)) {
-      map.setPaintProperty(layerId, property, value);
+      setPaintPropertyIfChanged(map, layerId, property, value);
     }
     devLog("TEMPORAL_ADDED_LAYER_REUSE", {
       projectId,
@@ -1388,7 +1891,7 @@ function ensureTemporalAddedLayer(
       }
     } else {
       for (const [property, value] of Object.entries(temporalLayerPaint.linePaint)) {
-        map.setPaintProperty(lineLayerId, property, value);
+        setPaintPropertyIfChanged(map, lineLayerId, property, value);
       }
       devLog("TEMPORAL_ADDED_LAYER_REUSE", {
         projectId,
@@ -1414,9 +1917,11 @@ function syncTemporalOutputLayers(params: {
   projectId: string | null;
   activeReleaseIdentifier: string | null;
   availableReleaseIdentifiers: string[];
+  includedAdditionReleaseIdentifiers: string[];
   colorByReleaseIdentifier: Record<string, string>;
   layerState: LayerToggleState;
   registeredLayerIds: Set<string>;
+  expectedReleaseIdentifiersByKind?: TemporalReleaseSetByKind;
   expectedActiveLayerIds?: string[];
 }): TemporalOutputLayerSyncResult {
   const {
@@ -1424,9 +1929,11 @@ function syncTemporalOutputLayers(params: {
     projectId,
     activeReleaseIdentifier,
     availableReleaseIdentifiers,
+    includedAdditionReleaseIdentifiers,
     colorByReleaseIdentifier,
     layerState,
     registeredLayerIds,
+    expectedReleaseIdentifiersByKind,
     expectedActiveLayerIds: expectedActiveLayerIdsFromPlans,
   } = params;
   const emptyResult = {
@@ -1440,9 +1947,18 @@ function syncTemporalOutputLayers(params: {
   const styleLoaded = Boolean(map?.isStyleLoaded());
   const styleReady = isMapStyleReadyForLayerMutation(map);
   const layerStateKeys = Object.keys(layerState);
-  const enabledLayerKeys = TEMPORAL_ADDED_LAYER_DEFINITIONS.filter((definition) => layerState[definition.toggleKey]).map(
-    (definition) => definition.toggleKey,
-  );
+  const enabledLayerKeys: LayerToggleKey[] = dedupeStable([
+    ...TEMPORAL_ADDED_LAYER_DEFINITIONS.filter((definition) => layerState[definition.toggleKey]).map(
+      (definition) => definition.toggleKey,
+    ),
+    ...(layerState.selectedMilestoneAdditions ? (["selectedMilestoneAdditions"] as const) : []),
+  ]);
+  const includedAdditionReleaseIdentifierSet = new Set(includedAdditionReleaseIdentifiers);
+  const expectedCumulativeBufferReleaseSets = {
+    cumulativeBuffer10m: temporalExpectedReleaseSetForKind(expectedReleaseIdentifiersByKind, "cumulativeBuffer10m"),
+    cumulativeBuffer15m: temporalExpectedReleaseSetForKind(expectedReleaseIdentifiersByKind, "cumulativeBuffer15m"),
+    cumulativeBuffer20m: temporalExpectedReleaseSetForKind(expectedReleaseIdentifiersByKind, "cumulativeBuffer20m"),
+  };
   const temporalLayerCount = registeredLayerIds.size;
   const expectedOutputLayerCount = registeredLayerIds.size;
   const expectedActiveLayerIds =
@@ -1462,6 +1978,8 @@ function syncTemporalOutputLayers(params: {
     styleReady,
     layerStateKeys,
     enabledLayerKeys,
+    includedAdditionReleaseIdentifiers,
+    expectedReleaseIdentifiersByKind,
     temporalLayerCount,
     expectedOutputLayerCount,
     missingLayerIds,
@@ -1608,16 +2126,70 @@ function syncTemporalOutputLayers(params: {
         activeReleaseIdentifier &&
         temporalAddedLayerIds(projectId, activeReleaseIdentifier, definition.kind).includes(layerId),
     );
+    const includedAdditionReleaseIdentifier = includedAdditionReleaseIdentifiers.find((releaseIdentifier) =>
+      temporalAddedLayerIds(projectId, releaseIdentifier, "additions").includes(layerId),
+    );
+    const cumulativeBufferDefinitions = TEMPORAL_ADDED_LAYER_DEFINITIONS.filter(
+      (
+        definition,
+      ): definition is TemporalAddedLayerDefinition & {
+        kind: "cumulativeBuffer10m" | "cumulativeBuffer15m" | "cumulativeBuffer20m";
+      } => isCumulativeBufferLayerKind(definition.kind),
+    );
+    const includedCumulativeBufferMatch = cumulativeBufferDefinitions
+      .flatMap((definition) =>
+        Array.from(expectedCumulativeBufferReleaseSets[definition.kind]).map((releaseIdentifier) => ({
+          releaseIdentifier,
+          definition,
+        })),
+      )
+      .find(({ releaseIdentifier, definition }) => temporalAddedLayerIds(projectId, releaseIdentifier, definition.kind).includes(layerId));
     const matchingReleaseIdentifier =
-      activeReleaseIdentifier && activeDefinition
+      includedAdditionReleaseIdentifier ??
+      includedCumulativeBufferMatch?.releaseIdentifier ??
+      (activeReleaseIdentifier && activeDefinition
         ? activeReleaseIdentifier
         : availableReleaseIdentifiers.find((releaseIdentifier) =>
             TEMPORAL_ADDED_LAYER_DEFINITIONS.some(
               (definition) => temporalAddedLayerIds(projectId, releaseIdentifier, definition.kind).includes(layerId),
             ),
-          );
+          ));
+    const includedAdditionVisible = Boolean(
+      includedAdditionReleaseIdentifier &&
+        temporalAdditionVisibilityReason({
+          releaseIdentifier: includedAdditionReleaseIdentifier,
+          selectedReleaseIdentifier: activeReleaseIdentifier,
+          includedAdditionReleaseIdentifiers: includedAdditionReleaseIdentifierSet,
+          allNewBuildingsEnabled: layerState.temporalAdditions,
+          selectedAdditionsEnabled: false,
+        }) === "allNewBuildings",
+    );
+    const includedCumulativeBufferVisible = Boolean(
+      includedCumulativeBufferMatch &&
+        expectedCumulativeBufferReleaseSets[includedCumulativeBufferMatch.definition.kind].has(
+          includedCumulativeBufferMatch.releaseIdentifier,
+        ) &&
+        layerState[includedCumulativeBufferMatch.definition.toggleKey],
+    );
+    const selectedMilestoneAdditionVisible = Boolean(
+      activeReleaseIdentifier &&
+        temporalAddedLayerIds(projectId, activeReleaseIdentifier, "additions").includes(layerId) &&
+        temporalAdditionVisibilityReason({
+          releaseIdentifier: activeReleaseIdentifier,
+          selectedReleaseIdentifier: activeReleaseIdentifier,
+          includedAdditionReleaseIdentifiers: includedAdditionReleaseIdentifierSet,
+          allNewBuildingsEnabled: false,
+          selectedAdditionsEnabled: layerState.selectedMilestoneAdditions,
+        }) === "selectedMilestoneAdditions",
+    );
     const mapLayerExists = Boolean(map.getLayer(layerId));
-    const visible = Boolean(mapLayerExists && activeDefinition && layerState[activeDefinition.toggleKey]);
+    const visible = Boolean(
+      mapLayerExists &&
+        (includedAdditionVisible ||
+          includedCumulativeBufferVisible ||
+          selectedMilestoneAdditionVisible ||
+          (activeDefinition && activeDefinition.kind !== "additions" && layerState[activeDefinition.toggleKey])),
+    );
 
     if (!mapLayerExists) {
       skippedCount += 1;
@@ -1632,29 +2204,51 @@ function syncTemporalOutputLayers(params: {
       continue;
     }
 
-    setLayerVisibility(map, layerId, visible);
+    const visibilityChanged = setLayerVisibility(map, layerId, visible);
     appliedCount += 1;
-    if (!visible) {
+    if (shouldSkipPostVisibilityLayerWork(visible)) {
       hiddenCount += 1;
       hiddenLayerIds.push(layerId);
+      if (visibilityChanged) {
+        devLog("TEMPORAL_OUTPUT_LAYER_SYNC_APPLY", {
+          projectId,
+          releaseIdentifier: matchingReleaseIdentifier ?? activeReleaseIdentifier,
+          layerKey: includedAdditionReleaseIdentifier
+            ? "temporalAdditions"
+            : includedCumulativeBufferMatch
+              ? includedCumulativeBufferMatch.definition.toggleKey
+              : activeDefinition?.toggleKey ?? "non_active_release",
+          layerId,
+          visible,
+          reason: "hidden_once",
+        });
+      }
+      continue;
     } else {
       visibleLayerIds.push(layerId);
     }
 
-    if (activeDefinition) {
-      const color = colorByReleaseIdentifier[activeReleaseIdentifier] ?? "#B91C1C";
-      if (layerId === temporalAddedLayerId(projectId, activeReleaseIdentifier, activeDefinition.kind)) {
-        applyTemporalAddedLayerStyle(map, projectId, activeReleaseIdentifier, activeDefinition.kind, color);
+    if (includedAdditionReleaseIdentifier || includedCumulativeBufferMatch || activeDefinition) {
+      const styledReleaseIdentifier =
+        includedAdditionReleaseIdentifier ?? includedCumulativeBufferMatch?.releaseIdentifier ?? activeReleaseIdentifier ?? "";
+      const styledDefinition = includedAdditionReleaseIdentifier
+        ? TEMPORAL_ADDED_LAYER_DEFINITIONS.find((definition) => definition.kind === "additions")
+        : includedCumulativeBufferMatch
+          ? includedCumulativeBufferMatch.definition
+          : activeDefinition;
+      const color = colorByReleaseIdentifier[styledReleaseIdentifier] ?? "#B91C1C";
+      if (styledDefinition && layerId === temporalAddedLayerId(projectId, styledReleaseIdentifier, styledDefinition.kind)) {
+        applyTemporalAddedLayerStyle(map, projectId, styledReleaseIdentifier, styledDefinition.kind, color);
       }
-      const activeSourceId = temporalAddedSourceId(projectId, activeReleaseIdentifier, activeDefinition.kind);
+      const activeSourceId = styledDefinition ? temporalAddedSourceId(projectId, styledReleaseIdentifier, styledDefinition.kind) : "";
       const sourceSpec = map.getStyle()?.sources?.[activeSourceId] as { type?: string } | undefined;
       if (sourceSpec?.type === "vector") {
         devLog("TEMPORAL_VECTOR_TILE_RELEASE_FILTER_SKIPPED", {
           projectId,
           layerId,
           sourceId: activeSourceId,
-          layerKey: activeDefinition.toggleKey,
-          releaseIdentifier: activeReleaseIdentifier,
+          layerKey: styledDefinition?.toggleKey,
+          releaseIdentifier: styledReleaseIdentifier,
           reason: "release_specific_vector_tile_source",
           visible,
         });
@@ -1663,15 +2257,15 @@ function syncTemporalOutputLayers(params: {
             projectId,
             layerId,
             sourceId: activeSourceId,
-            layerKey: activeDefinition.toggleKey,
-            releaseIdentifier: activeReleaseIdentifier,
+            layerKey: styledDefinition?.toggleKey,
+            releaseIdentifier: styledReleaseIdentifier,
           });
           devLog("TEMPORAL_VECTOR_TILE_FILTER_CONFIRMED", {
             projectId,
             layerId,
             sourceId: activeSourceId,
-            layerKey: activeDefinition.toggleKey,
-            releaseIdentifier: activeReleaseIdentifier,
+            layerKey: styledDefinition?.toggleKey,
+            releaseIdentifier: styledReleaseIdentifier,
             filterApplied: false,
             reason: "release_specific_vector_tile_source",
           });
@@ -1679,8 +2273,8 @@ function syncTemporalOutputLayers(params: {
             projectId,
             layerId,
             sourceId: activeSourceId,
-            layerKey: activeDefinition.toggleKey,
-            releaseIdentifier: activeReleaseIdentifier,
+            layerKey: styledDefinition?.toggleKey,
+            releaseIdentifier: styledReleaseIdentifier,
             ...getTemporalLayerPaintDiagnostics(map, layerId),
           });
         }
@@ -1688,9 +2282,9 @@ function syncTemporalOutputLayers(params: {
         devLog("TEMPORAL_OUTPUT_LAYER_FILTER_APPLIED", {
           projectId,
           layerId,
-          layerKey: activeDefinition.toggleKey,
-          releaseIdentifier: activeReleaseIdentifier,
-          filter: { mode: "separate_release_layer", releaseIdentifier: activeReleaseIdentifier },
+          layerKey: styledDefinition?.toggleKey,
+          releaseIdentifier: styledReleaseIdentifier,
+          filter: { mode: "separate_release_layer", releaseIdentifier: styledReleaseIdentifier },
           visible,
         });
       }
@@ -1708,24 +2302,49 @@ function syncTemporalOutputLayers(params: {
     devLog("TEMPORAL_OUTPUT_LAYER_SYNC_APPLY", {
       projectId,
       releaseIdentifier: matchingReleaseIdentifier ?? activeReleaseIdentifier,
-      layerKey: activeDefinition?.toggleKey ?? "non_active_release",
+      layerKey: selectedMilestoneAdditionVisible
+        ? "selectedMilestoneAdditions"
+        : includedAdditionReleaseIdentifier
+          ? "temporalAdditions"
+          : includedCumulativeBufferMatch
+            ? includedCumulativeBufferMatch.definition.toggleKey
+          : activeDefinition?.toggleKey ?? "non_active_release",
       layerId,
       visible,
-      reason: activeDefinition ? "active_release_state" : "non_active_release",
+      reason: selectedMilestoneAdditionVisible
+        ? "selected_milestone_addition"
+        : includedAdditionReleaseIdentifier
+          ? "included_previous_addition"
+          : includedCumulativeBufferMatch
+            ? "included_previous_cumulative_buffer"
+          : activeDefinition
+            ? "active_release_state"
+            : "non_active_release",
     });
 
     if (visible) {
-      map.moveLayer(layerId);
-      const visibleSourceId = activeDefinition
-        ? temporalAddedSourceId(projectId, activeReleaseIdentifier, activeDefinition.kind)
+      const moved = moveLayerToTopIfNeeded(map, layerId);
+      const visibleSourceId = includedAdditionReleaseIdentifier
+        ? temporalAddedSourceId(projectId, includedAdditionReleaseIdentifier, "additions")
+        : includedCumulativeBufferMatch
+          ? temporalAddedSourceId(projectId, includedCumulativeBufferMatch.releaseIdentifier, includedCumulativeBufferMatch.definition.kind)
+        : activeDefinition
+          ? temporalAddedSourceId(projectId, activeReleaseIdentifier ?? "", activeDefinition.kind)
         : null;
       const visibleSourceSpec = visibleSourceId ? (map.getStyle()?.sources?.[visibleSourceId] as { type?: string } | undefined) : null;
       devLog(visibleSourceSpec?.type === "vector" ? "TEMPORAL_VECTOR_TILE_LAYER_ORDER" : "TEMPORAL_OUTPUT_LAYER_ORDER_APPLIED", {
         projectId,
         layerId,
         releaseIdentifier: matchingReleaseIdentifier ?? activeReleaseIdentifier,
-        layerKey: activeDefinition?.toggleKey ?? "non_active_release",
+        layerKey: selectedMilestoneAdditionVisible
+          ? "selectedMilestoneAdditions"
+          : includedAdditionReleaseIdentifier
+            ? "temporalAdditions"
+            : includedCumulativeBufferMatch
+              ? includedCumulativeBufferMatch.definition.toggleKey
+            : activeDefinition?.toggleKey ?? "non_active_release",
         movedToTop: true,
+        moved,
         aboveReferenceRaster: true,
       });
     }
@@ -1741,6 +2360,7 @@ function syncTemporalOutputLayers(params: {
     skippedCount,
     registeredLayerCount: registeredLayerIds.size,
     enabledLayerKeys,
+    includedAdditionReleaseIdentifiers,
     visibleLayerIds,
     hiddenLayerIds,
     missingLayerIds,
@@ -1843,7 +2463,7 @@ function temporalReferenceSourceSignature(
   projectId: string | null,
   imagery: TemporalReferenceImageryPresentation,
 ): string {
-  return JSON.stringify({
+  return stableHash({
     projectId,
     releaseIdentifier: imagery.releaseIdentifier,
     storageStrategy: imagery.storageStrategy,
@@ -1884,6 +2504,31 @@ function ensureTemporalReferenceRasterLayer(
     ? temporalReferenceSourceSignature(options.projectId, imagery)
     : null;
   const previousSignature = options?.sourceSignatures[sourceId] ?? null;
+  if (
+    shouldSkipReferenceRegistration({
+      previousSignature,
+      nextSignature,
+      sourceExists: Boolean(map.getSource(sourceId)),
+      layerExists: Boolean(map.getLayer(layerId)),
+    })
+  ) {
+    devLog("TEMPORAL_REFERENCE_REGISTRATION_SKIPPED", {
+      projectId: options?.projectId ?? null,
+      releaseIdentifier: imagery.releaseIdentifier,
+      sourceId,
+      layerId,
+      signatureHash: nextSignature,
+      changed: false,
+      mode: "reuse",
+    });
+    return {
+      layerId,
+      sourceId,
+      signature: nextSignature,
+      previousSignature,
+      mode: "reuse",
+    };
+  }
   const directTilesUrlTemplate = normalizeTileUrlTemplate(imagery.tilesUrlTemplate);
   const resolvedTileTemplate = normalizeTileUrlTemplate(
     Array.isArray(options?.resolvedTilejson?.tiles) && typeof options?.resolvedTilejson?.tiles?.[0] === "string"
@@ -1920,9 +2565,10 @@ function ensureTemporalReferenceRasterLayer(
       releaseIdentifier: imagery.releaseIdentifier,
       sourceId,
       layerId,
-      previousSignature,
-      nextSignature,
-      signature: nextSignature,
+      previousSignatureHash: previousSignature,
+      nextSignatureHash: nextSignature,
+      signatureHash: nextSignature,
+      changed: true,
       tileVersion:
         imagery.tilesUrlTemplate ??
         imagery.tilejsonUrl ??
@@ -1949,7 +2595,8 @@ function ensureTemporalReferenceRasterLayer(
       releaseIdentifier: imagery.releaseIdentifier,
       sourceId,
       layerId,
-      signature: nextSignature,
+      signatureHash: nextSignature,
+      changed: true,
       tileVersion:
         imagery.tilesUrlTemplate ??
         imagery.tilejsonUrl ??
@@ -1994,9 +2641,8 @@ function ensureTemporalReferenceRasterLayer(
       releaseIdentifier: imagery.releaseIdentifier,
       sourceId,
       layerId,
-      signature: nextSignature,
-      previousSignature,
-      nextSignature,
+      signatureHash: nextSignature,
+      changed: false,
       mode: "reuse",
       tileVersion:
         imagery.tilesUrlTemplate ??
@@ -2007,6 +2653,9 @@ function ensureTemporalReferenceRasterLayer(
       tilesUrlTemplate: imagery.tilesUrlTemplate,
       cogUrl: imagery.cogUrl,
     });
+    if (nextSignature && options) {
+      options.sourceSignatures[sourceId] = nextSignature;
+    }
   }
   if (!map.getLayer(layerId)) {
     map.addLayer(
@@ -2057,6 +2706,31 @@ function ensureTemporalReferenceImageLayer(
     : null;
   const previousSignature = options?.sourceSignatures[sourceId] ?? null;
   let mode: TemporalReferenceSourceLifecycleMode = "reuse";
+  if (
+    shouldSkipReferenceRegistration({
+      previousSignature,
+      nextSignature,
+      sourceExists: Boolean(map.getSource(sourceId)),
+      layerExists: Boolean(map.getLayer(layerId)),
+    })
+  ) {
+    devLog("TEMPORAL_REFERENCE_REGISTRATION_SKIPPED", {
+      projectId: options?.projectId ?? null,
+      releaseIdentifier: imagery.releaseIdentifier,
+      sourceId,
+      layerId,
+      signatureHash: nextSignature,
+      changed: false,
+      mode: "reuse",
+    });
+    return {
+      layerId,
+      sourceId,
+      signature: nextSignature,
+      previousSignature,
+      mode: "reuse",
+    };
+  }
   if (nextSignature && map.getSource(sourceId) && previousSignature !== nextSignature) {
     mode = "recreate";
     devLog("TEMPORAL_REFERENCE_SOURCE_RECREATE", {
@@ -2064,9 +2738,10 @@ function ensureTemporalReferenceImageLayer(
       releaseIdentifier: imagery.releaseIdentifier,
       sourceId,
       layerId,
-      previousSignature,
-      nextSignature,
-      signature: nextSignature,
+      previousSignatureHash: previousSignature,
+      nextSignatureHash: nextSignature,
+      signatureHash: nextSignature,
+      changed: true,
       recreateReason: "signature_changed",
       tilejsonUrl: imagery.tilejsonUrl,
       tilesUrlTemplate: imagery.tilesUrlTemplate,
@@ -2092,7 +2767,8 @@ function ensureTemporalReferenceImageLayer(
       releaseIdentifier: imagery.releaseIdentifier,
       sourceId,
       layerId,
-      signature: nextSignature,
+      signatureHash: nextSignature,
+      changed: true,
       tileVersion:
         imagery.tilesUrlTemplate ??
         imagery.tilejsonUrl ??
@@ -2109,9 +2785,8 @@ function ensureTemporalReferenceImageLayer(
       releaseIdentifier: imagery.releaseIdentifier,
       sourceId,
       layerId,
-      signature: nextSignature,
-      previousSignature,
-      nextSignature,
+      signatureHash: nextSignature,
+      changed: false,
       mode: "reuse",
       tileVersion:
         imagery.tilesUrlTemplate ??
@@ -2129,7 +2804,8 @@ function ensureTemporalReferenceImageLayer(
       releaseIdentifier: imagery.releaseIdentifier,
       sourceId,
       layerId,
-      signature: nextSignature,
+      signatureHash: nextSignature,
+      changed: true,
       tileVersion:
         imagery.tilesUrlTemplate ??
         imagery.tilejsonUrl ??
@@ -2156,7 +2832,7 @@ function setTemporalReferenceLayerVisibility(map: MapLibreMap, layerId: string, 
     if (map.getLayoutProperty(layerId, "visibility") === nextVisibility) {
       return;
     }
-    map.setLayoutProperty(layerId, "visibility", nextVisibility);
+    setLayerLayoutPropertyIfChanged(map, layerId, "visibility", nextVisibility);
     devLog("TEMPORAL_REFERENCE_LAYER_VISIBILITY", {
       layerId,
       visibility: nextVisibility,
@@ -2217,14 +2893,14 @@ function moveReferenceOverlaysAboveTemporalImagery(map: MapLibreMap, activeRefer
   ];
   for (const layerId of overlayLayerIds) {
     if (map.getLayer(layerId)) {
-      map.moveLayer(layerId);
+      moveLayerToTopIfNeeded(map, layerId);
     }
   }
   for (const referenceLayer of referenceLayers) {
     for (const suffix of ["fill", "line", "circle"]) {
       const layerId = `${referenceSourceId(referenceLayer.layer_id)}-${suffix}`;
       if (map.getLayer(layerId)) {
-        map.moveLayer(layerId);
+        moveLayerToTopIfNeeded(map, layerId);
       }
     }
   }
@@ -2279,11 +2955,70 @@ function scheduleIdle(task: () => void, timeoutMs: number): () => void {
   return () => window.clearTimeout(timer);
 }
 
-function setLayerVisibility(map: MapLibreMap, layerId: string, visible: boolean) {
+function setPaintPropertyIfChanged(map: MapLibreMap, layerId: string, property: string, value: unknown): boolean {
   if (!map.getLayer(layerId)) {
-    return;
+    return false;
   }
-  map.setLayoutProperty(layerId, "visibility", visible ? "visible" : "none");
+  if (!shouldApplyMapValue(map.getPaintProperty(layerId, property), value)) {
+    return false;
+  }
+  map.setPaintProperty(layerId, property, value);
+  return true;
+}
+
+function setLayerLayoutPropertyIfChanged(map: MapLibreMap, layerId: string, property: string, value: unknown): boolean {
+  if (!map.getLayer(layerId)) {
+    return false;
+  }
+  if (!shouldApplyMapValue(map.getLayoutProperty(layerId, property), value)) {
+    return false;
+  }
+  map.setLayoutProperty(layerId, property, value);
+  return true;
+}
+
+function setLayerFilterIfChanged(map: MapLibreMap, layerId: string, filter: unknown[] | null): boolean {
+  if (!map.getLayer(layerId)) {
+    return false;
+  }
+  if (!shouldApplyMapValue(map.getFilter(layerId) ?? null, filter)) {
+    return false;
+  }
+  map.setFilter(layerId, filter as maplibregl.FilterSpecification | null);
+  return true;
+}
+
+function moveLayerToTopIfNeeded(map: MapLibreMap, layerId: string): boolean {
+  const layers = map.getStyle()?.layers ?? [];
+  if (!map.getLayer(layerId) || layers[layers.length - 1]?.id === layerId) {
+    return false;
+  }
+  map.moveLayer(layerId);
+  return true;
+}
+
+function moveLayerBeforeIfNeeded(map: MapLibreMap, layerId: string, beforeLayerId?: string): boolean {
+  if (!map.getLayer(layerId)) {
+    return false;
+  }
+  if (!beforeLayerId || !map.getLayer(beforeLayerId)) {
+    return moveLayerToTopIfNeeded(map, layerId);
+  }
+  const layerIds = (map.getStyle()?.layers ?? []).map((layer) => layer.id);
+  const targetIndex = layerIds.indexOf(layerId);
+  const beforeIndex = layerIds.indexOf(beforeLayerId);
+  if (beforeIndex > 0 && targetIndex === beforeIndex - 1) {
+    return false;
+  }
+  map.moveLayer(layerId, beforeLayerId);
+  return true;
+}
+
+function setLayerVisibility(map: MapLibreMap, layerId: string, visible: boolean): boolean {
+  if (!map.getLayer(layerId)) {
+    return false;
+  }
+  return setLayerLayoutPropertyIfChanged(map, layerId, "visibility", visible ? "visible" : "none");
 }
 
 function getTemporalLayerPaintDiagnostics(map: MapLibreMap, layerId: string): Record<string, unknown> {
@@ -2441,19 +3176,19 @@ function syncReferenceLayers(map: MapLibreMap, layers: ReferenceLayerPresentatio
 
     [fillLayerId, lineLayerId, circleLayerId].forEach((layerId) => setLayerVisibility(map, layerId, layer.visible));
     if (map.getLayer(fillLayerId)) {
-      map.setPaintProperty(fillLayerId, "fill-color", layer.style.fill_color);
-      map.setPaintProperty(fillLayerId, "fill-opacity", layer.style.fill_opacity * opacity);
-      map.setPaintProperty(fillLayerId, "fill-outline-color", layer.style.outline_color);
+      setPaintPropertyIfChanged(map, fillLayerId, "fill-color", layer.style.fill_color);
+      setPaintPropertyIfChanged(map, fillLayerId, "fill-opacity", layer.style.fill_opacity * opacity);
+      setPaintPropertyIfChanged(map, fillLayerId, "fill-outline-color", layer.style.outline_color);
     }
     if (map.getLayer(lineLayerId)) {
-      map.setPaintProperty(lineLayerId, "line-color", layer.style.color);
-      map.setPaintProperty(lineLayerId, "line-opacity", opacity);
-      map.setPaintProperty(lineLayerId, "line-width", layer.style.line_width);
+      setPaintPropertyIfChanged(map, lineLayerId, "line-color", layer.style.color);
+      setPaintPropertyIfChanged(map, lineLayerId, "line-opacity", opacity);
+      setPaintPropertyIfChanged(map, lineLayerId, "line-width", layer.style.line_width);
     }
     if (map.getLayer(circleLayerId)) {
-      map.setPaintProperty(circleLayerId, "circle-color", layer.style.color);
-      map.setPaintProperty(circleLayerId, "circle-opacity", opacity);
-      map.setPaintProperty(circleLayerId, "circle-radius", layer.style.point_radius);
+      setPaintPropertyIfChanged(map, circleLayerId, "circle-color", layer.style.color);
+      setPaintPropertyIfChanged(map, circleLayerId, "circle-opacity", opacity);
+      setPaintPropertyIfChanged(map, circleLayerId, "circle-radius", layer.style.point_radius);
     }
   });
 }
@@ -2606,48 +3341,52 @@ function ensureOperationalLayers(map: MapLibreMap) {
   ensureFillLayer(map, "buffer-layers-fill", "buffer-layers", {
     "fill-color": "#c084fc",
     "fill-opacity": 0.35,
-    "fill-outline-color": "#7c3aed",
+    "fill-outline-color": "rgba(0, 0, 0, 0)",
   });
   ensureLineLayer(map, "buffer-layers-line", "buffer-layers", {
     "line-color": "#7c3aed",
+    "line-opacity": 0,
     "line-width": 2.5,
     "line-dasharray": [4, 3],
   });
   ensureFillLayer(map, "buffer-10m-fill", "buffer-10m", {
     "fill-color": BUILDING_CHANGE_BUFFER_FILL_COLORS["10m"],
     "fill-opacity": NON_CUMULATIVE_BUFFER_FILL_OPACITY,
-    "fill-outline-color": "#16a34a",
+    "fill-outline-color": "rgba(0, 0, 0, 0)",
   });
   ensureLineLayer(map, "buffer-10m-line", "buffer-10m", {
     "line-color": "#16a34a",
+    "line-opacity": 0,
     "line-width": 3,
     "line-dasharray": [4, 3],
   });
   ensureFillLayer(map, "buffer-15m-fill", "buffer-15m", {
     "fill-color": BUILDING_CHANGE_BUFFER_FILL_COLORS["15m"],
     "fill-opacity": NON_CUMULATIVE_BUFFER_FILL_OPACITY,
-    "fill-outline-color": "#d97706",
+    "fill-outline-color": "rgba(0, 0, 0, 0)",
   });
   ensureLineLayer(map, "buffer-15m-line", "buffer-15m", {
     "line-color": "#d97706",
+    "line-opacity": 0,
     "line-width": 3.25,
     "line-dasharray": [5, 3],
   });
   ensureFillLayer(map, "buffer-20m-fill", "buffer-20m", {
     "fill-color": BUILDING_CHANGE_BUFFER_FILL_COLORS["20m"],
     "fill-opacity": NON_CUMULATIVE_BUFFER_FILL_OPACITY,
-    "fill-outline-color": "#a855f7",
+    "fill-outline-color": "rgba(0, 0, 0, 0)",
   });
   ensureLineLayer(map, "buffer-20m-line", "buffer-20m", {
     "line-color": "#a855f7",
+    "line-opacity": 0,
     "line-width": 3.5,
     "line-dasharray": [6, 3],
   });
-  if (map.getLayer("temporal-additions-fill")) {
+    if (map.getLayer("temporal-additions-fill")) {
     ["buffer-10m-fill", "buffer-10m-line", "buffer-15m-fill", "buffer-15m-line", "buffer-20m-fill", "buffer-20m-line"].forEach(
       (layerId) => {
         if (map.getLayer(layerId)) {
-          map.moveLayer(layerId, "temporal-additions-fill");
+          moveLayerBeforeIfNeeded(map, layerId, "temporal-additions-fill");
         }
       },
     );
@@ -2804,7 +3543,7 @@ function applyLayerVisibilityState(map: MapLibreMap, layerState: LayerToggleStat
 }
 
 function defaultLayerState(workflowMode: WorkflowMode, hasPairResult: boolean): LayerToggleState {
-  return {
+  const state: LayerToggleState = {
     t1Preview: workflowMode === "pairwise" ? false : false,
     t2Preview: workflowMode === "pairwise" ? false : false,
     temporalReferenceImagery: workflowMode === "temporal",
@@ -2817,6 +3556,7 @@ function defaultLayerState(workflowMode: WorkflowMode, hasPairResult: boolean): 
     buffer15m: false,
     buffer20m: false,
     temporalAdditions: workflowMode === "temporal",
+    selectedMilestoneAdditions: workflowMode === "temporal",
     temporalCumulativeBuffer10m: false,
     temporalCumulativeBuffer15m: false,
     temporalCumulativeBuffer20m: false,
@@ -2830,6 +3570,44 @@ function defaultLayerState(workflowMode: WorkflowMode, hasPairResult: boolean): 
     temporalManualOverride: workflowMode === "temporal",
     labels: true,
   };
+  if (workflowMode !== "temporal" || typeof window === "undefined" || !isTemporalRenderAuditEnabled()) {
+    return state;
+  }
+  const forcedLayerKeys = new URLSearchParams(window.location.search)
+    .get("temporalLayerKeys")
+    ?.split(",")
+    .map((value) => value.trim())
+    .filter(Boolean) as LayerToggleKey[] | undefined;
+  if (!forcedLayerKeys?.length) {
+    return state;
+  }
+  const temporalOutputKeys: LayerToggleKey[] = [
+    "temporalAdditions",
+    "selectedMilestoneAdditions",
+    "buffer10m",
+    "buffer15m",
+    "buffer20m",
+    "temporalCumulativeBuffer10m",
+    "temporalCumulativeBuffer15m",
+    "temporalCumulativeBuffer20m",
+    "temporalAutomated",
+    "temporalAutomatedBuildingBlocks",
+    "temporalEffectiveBuildingBlocks",
+    "temporalConvexHull",
+    "temporalCumulative",
+    "temporalCumulativeGrowthBlocks",
+    "temporalCumulativeGrowthEnvelope",
+    "temporalManualOverride",
+  ];
+  for (const key of temporalOutputKeys) {
+    state[key] = false;
+  }
+  for (const key of forcedLayerKeys) {
+    if (key in state) {
+      state[key] = true;
+    }
+  }
+  return state;
 }
 
 function normalizeNominatimResults(payload: unknown, unnamedLocationLabel: string): SearchResult[] {
@@ -3120,14 +3898,148 @@ export function MapView({
   );
   const temporalAvailableMilestoneIds =
     workflowMode === "temporal" ? temporalPresentation?.availableMilestoneIds ?? [] : [];
+  const temporalAvailableMilestones =
+    workflowMode === "temporal"
+      ? (temporalPresentation?.availableMilestones?.length
+          ? temporalPresentation.availableMilestones
+          : temporalAvailableMilestoneIds.map((releaseIdentifier) => ({ releaseIdentifier, date: null })))
+      : [];
   const temporalMilestoneColorByReleaseIdentifier = useMemo(
-    () => (workflowMode === "temporal" ? getMilestoneColorMap(temporalAvailableMilestoneIds) : {}),
-    [temporalAvailableMilestoneIds, workflowMode],
+    () => (workflowMode === "temporal" ? getMilestoneColorMap(temporalAvailableMilestones) : {}),
+    [temporalAvailableMilestones, workflowMode],
+  );
+  const temporalLayerLabels = useMemo(
+    () =>
+      buildTemporalLayerLabels(
+        temporalAvailableMilestones,
+        workflowMode === "temporal" ? temporalPresentation?.selectedReleaseIdentifier : null,
+      ),
+    [temporalAvailableMilestones, temporalPresentation?.selectedReleaseIdentifier, workflowMode],
+  );
+  const includedTemporalAdditionMilestones = useMemo<IncludedTemporalMilestone[]>(
+    () =>
+      workflowMode === "temporal"
+        ? getIncludedTemporalMilestones(temporalAvailableMilestones, temporalPresentation?.selectedReleaseIdentifier)
+        : [],
+    [temporalAvailableMilestones, temporalPresentation?.selectedReleaseIdentifier, workflowMode],
+  );
+  const availableAdditionReleaseIdentifiers = useMemo(() => {
+    if (workflowMode !== "temporal") {
+      return [];
+    }
+    const additionsDefinition = TEMPORAL_ADDED_LAYER_DEFINITIONS.find((definition) => definition.kind === "additions");
+    if (!additionsDefinition) {
+      return [];
+    }
+    return temporalAddedOverlayTimeline
+      .filter((overlay) => temporalAddedLayerAvailability(overlay, additionsDefinition).available)
+      .map((overlay) => overlay.releaseIdentifier);
+  }, [temporalAddedOverlayTimeline, workflowMode]);
+  const availableTemporalOutputReleaseIdentifiersByKind = useMemo(
+    () =>
+      workflowMode === "temporal"
+        ? buildAvailableReleaseIdentifiersByKind(temporalAddedOverlayTimeline)
+        : createEmptyTemporalReleaseSetByKind(),
+    [temporalAddedOverlayTimeline, workflowMode],
+  );
+  const includedTemporalAdditionReleaseIdentifiers = useMemo(
+    () =>
+      workflowMode === "temporal"
+        ? getIncludedAdditionReleasesForCumulativeLayer(
+            temporalAvailableMilestones,
+            temporalPresentation?.selectedReleaseIdentifier,
+            availableAdditionReleaseIdentifiers,
+          )
+        : [],
+    [
+      availableAdditionReleaseIdentifiers,
+      temporalAvailableMilestones,
+      temporalPresentation?.selectedReleaseIdentifier,
+      workflowMode,
+    ],
+  );
+  const expectedTemporalOutputReleaseIdentifiersByKind = useMemo(
+    () =>
+      workflowMode === "temporal"
+        ? buildExpectedTemporalReleaseSets({
+            definitions: TEMPORAL_ADDED_LAYER_DEFINITIONS,
+            milestones: temporalAvailableMilestones,
+            selectedReleaseIdentifier: temporalPresentation?.selectedReleaseIdentifier,
+            availableByKind: availableTemporalOutputReleaseIdentifiersByKind,
+            includedAdditionReleaseIdentifiers: includedTemporalAdditionReleaseIdentifiers,
+            layerState,
+          })
+        : createEmptyTemporalReleaseSetByKind(),
+    [
+      availableTemporalOutputReleaseIdentifiersByKind,
+      includedTemporalAdditionReleaseIdentifiers,
+      layerState,
+      temporalAvailableMilestones,
+      temporalPresentation?.selectedReleaseIdentifier,
+      workflowMode,
+    ],
   );
   const activeTemporalMilestoneColor =
     temporalPresentation?.selectedReleaseIdentifier
       ? temporalMilestoneColorByReleaseIdentifier[temporalPresentation.selectedReleaseIdentifier] ?? "#B91C1C"
       : "#B91C1C";
+  const availableAdditionsByDateEntries = useMemo(
+    () => {
+      if (workflowMode !== "temporal") {
+        return [];
+      }
+      const additionsDefinition = TEMPORAL_ADDED_LAYER_DEFINITIONS.find((definition) => definition.kind === "additions");
+      if (!additionsDefinition) {
+        return [];
+      }
+      const overlayByRelease = new Map(
+        temporalAddedOverlayTimeline.map((overlay) => [overlay.releaseIdentifier, overlay] as const),
+      );
+      return includedTemporalAdditionMilestones
+        .filter((milestone) => {
+          const overlay = overlayByRelease.get(milestone.releaseIdentifier);
+          return Boolean(overlay && temporalAddedLayerAvailability(overlay, additionsDefinition).available);
+        })
+        .map((milestone) => ({
+          ...milestone,
+          color: temporalMilestoneColorByReleaseIdentifier[milestone.releaseIdentifier] ?? "#B91C1C",
+        }));
+    },
+    [
+      includedTemporalAdditionMilestones,
+      temporalAddedOverlayTimeline,
+      temporalMilestoneColorByReleaseIdentifier,
+      workflowMode,
+    ],
+  );
+  const selectedMilestoneAdditionsEntry =
+    temporalPresentation?.selectedReleaseIdentifier
+      ? (availableAdditionsByDateEntries.find(
+          (entry) => entry.releaseIdentifier === temporalPresentation.selectedReleaseIdentifier,
+        ) ?? null)
+      : null;
+  const visibleAdditionsLegendEntries = useMemo(() => {
+    const visibleEntries = new Map<string, (typeof availableAdditionsByDateEntries)[number]>();
+    if (layerState.temporalAdditions) {
+      for (const entry of availableAdditionsByDateEntries) {
+        visibleEntries.set(entry.releaseIdentifier, entry);
+      }
+    }
+    if (layerState.selectedMilestoneAdditions && selectedMilestoneAdditionsEntry) {
+      visibleEntries.set(selectedMilestoneAdditionsEntry.releaseIdentifier, selectedMilestoneAdditionsEntry);
+    }
+    return Array.from(visibleEntries.values());
+  }, [
+    availableAdditionsByDateEntries,
+    layerState.selectedMilestoneAdditions,
+    layerState.temporalAdditions,
+    selectedMilestoneAdditionsEntry,
+  ]);
+  const allPreviousAdditionsAvailable = availableAdditionsByDateEntries.length > 0;
+  const selectedMilestoneAdditionsAvailable = Boolean(selectedMilestoneAdditionsEntry);
+  const selectedMilestoneAdditionsLabel = selectedMilestoneAdditionsEntry
+    ? temporalLayerLabels.selectedAdditions
+    : "Added building";
   const temporalSelectedMilestoneIndex =
     workflowMode === "temporal" ? temporalPresentation?.selectedMilestoneIndex ?? -1 : -1;
   const temporalHydratingProject =
@@ -3184,8 +4096,10 @@ export function MapView({
         reason: "temporal_scope_not_initialized",
         expectedScopeKey,
         activeScopeKey: activeLayerStateScopeRef.current,
-        enabledLayerKeys: TEMPORAL_ADDED_LAYER_DEFINITIONS.filter((definition) => defaultTemporalState[definition.toggleKey]).map(
-          (definition) => definition.toggleKey,
+        enabledLayerKeys: dedupeStable(
+          TEMPORAL_ADDED_LAYER_DEFINITIONS.filter((definition) => defaultTemporalState[definition.toggleKey]).map(
+            (definition) => definition.toggleKey,
+          ),
         ),
       });
       return defaultTemporalState;
@@ -3522,7 +4436,7 @@ export function MapView({
       switchKey: selectedSwitchKey,
       sourceId: selectedSourceId,
       layerId: selectedLayerId,
-      signature: selectedSignature,
+      signatureHash: selectedSignature,
       tileVersion: selectedTileVersion,
       tilejsonUrl: temporalReferenceImagery.tilejsonUrl,
       tilesUrlTemplate: temporalReferenceImagery.tilesUrlTemplate,
@@ -3535,8 +4449,8 @@ export function MapView({
     devLog("TEMPORAL_REFERENCE_SIGNATURE_CHECK", {
       releaseIdentifier: temporalReferenceImagery.releaseIdentifier,
       switchKey: selectedSwitchKey,
-      previousSignature: temporalReferenceSourceSignaturesRef.current[selectedSourceId] ?? null,
-      nextSignature: selectedSignature,
+      previousSignatureHash: temporalReferenceSourceSignaturesRef.current[selectedSourceId] ?? null,
+      nextSignatureHash: selectedSignature,
       sameSignature: selectedSignatureMatches,
       tileVersion: selectedTileVersion,
     });
@@ -3816,7 +4730,7 @@ export function MapView({
         switchKey: selectedSwitchKey,
         sourceId,
         layerId,
-        signature,
+        signatureHash: signature,
         mode,
         tileVersion: selectedTileVersion,
         visibility: "visible",
@@ -3838,9 +4752,11 @@ export function MapView({
         projectId,
         activeReleaseIdentifier: releaseIdentifier,
         availableReleaseIdentifiers: temporalAvailableMilestoneIds,
+        includedAdditionReleaseIdentifiers: includedTemporalAdditionReleaseIdentifiers,
         colorByReleaseIdentifier: temporalMilestoneColorByReleaseIdentifier,
         layerState: getTemporalOutputSyncLayerState(projectId),
         registeredLayerIds: temporalAddedLayerIdsRef.current,
+        expectedReleaseIdentifiersByKind: expectedTemporalOutputReleaseIdentifiersByKind,
         expectedActiveLayerIds: [],
       });
       return true;
@@ -4147,7 +5063,8 @@ export function MapView({
         switchKey: selectedSwitchKey,
         sourceId: selectedSourceId,
         layerId: selectedLayerId,
-        signature: selectedSignature,
+        signatureHash: selectedSignature,
+        changed: false,
         mode: "reuse",
         tileVersion: selectedTileVersion,
         tilejsonUrl: temporalReferenceImagery.tilejsonUrl,
@@ -4171,7 +5088,7 @@ export function MapView({
         switchKey: selectedSwitchKey,
         sourceId: selectedSourceId,
         layerId: selectedLayerId,
-        signature: selectedSignature,
+        signatureHash: selectedSignature,
         mode: "reuse",
         tileVersion: selectedTileVersion,
         visibility: "visible",
@@ -4192,9 +5109,11 @@ export function MapView({
         projectId,
         activeReleaseIdentifier: temporalReferenceImagery.releaseIdentifier,
         availableReleaseIdentifiers: temporalAvailableMilestoneIds,
+        includedAdditionReleaseIdentifiers: includedTemporalAdditionReleaseIdentifiers,
         colorByReleaseIdentifier: temporalMilestoneColorByReleaseIdentifier,
         layerState: getTemporalOutputSyncLayerState(projectId),
         registeredLayerIds: temporalAddedLayerIdsRef.current,
+        expectedReleaseIdentifiersByKind: expectedTemporalOutputReleaseIdentifiersByKind,
         expectedActiveLayerIds: [],
       });
       preloadNeighbors(neighborImagery);
@@ -4252,6 +5171,8 @@ export function MapView({
     referenceLayers,
     temporalPresentation,
     temporalAvailableMilestoneIds,
+    includedTemporalAdditionReleaseIdentifiers,
+    expectedTemporalOutputReleaseIdentifiersByKind,
     temporalMilestoneColorByReleaseIdentifier,
     temporalReferenceImagery,
     temporalReferenceImageryAvailable,
@@ -4295,9 +5216,11 @@ export function MapView({
         projectId,
         activeReleaseIdentifier: temporalPresentation?.selectedReleaseIdentifier ?? null,
         availableReleaseIdentifiers: temporalAvailableMilestoneIds,
+        includedAdditionReleaseIdentifiers: includedTemporalAdditionReleaseIdentifiers,
         colorByReleaseIdentifier: temporalMilestoneColorByReleaseIdentifier,
         layerState: outputSyncLayerState,
         registeredLayerIds: temporalAddedLayerIdsRef.current,
+        expectedReleaseIdentifiersByKind: expectedTemporalOutputReleaseIdentifiersByKind,
       });
       return;
     }
@@ -4307,9 +5230,11 @@ export function MapView({
         projectId,
         activeReleaseIdentifier: temporalPresentation?.selectedReleaseIdentifier ?? null,
         availableReleaseIdentifiers: temporalAvailableMilestoneIds,
+        includedAdditionReleaseIdentifiers: includedTemporalAdditionReleaseIdentifiers,
         colorByReleaseIdentifier: temporalMilestoneColorByReleaseIdentifier,
         layerState: outputSyncLayerState,
         registeredLayerIds: temporalAddedLayerIdsRef.current,
+        expectedReleaseIdentifiersByKind: expectedTemporalOutputReleaseIdentifiersByKind,
       });
       return;
     }
@@ -4329,9 +5254,11 @@ export function MapView({
         projectId,
         activeReleaseIdentifier: null,
         availableReleaseIdentifiers: temporalAvailableMilestoneIds,
+        includedAdditionReleaseIdentifiers: includedTemporalAdditionReleaseIdentifiers,
         colorByReleaseIdentifier: temporalMilestoneColorByReleaseIdentifier,
         layerState: outputSyncLayerState,
         registeredLayerIds: temporalAddedLayerIdsRef.current,
+        expectedReleaseIdentifiersByKind: expectedTemporalOutputReleaseIdentifiersByKind,
       });
       activeTemporalAddedReleaseIdentifierRef.current = null;
       return;
@@ -4340,11 +5267,22 @@ export function MapView({
     const timelineByRelease = new Map(
       temporalAddedOverlayTimeline.map((overlay) => [overlay.releaseIdentifier, overlay] as const),
     );
-    const selectedOverlay = timelineByRelease.get(selectedReleaseIdentifier) ?? null;
-    const registrationCandidates = selectedOverlay ? [selectedOverlay] : [];
     const baselineReleaseIdentifier = temporalAvailableMilestoneIds[0] ?? null;
-    const registrationPlans: TemporalOutputLayerPlan[] = registrationCandidates.flatMap((overlay) =>
-      TEMPORAL_ADDED_LAYER_DEFINITIONS.flatMap((definition) => {
+    const registrationPlans: TemporalOutputLayerPlan[] = TEMPORAL_ADDED_LAYER_DEFINITIONS.flatMap((definition) => {
+      const expectedReleases = expectedTemporalOutputReleaseIdentifiersByKind[definition.kind] ?? [];
+      return expectedReleases.flatMap((releaseIdentifier) => {
+        const overlay = timelineByRelease.get(releaseIdentifier) ?? null;
+        if (!overlay) {
+          devLog("TEMPORAL_OUTPUT_LAYER_PLAN_SKIPPED", {
+            projectId,
+            releaseIdentifier,
+            layerKey: definition.toggleKey,
+            kind: definition.kind,
+            artifactKey: temporalAddedArtifactKey(definition.kind),
+            reason: "missing_overlay",
+          });
+          return [];
+        }
         const { plan, availability } = buildTemporalOutputLayerPlan({
           projectId,
           overlay,
@@ -4368,14 +5306,19 @@ export function MapView({
           return [];
         }
         return [plan];
-      }),
-    );
+      });
+    });
+    const registrationCandidates = Array.from(new Set(registrationPlans.map((plan) => plan.releaseIdentifier)))
+      .map((releaseIdentifier) => timelineByRelease.get(releaseIdentifier) ?? null)
+      .filter((overlay): overlay is TemporalAddedOverlayPresentation => Boolean(overlay));
     devLog("TEMPORAL_OUTPUT_LAYER_PLAN_BUILT", {
       projectId,
       releaseIdentifier: selectedReleaseIdentifier,
       activeReleaseIdentifier: selectedReleaseIdentifier,
       sourceOfTruth: "milestone_artifacts",
       baselineReleaseIdentifier,
+      includedAdditionReleaseIdentifiers: includedTemporalAdditionReleaseIdentifiers,
+      expectedReleaseIdentifiersByKind: expectedTemporalOutputReleaseIdentifiersByKind,
       plannedLayerCount: registrationPlans.length,
       plannedLayers: registrationPlans.map((plan) => ({
         layerKey: plan.layerKey,
@@ -4423,6 +5366,7 @@ export function MapView({
       projectUpdatedAt: temporalPresentation.projectUpdatedAt,
       releases: registrationCandidates.map((overlay) => overlay.releaseIdentifier),
       definitions: enabledRegistrationPlans.map((plan) => `${plan.releaseIdentifier}:${plan.definition.kind}`),
+      includedAdditionReleaseIdentifiers: includedTemporalAdditionReleaseIdentifiers,
       colors: enabledRegistrationPlans.map((plan) => [
         plan.releaseIdentifier,
         plan.definition.kind,
@@ -4523,6 +5467,7 @@ export function MapView({
       registeredLayerIds: Array.from(temporalAddedLayerIdsRef.current),
       registeredLayerCount: temporalAddedLayerIdsRef.current.size,
       releases: registrationCandidates.map((overlay) => overlay.releaseIdentifier),
+      includedAdditionReleaseIdentifiers: includedTemporalAdditionReleaseIdentifiers,
       plannedLayerCount: registrationPlans.length,
       enabledLayerCount: enabledRegistrationPlans.length,
       createdSources,
@@ -4539,14 +5484,16 @@ export function MapView({
       layerIds: Array.from(temporalAddedLayerIdsRef.current),
       sourceIds: Array.from(temporalAddedSourceIdsRef.current),
       layerStateKeys: Object.keys(outputSyncLayerState),
-      enabledLayerKeys: enabledRegistrationPlans.map((plan) => plan.definition).filter((definition) => outputSyncLayerState[definition.toggleKey]).map(
-        (definition) => definition.toggleKey,
+      enabledLayerKeys: dedupeStable(
+        enabledRegistrationPlans
+          .map((plan) => plan.definition)
+          .filter((definition) => outputSyncLayerState[definition.toggleKey])
+          .map((definition) => definition.toggleKey),
       ),
       registeredLayerIds: Array.from(temporalAddedLayerIdsRef.current),
       temporalLayerCount: temporalAddedLayerIdsRef.current.size,
       expectedOutputLayerCount: expectedLayerIds.length,
-      skippedOutputLayerCount:
-        registrationCandidates.length * TEMPORAL_ADDED_LAYER_DEFINITIONS.length - registrationPlans.length,
+      skippedOutputLayerCount: Object.values(expectedTemporalOutputReleaseIdentifiersByKind).flat().length - registrationPlans.length,
     });
 
     const syncResult = syncTemporalOutputLayers({
@@ -4554,11 +5501,58 @@ export function MapView({
       projectId,
       activeReleaseIdentifier: selectedReleaseIdentifier,
       availableReleaseIdentifiers: temporalAvailableMilestoneIds,
+      includedAdditionReleaseIdentifiers: includedTemporalAdditionReleaseIdentifiers,
       colorByReleaseIdentifier: temporalMilestoneColorByReleaseIdentifier,
       layerState: outputSyncLayerState,
       registeredLayerIds: temporalAddedLayerIdsRef.current,
+      expectedReleaseIdentifiersByKind: expectedTemporalOutputReleaseIdentifiersByKind,
       expectedActiveLayerIds: expectedLayerIds,
     });
+    const temporalDebugSnapshot = publishTemporalRuntimeDebugSnapshot({
+      map,
+      projectId,
+      selectedReleaseIdentifier,
+      layerState: outputSyncLayerState,
+      includedAdditionReleaseIdentifiers: includedTemporalAdditionReleaseIdentifiers,
+      availableAdditionReleaseIdentifiers,
+      colorByReleaseIdentifier: temporalMilestoneColorByReleaseIdentifier,
+      additionRegistrationPlans: enabledRegistrationPlans
+        .filter((plan) => plan.definition.kind === "additions")
+        .map((plan) => plan.releaseIdentifier),
+      referenceReleaseIdentifier: temporalReferenceImagery?.releaseIdentifier ?? selectedReleaseIdentifier,
+      expectedReleaseIdentifiersByKind: expectedTemporalOutputReleaseIdentifiersByKind,
+      availableReleaseIdentifiersByKind: availableTemporalOutputReleaseIdentifiersByKind,
+      labelByLayerKey: {
+        allNewBuildings: temporalLayerLabels.allPreviousAdditions,
+        selectedAdditions: temporalLayerLabels.selectedAdditions,
+        temporalAdditions: temporalLayerLabels.allPreviousAdditions,
+        selectedMilestoneAdditions: temporalLayerLabels.selectedAdditions,
+        buffer10m: temporalLayerLabels.buffer10m,
+        buffer15m: temporalLayerLabels.buffer15m,
+        buffer20m: temporalLayerLabels.buffer20m,
+        temporalCumulativeBuffer10m: temporalLayerLabels.cumulativeBuffer10m,
+        temporalCumulativeBuffer15m: temporalLayerLabels.cumulativeBuffer15m,
+        temporalCumulativeBuffer20m: temporalLayerLabels.cumulativeBuffer20m,
+      },
+    });
+    if (temporalDebugSnapshot) {
+      devLog("TEMPORAL_RUNTIME_DEBUG_SNAPSHOT", {
+        projectId,
+        selectedReleaseIdentifier,
+        includedAdditionReleases: temporalDebugSnapshot.includedAdditionReleases,
+        additionRegistrationPlans: temporalDebugSnapshot.additionRegistrationPlans,
+        registeredAdditionSources: temporalDebugSnapshot.registeredAdditionSources,
+        registeredAdditionLayers: temporalDebugSnapshot.registeredAdditionLayers,
+        visibleAdditionLayers: temporalDebugSnapshot.visibleAdditionLayers,
+        hiddenFutureAdditionLayers: temporalDebugSnapshot.hiddenFutureAdditionLayers,
+        enabledLayerKeys: temporalDebugSnapshot.enabledLayerKeys,
+        layerContracts: temporalDebugSnapshot.layerContracts,
+        bufferLayers: temporalDebugSnapshot.bufferLayers,
+        layerIdCollisions: temporalDebugSnapshot.layerIdCollisions,
+        sourceIdCollisions: temporalDebugSnapshot.sourceIdCollisions,
+        missing: temporalDebugSnapshot.missing,
+      });
+    }
     const renderAuditEnabled = isTemporalRenderAuditEnabled();
     if (renderAuditEnabled) {
       scheduleTemporalOutputRenderConfirmation({
@@ -4596,9 +5590,11 @@ export function MapView({
           projectId,
           activeReleaseIdentifier: selectedReleaseIdentifier,
           availableReleaseIdentifiers: temporalAvailableMilestoneIds,
+          includedAdditionReleaseIdentifiers: includedTemporalAdditionReleaseIdentifiers,
           colorByReleaseIdentifier: temporalMilestoneColorByReleaseIdentifier,
           layerState: outputSyncLayerState,
           registeredLayerIds: temporalAddedLayerIdsRef.current,
+          expectedReleaseIdentifiersByKind: expectedTemporalOutputReleaseIdentifiersByKind,
           expectedActiveLayerIds: expectedLayerIds,
         });
         if (retryResult.missingLayerCount > 0 || temporalAddedLayerIdsRef.current.size === 0) {
@@ -4615,9 +5611,11 @@ export function MapView({
               projectId,
               activeReleaseIdentifier: selectedReleaseIdentifier,
               availableReleaseIdentifiers: temporalAvailableMilestoneIds,
+              includedAdditionReleaseIdentifiers: includedTemporalAdditionReleaseIdentifiers,
               colorByReleaseIdentifier: temporalMilestoneColorByReleaseIdentifier,
               layerState: outputSyncLayerState,
               registeredLayerIds: temporalAddedLayerIdsRef.current,
+              expectedReleaseIdentifiersByKind: expectedTemporalOutputReleaseIdentifiersByKind,
               expectedActiveLayerIds: expectedLayerIds,
             });
           }, 150);
@@ -4684,8 +5682,13 @@ export function MapView({
     layerState,
     mapStyleRevision,
     temporalAddedOverlayTimeline,
+    availableAdditionReleaseIdentifiers,
+    availableTemporalOutputReleaseIdentifiersByKind,
     temporalAvailableMilestoneIds,
+    includedTemporalAdditionReleaseIdentifiers,
+    expectedTemporalOutputReleaseIdentifiersByKind,
     temporalMilestoneColorByReleaseIdentifier,
+    temporalLayerLabels,
     temporalPresentation,
     temporalProjectId,
     temporalSelectedMilestoneIndex,
@@ -5290,37 +6293,41 @@ export function MapView({
         ? ([
             {
               key: "temporalAdditions",
-              label: t("map.additions"),
-              enabled:
-                selectedTemporalMilestoneReady &&
-                (temporalVectors.temporalAdditions.features.length > 0 || activeTemporalArtifactAvailable("additions")),
+              label: temporalLayerLabels.allPreviousAdditions,
+              enabled: selectedTemporalMilestoneReady && allPreviousAdditionsAvailable,
+              swatch: { color: activeTemporalMilestoneColor, opacity: 0.88 },
+            },
+            {
+              key: "selectedMilestoneAdditions",
+              label: selectedMilestoneAdditionsLabel,
+              enabled: selectedTemporalMilestoneReady && selectedMilestoneAdditionsAvailable,
               swatch: { color: activeTemporalMilestoneColor, opacity: 0.88 },
             },
             {
               key: "buffer10m",
-              label: `${t("map.building_change_buffer")} 10 m`,
+              label: temporalLayerLabels.buffer10m,
               enabled:
                 selectedTemporalMilestoneReady &&
                 (pairwiseBuffers.buffer10m.features.length > 0 || activeTemporalArtifactAvailable("building_change_buffer_10m")),
-              swatch: { color: activeTemporalMilestoneColor, opacity: 0.3 },
+              swatch: { color: activeTemporalMilestoneColor, opacity: 1 },
             },
             {
               key: "buffer15m",
-              label: `${t("map.building_change_buffer")} 15 m`,
+              label: temporalLayerLabels.buffer15m,
               enabled:
                 selectedTemporalMilestoneReady &&
                 (pairwiseBuffers.buffer15m.features.length > 0 || activeTemporalArtifactAvailable("building_change_buffer_15m")),
             },
             {
               key: "buffer20m",
-              label: `${t("map.building_change_buffer")} 20 m`,
+              label: temporalLayerLabels.buffer20m,
               enabled:
                 selectedTemporalMilestoneReady &&
                 (pairwiseBuffers.buffer20m.features.length > 0 || activeTemporalArtifactAvailable("building_change_buffer_20m")),
             },
             {
               key: "temporalCumulativeBuffer10m",
-              label: t("map.cumulative_building_change_buffer_10m"),
+              label: temporalLayerLabels.cumulativeBuffer10m,
               enabled:
                 selectedTemporalMilestoneReady &&
                 (temporalVectors.temporalCumulativeBuffer10m.features.length > 0 ||
@@ -5328,7 +6335,7 @@ export function MapView({
             },
             {
               key: "temporalCumulativeBuffer15m",
-              label: t("map.cumulative_building_change_buffer_15m"),
+              label: temporalLayerLabels.cumulativeBuffer15m,
               enabled:
                 selectedTemporalMilestoneReady &&
                 (temporalVectors.temporalCumulativeBuffer15m.features.length > 0 ||
@@ -5336,7 +6343,7 @@ export function MapView({
             },
             {
               key: "temporalCumulativeBuffer20m",
-              label: t("map.cumulative_building_change_buffer_20m"),
+              label: temporalLayerLabels.cumulativeBuffer20m,
               enabled:
                 selectedTemporalMilestoneReady &&
                 (temporalVectors.temporalCumulativeBuffer20m.features.length > 0 ||
@@ -5391,6 +6398,7 @@ export function MapView({
     selectedTemporalMilestoneReady,
     temporalPresentation?.projectId,
     temporalPresentation?.selectedReleaseIdentifier,
+    visibleAdditionsLegendEntries.length,
     temporalVectors.temporalAdditions.features.length,
     temporalVectors.temporalConvexHull.features.length,
     temporalVectors.temporalCumulative.features.length,
@@ -5641,6 +6649,26 @@ export function MapView({
           ) : null}
         </div>
       </div>
+      ) : null}
+
+      {visibleAdditionsLegendEntries.length > 0 ? (
+        <div className="pointer-events-none absolute bottom-4 right-4 z-10 max-w-[calc(100%-2rem)]">
+          <div className="rounded-sm border border-border bg-card/95 px-3 py-2 text-sm text-foreground shadow-panel backdrop-blur-sm">
+            <div className="mb-1.5 text-caption font-medium text-foreground">{t("map.additions_by_date")}</div>
+            <div className="space-y-1">
+              {visibleAdditionsLegendEntries.map((entry) => (
+                <div key={entry.releaseIdentifier} className="flex items-center gap-2 text-caption text-foreground">
+                  <span
+                    aria-hidden="true"
+                    className="h-3 w-3 shrink-0 rounded-[2px] border border-border"
+                    style={{ backgroundColor: entry.color }}
+                  />
+                  <span>{entry.label}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
       ) : null}
 
       {draftModeActive ? (

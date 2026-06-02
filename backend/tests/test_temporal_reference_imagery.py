@@ -22,8 +22,22 @@ from src.api.deps import get_app_settings
 from src.api.main import app
 from src.config import Settings
 from src.domain.tiling import tile_range_for_bbox
-from src.schemas import TemporalMilestone, TemporalProject, TemporalReferenceImagery
-from src.services.temporal_projects import get_temporal_project, repair_temporal_project_reference_imagery, save_temporal_project
+from src.domain.cache import save_cached_response
+from src.domain.reference_imagery_cache import (
+    build_aoi_hash,
+    build_reference_imagery_cache_metadata,
+    build_reference_imagery_key,
+    build_reference_imagery_cache_key_payload,
+    reference_imagery_cache_cog_path,
+    write_reference_imagery_cache_metadata,
+)
+from src.schemas import RunResponse, SummaryStats, TemporalMilestone, TemporalProject, TemporalReferenceImagery
+from src.services.temporal_projects import (
+    get_temporal_project,
+    load_temporal_project_response_payload,
+    repair_temporal_project_reference_imagery,
+    save_temporal_project,
+)
 import src.services.temporal_projects as temporal_projects_service
 from src.utils.geometry import bounds_dict, parse_aoi_geometry
 import src.services.temporal_reference_imagery as reference_imagery_service
@@ -767,6 +781,58 @@ def test_reference_layers_repair_does_not_reuse_different_aoi(tmp_path: Path) ->
     assert not target_cog.exists()
 
 
+def test_reference_layers_repair_materializes_matching_canonical_cache(tmp_path: Path) -> None:
+    settings = Settings(runtime_cache_dir=tmp_path / "runtime")
+    selected_release = "WB_2024_R02"
+    aoi_geojson = _test_aoi()
+    source_path = tmp_path / "source_wayback_rgb.tif"
+    valid_mask_path = tmp_path / "source_valid_mask.tif"
+    _write_rgb_raster(source_path)
+    _write_valid_mask_raster(valid_mask_path)
+    source_reference = build_temporal_reference_imagery(
+        project_id="temporal-source-canonical-reference",
+        project_dir=settings.temporal_projects_dir / "temporal-source-canonical-reference",
+        release_identifier=selected_release,
+        source=TemporalReferenceSource(
+            image_path=None,
+            image_png_data_url=None,
+            raster_bounds_wgs84=None,
+            source_raster_path=str(source_path),
+            valid_mask_path=str(valid_mask_path),
+            aoi_geojson=aoi_geojson,
+        ),
+        settings=settings,
+    )
+    assert source_reference is not None
+    assert source_reference.canonical_cog_path
+    assert source_reference.reference_imagery_key
+    if source_reference.cog_path:
+        Path(source_reference.cog_path).unlink()
+    target_project_id = "temporal-target-canonical-reference"
+    project_dir = _write_temporal_project_without_reference(
+        settings,
+        target_project_id,
+        selected_release=selected_release,
+        aoi_geojson=aoi_geojson,
+    )
+
+    repaired_project, repaired_count = repair_temporal_project_reference_imagery(target_project_id, settings)
+
+    target_cog = project_dir / "milestones" / selected_release / "reference_imagery_cog.tif"
+    project_payload = json.loads((project_dir / "project.json").read_text())
+    manifest_payload = json.loads((project_dir / "project_manifest.json").read_text())
+    reference = repaired_project.milestones[0].reference_imagery
+    assert repaired_count == 1
+    assert target_cog.is_file()
+    assert reference is not None
+    assert reference.cog_path == str(target_cog)
+    assert reference.canonical_cog_path == source_reference.canonical_cog_path
+    assert reference.reference_imagery_key == source_reference.reference_imagery_key
+    assert reference.tilejson_url.endswith("/reference/tilejson.json")
+    assert project_payload["milestones"][0]["reference_imagery"]["cog_path"] == str(target_cog)
+    assert manifest_payload["milestones"][0]["reference_imagery"]["canonical_cog_path"] == source_reference.canonical_cog_path
+
+
 def test_reference_layers_repair_ignores_additions_without_reference_source(tmp_path: Path) -> None:
     settings = Settings(runtime_cache_dir=tmp_path / "runtime")
     project_id = "temporal-additions-only"
@@ -1397,3 +1463,303 @@ def test_tilejson_includes_version_token_and_is_revalidatable(tmp_path: Path) ->
     assert len(payload["tiles"]) == 1
     assert "?v=" in payload["tiles"][0]
     assert "renderer2" in payload["tiles"][0]
+
+
+def test_build_temporal_reference_imagery_uses_canonical_cache_with_project_compatibility_path(tmp_path: Path) -> None:
+    settings = Settings(runtime_cache_dir=tmp_path / "runtime")
+    source_path = tmp_path / "source_wayback_rgb.tif"
+    valid_mask_path = tmp_path / "source_valid_mask.tif"
+    project_dir = settings.temporal_projects_dir / "temporal-ref-cache-a"
+    release_identifier = "WB_2026_R04"
+    _write_rgb_raster(source_path)
+    _write_valid_mask_raster(valid_mask_path)
+
+    reference = build_temporal_reference_imagery(
+        project_id="temporal-ref-cache-a",
+        project_dir=project_dir,
+        release_identifier=release_identifier,
+        source=TemporalReferenceSource(
+            image_path=None,
+            image_png_data_url=None,
+            raster_bounds_wgs84=None,
+            source_raster_path=str(source_path),
+            valid_mask_path=str(valid_mask_path),
+            aoi_geojson=_test_aoi(),
+        ),
+        settings=settings,
+    )
+
+    assert reference is not None
+    assert reference.cog_path == str(project_dir / "milestones" / release_identifier / "reference_imagery_cog.tif")
+    assert reference.cog_url is not None
+    assert reference.tilejson_url == (
+        f"/api/temporal-projects/temporal-ref-cache-a/milestones/{release_identifier}/reference/tilejson.json"
+    )
+    assert reference.tiles_url_template == (
+        f"/api/temporal-projects/temporal-ref-cache-a/milestones/{release_identifier}/reference/tiles/{{z}}/{{x}}/{{y}}.png"
+    )
+    assert reference.reference_imagery_key
+    assert reference.canonical_cog_path
+    assert reference.materialization_method in {"hardlink", "symlink", "copy", "existing"}
+    assert Path(reference.cog_path).is_file()
+    assert Path(reference.canonical_cog_path).is_file()
+    assert settings.reference_imagery_cache_dir is not None
+    assert Path(reference.canonical_cog_path).is_relative_to(settings.reference_imagery_cache_dir)
+
+
+def test_save_temporal_project_publishes_reference_imagery_from_run_manifest_sources(tmp_path: Path) -> None:
+    settings = Settings(runtime_cache_dir=tmp_path / "runtime")
+    project_id = "temporal-manifest-reference"
+    request_hash = "manifest-reference-run"
+    project_dir = settings.temporal_projects_dir / project_id
+    source_t1 = tmp_path / "source_t1.tif"
+    source_t2 = tmp_path / "source_t2.tif"
+    mask_t1 = tmp_path / "source_t1_valid_mask.tif"
+    mask_t2 = tmp_path / "source_t2_valid_mask.tif"
+    _write_rgb_raster(source_t1)
+    _write_rgb_raster(source_t2)
+    _write_valid_mask_raster(mask_t1)
+    _write_valid_mask_raster(mask_t2)
+    response = RunResponse(
+        summary=SummaryStats(
+            request_hash=request_hash,
+            mode="full_run",
+            estimated_area_m2=1.0,
+            tile_count_t1=1,
+            tile_count_t2=1,
+            total_new_buildings=0,
+            total_building_blocks=0,
+            total_new_building_area_m2=0.0,
+            total_building_block_area_m2=0.0,
+        ),
+        preview_images=None,
+        artifacts=[],
+    )
+    save_cached_response(settings, request_hash, response)
+    manifest_path = settings.request_cache_dir / request_hash / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "artifacts": [
+                    {
+                        "path": str(source_t1),
+                        "resolved_path": str(source_t1),
+                        "artifact_type": "source",
+                        "purpose": "Wayback source raster for WB_2020_R04",
+                        "format": "tif",
+                        "metadata": {"provider": "esri_wayback", "source_id": "WB_2020_R04"},
+                    },
+                    {
+                        "path": str(mask_t1),
+                        "resolved_path": str(mask_t1),
+                        "artifact_type": "source",
+                        "purpose": "Wayback valid mask for WB_2020_R04",
+                        "format": "tif",
+                        "metadata": {"provider": "esri_wayback", "source_id": "WB_2020_R04"},
+                    },
+                    {
+                        "path": str(source_t2),
+                        "resolved_path": str(source_t2),
+                        "artifact_type": "source",
+                        "purpose": "Wayback source raster for WB_2026_R04",
+                        "format": "tif",
+                        "metadata": {"provider": "esri_wayback", "source_id": "WB_2026_R04"},
+                    },
+                    {
+                        "path": str(mask_t2),
+                        "resolved_path": str(mask_t2),
+                        "artifact_type": "source",
+                        "purpose": "Wayback valid mask for WB_2026_R04",
+                        "format": "tif",
+                        "metadata": {"provider": "esri_wayback", "source_id": "WB_2026_R04"},
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    project = TemporalProject(
+        project_id=project_id,
+        name="Manifest reference",
+        project_dir=str(project_dir),
+        aoi_geojson=_test_aoi(),
+        created_at="2026-01-01T00:00:00Z",
+        updated_at="2026-01-01T00:00:00Z",
+        milestones=[
+            {"release_identifier": "WB_2020_R04", "release_date": "2020-03-23"},
+            {
+                "release_identifier": "WB_2026_R04",
+                "release_date": "2026-04-30",
+                "status": "complete",
+                "pair_request_hash": request_hash,
+            },
+        ],
+    )
+
+    saved = save_temporal_project(project, settings)
+
+    assert all(milestone.reference_imagery is not None for milestone in saved.milestones)
+    project_payload = json.loads((project_dir / "project.json").read_text())
+    manifest_payload = json.loads((project_dir / "project_manifest.json").read_text())
+    for payload in (project_payload, manifest_payload):
+        for milestone in payload["milestones"]:
+            release_identifier = milestone["release_identifier"]
+            reference = milestone["reference_imagery"]
+            project_cog = project_dir / "milestones" / release_identifier / "reference_imagery_cog.tif"
+            assert reference["cog_path"] == str(project_cog)
+            assert reference["canonical_cog_path"]
+            assert reference["reference_imagery_key"]
+            assert reference["materialization_method"] in {"hardlink", "symlink", "copy", "existing"}
+            assert reference["tilejson_url"].endswith("/reference/tilejson.json")
+            assert reference["tiles_url_template"].endswith("/reference/tiles/{z}/{x}/{y}.png")
+            assert project_cog.is_file()
+
+
+def test_save_temporal_project_materializes_reference_imagery_from_canonical_cache_without_request_sources(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(runtime_cache_dir=tmp_path / "runtime")
+    project_id = "temporal-canonical-only-reference"
+    project_dir = settings.temporal_projects_dir / project_id
+    aoi_geojson = _test_aoi()
+    aoi_hash = temporal_projects_service._temporal_reference_aoi_hash(aoi_geojson)
+    releases = [("WB_2020_R04", "2020-03-23"), ("WB_2026_R04", "2026-04-30")]
+
+    for release_identifier, _release_date in releases:
+        key_payload = build_reference_imagery_cache_key_payload(
+            provider="esri_wayback",
+            release_identifier=release_identifier,
+            release_num=None,
+            tile_matrix_set="WebMercatorQuad",
+            zoom=18,
+            tile_range={"min_x": 1, "min_y": 1, "max_x": 1, "max_y": 1},
+            bounds_3857=[-1000.0, -1000.0, 1000.0, 1000.0],
+            source_raster_path=None,
+            valid_mask_path=None,
+            aoi_hash=aoi_hash,
+            reference_cog_format_version=4,
+        )
+        reference_key = build_reference_imagery_key(key_payload)
+        canonical_cog = reference_imagery_cache_cog_path(settings.reference_imagery_cache_dir, reference_key)
+        canonical_cog.parent.mkdir(parents=True, exist_ok=True)
+        _write_rgb_raster(canonical_cog)
+        write_reference_imagery_cache_metadata(
+            canonical_cog.with_name("metadata.json"),
+            build_reference_imagery_cache_metadata(
+                reference_imagery_key=reference_key,
+                key_payload=key_payload,
+                canonical_cog_path=canonical_cog,
+            ),
+        )
+
+    project = TemporalProject(
+        project_id=project_id,
+        name="Canonical-only reference",
+        project_dir=str(project_dir),
+        aoi_geojson=aoi_geojson,
+        created_at="2026-01-01T00:00:00Z",
+        updated_at="2026-01-01T00:00:00Z",
+        milestones=[
+            {"release_identifier": release_identifier, "release_date": release_date, "status": "complete"}
+            for release_identifier, release_date in releases
+        ],
+    )
+
+    saved = save_temporal_project(project, settings)
+    api_payload = load_temporal_project_response_payload(project_id, settings)
+    project_payload = json.loads((project_dir / "project.json").read_text())
+    manifest_payload = json.loads((project_dir / "project_manifest.json").read_text())
+
+    assert all(milestone.reference_imagery is not None for milestone in saved.milestones)
+    for payload in (project_payload, manifest_payload, api_payload):
+        assert len(payload["milestones"]) == 2
+        for milestone in payload["milestones"]:
+            release_identifier = milestone["release_identifier"]
+            reference = milestone["reference_imagery"]
+            project_cog = project_dir / "milestones" / release_identifier / "reference_imagery_cog.tif"
+            assert project_cog.is_file()
+            assert reference["cog_path"] == str(project_cog)
+            assert reference["canonical_cog_path"]
+            assert Path(reference["canonical_cog_path"]).is_file()
+            assert reference["reference_imagery_key"].startswith("refimg-v1-")
+            assert reference["materialization_method"] in {"hardlink", "symlink", "copy", "existing"}
+            assert reference["tilejson_url"] == (
+                f"/api/temporal-projects/{project_id}/milestones/{release_identifier}/reference/tilejson.json"
+            )
+            assert reference["tiles_url_template"] == (
+                f"/api/temporal-projects/{project_id}/milestones/{release_identifier}/reference/tiles/{{z}}/{{x}}/{{y}}.png"
+            )
+
+
+def test_build_temporal_reference_imagery_reuses_canonical_cache_across_projects(tmp_path: Path) -> None:
+    settings = Settings(runtime_cache_dir=tmp_path / "runtime")
+    source_path = tmp_path / "source_wayback_rgb.tif"
+    valid_mask_path = tmp_path / "source_valid_mask.tif"
+    _write_rgb_raster(source_path)
+    _write_valid_mask_raster(valid_mask_path)
+    source = TemporalReferenceSource(
+        image_path=None,
+        image_png_data_url=None,
+        raster_bounds_wgs84=None,
+        source_raster_path=str(source_path),
+        valid_mask_path=str(valid_mask_path),
+        aoi_geojson=_test_aoi(),
+    )
+
+    first = build_temporal_reference_imagery(
+        project_id="temporal-ref-cache-a",
+        project_dir=settings.temporal_projects_dir / "temporal-ref-cache-a",
+        release_identifier="WB_2026_R04",
+        source=source,
+        settings=settings,
+    )
+    second = build_temporal_reference_imagery(
+        project_id="temporal-ref-cache-b",
+        project_dir=settings.temporal_projects_dir / "temporal-ref-cache-b",
+        release_identifier="WB_2026_R04",
+        source=source,
+        settings=settings,
+    )
+
+    assert first is not None
+    assert second is not None
+    assert first.reference_imagery_key == second.reference_imagery_key
+    assert first.canonical_cog_path == second.canonical_cog_path
+    assert first.cog_path != second.cog_path
+    assert Path(first.cog_path).is_file()
+    assert Path(second.cog_path).is_file()
+
+
+def test_build_temporal_reference_imagery_can_disable_canonical_cache(tmp_path: Path) -> None:
+    settings = Settings(
+        runtime_cache_dir=tmp_path / "runtime",
+        reference_imagery_cache_enabled=False,
+    )
+    source_path = tmp_path / "source_wayback_rgb.tif"
+    valid_mask_path = tmp_path / "source_valid_mask.tif"
+    project_dir = settings.temporal_projects_dir / "temporal-ref-cache-disabled"
+    release_identifier = "WB_2026_R04"
+    _write_rgb_raster(source_path)
+    _write_valid_mask_raster(valid_mask_path)
+
+    reference = build_temporal_reference_imagery(
+        project_id="temporal-ref-cache-disabled",
+        project_dir=project_dir,
+        release_identifier=release_identifier,
+        source=TemporalReferenceSource(
+            image_path=None,
+            image_png_data_url=None,
+            raster_bounds_wgs84=None,
+            source_raster_path=str(source_path),
+            valid_mask_path=str(valid_mask_path),
+            aoi_geojson=_test_aoi(),
+        ),
+        settings=settings,
+    )
+
+    assert reference is not None
+    assert reference.cog_path == str(project_dir / "milestones" / release_identifier / "reference_imagery_cog.tif")
+    assert reference.reference_imagery_key is None
+    assert reference.canonical_cog_path is None
+    assert reference.materialization_method is None
+    assert Path(reference.cog_path).is_file()

@@ -1,6 +1,7 @@
 import { getFastApiBaseUrl } from "@/lib/env";
+import { isDevClientLogEnabled } from "@/lib/client-log-config";
 
-const ENABLE_CLIENT_LOG_RELAY = import.meta.env.VITE_ENABLE_CLIENT_LOG_RELAY !== "false";
+const ENABLE_CLIENT_LOG_RELAY = isDevClientLogEnabled(import.meta.env);
 const MAX_PAYLOAD_LENGTH = 20_000;
 const TEMPORAL_REFERENCE_PREFIX = "TEMPORAL_REFERENCE_";
 const TEMPORAL_ADDED_PREFIX = "TEMPORAL_ADDED_";
@@ -11,6 +12,7 @@ const TEMPORAL_VECTOR_TILE_PREFIX = "TEMPORAL_VECTOR_TILE_";
 const TEMPORAL_GEOJSON_PREFIX = "TEMPORAL_GEOJSON_";
 const TEMPORAL_BASELINE_PREFIX = "TEMPORAL_BASELINE_";
 const TEMPORAL_EMPTY_BASELINE_PREFIX = "TEMPORAL_EMPTY_BASELINE_";
+const TEMPORAL_CUMULATIVE_PREFIX = "TEMPORAL_CUMULATIVE_";
 const TEMPORAL_RENDER_PREFIX = "TEMPORAL_RENDER_";
 const TEMPORAL_STALE_PROJECT_PREFIX = "TEMPORAL_STALE_PROJECT_";
 const TEMPORAL_SCREENSHOT_PREFIX = "TEMPORAL_SCREENSHOT_";
@@ -79,11 +81,15 @@ function shouldRateLimitEvent(signature: string): boolean {
 }
 
 export function relayClientLog(event: string, payload: Record<string, unknown>): void {
+  if (
+    !ENABLE_CLIENT_LOG_RELAY
+  ) {
+    return;
+  }
+
   console.info(event, payload);
 
   if (
-    !ENABLE_CLIENT_LOG_RELAY ||
-    (
       !event.startsWith(TEMPORAL_REFERENCE_PREFIX) &&
       !event.startsWith(TEMPORAL_ADDED_PREFIX) &&
       !event.startsWith(TEMPORAL_OUTPUT_PREFIX) &&
@@ -93,12 +99,12 @@ export function relayClientLog(event: string, payload: Record<string, unknown>):
       !event.startsWith(TEMPORAL_GEOJSON_PREFIX) &&
       !event.startsWith(TEMPORAL_BASELINE_PREFIX) &&
       !event.startsWith(TEMPORAL_EMPTY_BASELINE_PREFIX) &&
+      !event.startsWith(TEMPORAL_CUMULATIVE_PREFIX) &&
       !event.startsWith(TEMPORAL_RENDER_PREFIX) &&
       !event.startsWith(TEMPORAL_STALE_PROJECT_PREFIX) &&
       !event.startsWith(TEMPORAL_SCREENSHOT_PREFIX) &&
       !event.startsWith(RUN_CACHE_POLL_PREFIX) &&
       !event.startsWith(REFERENCE_LAYER_PANEL_PREFIX)
-    )
   ) {
     return;
   }

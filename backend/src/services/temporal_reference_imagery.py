@@ -14,6 +14,7 @@ import tempfile
 import time
 from urllib.parse import quote
 import warnings
+from typing import TYPE_CHECKING
 
 import numpy as np
 from PIL import Image
@@ -25,8 +26,24 @@ from rasterio.warp import transform_bounds
 from rio_tiler.errors import TileOutsideBounds
 from rio_tiler.io import Reader
 
+from src.domain.reference_imagery_cache import (
+    append_reference_imagery_materialization,
+    build_aoi_hash,
+    build_reference_imagery_cache_key_payload,
+    build_reference_imagery_cache_metadata,
+    build_reference_imagery_key,
+    materialize_reference_imagery_cog,
+    read_reference_imagery_cache_metadata,
+    reference_imagery_cache_cog_path,
+    reference_imagery_cache_metadata_path,
+    valid_existing_canonical_cog,
+    write_reference_imagery_cache_metadata,
+)
 from src.schemas import TemporalReferenceImagery
 from src.utils.raster import rasterize_aoi_mask_like
+
+if TYPE_CHECKING:
+    from src.config import Settings
 
 
 WEB_MERCATOR_CRS = "EPSG:3857"
@@ -237,6 +254,24 @@ def _compute_bounds_wgs84(raster_path: Path) -> list[float] | None:
         return None
 
 
+def _compute_bounds_3857(raster_path: Path) -> list[float] | None:
+    try:
+        with rasterio.open(raster_path) as src:
+            if src.crs is None:
+                return None
+            if src.crs.to_string() == WEB_MERCATOR_CRS:
+                return [
+                    float(src.bounds.left),
+                    float(src.bounds.bottom),
+                    float(src.bounds.right),
+                    float(src.bounds.top),
+                ]
+            left, bottom, right, top = transform_bounds(src.crs, WEB_MERCATOR_CRS, *src.bounds, densify_pts=21)
+            return [float(left), float(bottom), float(right), float(top)]
+    except Exception:
+        return None
+
+
 def _compute_zoom_range(raster_path: Path) -> tuple[int, int]:
     try:
         with rasterio.open(raster_path) as src:
@@ -288,6 +323,109 @@ def _tiles_route_template(project_id: str, release_identifier: str) -> str:
         f"/milestones/{quote(release_identifier, safe='')}/reference/tiles"
         "/{z}/{x}/{y}.png"
     )
+
+
+def _ensure_cached_reference_imagery_cog(
+    *,
+    settings: "Settings",
+    project_id: str,
+    project_cog_path: Path,
+    release_identifier: str,
+    source_raster_path: Path,
+    valid_mask_path: Path | None,
+    aoi_geojson: dict[str, object] | None,
+) -> tuple[Path, str, Path, str]:
+    aoi_hash = build_aoi_hash(aoi_geojson)
+    key_payload = build_reference_imagery_cache_key_payload(
+        provider="esri_wayback",
+        release_identifier=release_identifier,
+        release_num=None,
+        tile_matrix_set=settings.tile_matrix_set,
+        zoom=settings.zoom,
+        tile_range=None,
+        bounds_3857=_compute_bounds_3857(source_raster_path),
+        source_raster_path=source_raster_path,
+        valid_mask_path=valid_mask_path,
+        aoi_hash=aoi_hash,
+        reference_cog_format_version=REFERENCE_COG_FORMAT_VERSION,
+    )
+    reference_imagery_key = build_reference_imagery_key(key_payload)
+    if settings.reference_imagery_cache_dir is None:
+        raise ValueError("Reference imagery cache is enabled but reference_imagery_cache_dir is not configured")
+    canonical_cog_path = reference_imagery_cache_cog_path(settings.reference_imagery_cache_dir, reference_imagery_key)
+    metadata_path = reference_imagery_cache_metadata_path(settings.reference_imagery_cache_dir, reference_imagery_key)
+    canonical_reused = False
+
+    if valid_existing_canonical_cog(canonical_cog_path, reference_imagery_key=reference_imagery_key):
+        try:
+            metadata = _inspect_reference_cog(canonical_cog_path)
+            canonical_stat = canonical_cog_path.stat()
+            source_stat = source_raster_path.stat()
+            valid_mask_mtime_ns = valid_mask_path.stat().st_mtime_ns if valid_mask_path is not None and valid_mask_path.is_file() else None
+            canonical_reused = (
+                metadata.format_version == REFERENCE_COG_FORMAT_VERSION
+                and metadata.has_alpha_band
+                and canonical_stat.st_mtime_ns >= source_stat.st_mtime_ns
+                and (valid_mask_mtime_ns is None or metadata.valid_mask_mtime_ns == valid_mask_mtime_ns)
+            )
+        except Exception:
+            canonical_reused = False
+
+    if not canonical_reused:
+        ensure_reference_imagery_cog(
+            source_raster_path,
+            canonical_cog_path,
+            valid_mask_path=valid_mask_path,
+            aoi_geojson=aoi_geojson,
+            project_id=project_id,
+            release_identifier=release_identifier,
+        )
+        logger.info(
+            "REFERENCE_IMAGERY_CACHE_CREATED projectId=%s releaseIdentifier=%s referenceImageryKey=%s canonicalCogPath=%s",
+            project_id,
+            release_identifier,
+            reference_imagery_key,
+            canonical_cog_path,
+        )
+    else:
+        logger.info(
+            "REFERENCE_IMAGERY_CACHE_HIT projectId=%s releaseIdentifier=%s referenceImageryKey=%s canonicalCogPath=%s",
+            project_id,
+            release_identifier,
+            reference_imagery_key,
+            canonical_cog_path,
+        )
+
+    materialization = materialize_reference_imagery_cog(
+        canonical_cog_path=canonical_cog_path,
+        project_cog_path=project_cog_path,
+        mode=settings.reference_imagery_materialization,
+    )
+    existing_metadata = read_reference_imagery_cache_metadata(metadata_path)
+    metadata = build_reference_imagery_cache_metadata(
+        reference_imagery_key=reference_imagery_key,
+        key_payload=key_payload,
+        canonical_cog_path=canonical_cog_path,
+        existing_metadata=existing_metadata,
+    )
+    append_reference_imagery_materialization(
+        metadata,
+        project_id=project_id,
+        release_identifier=release_identifier,
+        project_cog_path=project_cog_path,
+        method=str(materialization["method"]),
+    )
+    write_reference_imagery_cache_metadata(metadata_path, metadata)
+    logger.info(
+        "REFERENCE_IMAGERY_CACHE_MATERIALIZED projectId=%s releaseIdentifier=%s referenceImageryKey=%s canonicalCogPath=%s projectCogPath=%s method=%s",
+        project_id,
+        release_identifier,
+        reference_imagery_key,
+        canonical_cog_path,
+        project_cog_path,
+        materialization["method"],
+    )
+    return project_cog_path, reference_imagery_key, canonical_cog_path, str(materialization["method"])
 
 
 def ensure_reference_imagery_cog(
@@ -442,6 +580,7 @@ def build_temporal_reference_imagery(
     project_dir: Path,
     release_identifier: str,
     source: TemporalReferenceSource,
+    settings: "Settings | None" = None,
 ) -> TemporalReferenceImagery | None:
     image_path = source.image_path
     image_png_data_url = source.image_png_data_url
@@ -463,18 +602,38 @@ def build_temporal_reference_imagery(
         milestone_dir = project_dir / "milestones" / release_identifier
         target_cog_path = milestone_dir / "reference_imagery_cog.tif"
         cog_existed_before = target_cog_path.is_file()
-        cog_path = ensure_reference_imagery_cog(
-            source_raster_path,
-            target_cog_path,
-            valid_mask_path=valid_mask_path,
-            aoi_geojson=source.aoi_geojson,
-        )
+        reference_imagery_key: str | None = None
+        canonical_cog_path: Path | None = None
+        materialization_method: str | None = None
+        if settings is not None and settings.reference_imagery_cache_enabled:
+            cog_path, reference_imagery_key, canonical_cog_path, materialization_method = _ensure_cached_reference_imagery_cog(
+                settings=settings,
+                project_id=project_id,
+                project_cog_path=target_cog_path,
+                release_identifier=release_identifier,
+                source_raster_path=source_raster_path,
+                valid_mask_path=valid_mask_path,
+                aoi_geojson=source.aoi_geojson,
+            )
+        else:
+            cog_path = ensure_reference_imagery_cog(
+                source_raster_path,
+                target_cog_path,
+                valid_mask_path=valid_mask_path,
+                aoi_geojson=source.aoi_geojson,
+                project_id=project_id,
+                release_identifier=release_identifier,
+            )
         if not cog_existed_before:
             logger.info("COG_CREATED projectId=%s releaseIdentifier=%s path=%s", project_id, release_identifier, cog_path)
         raster_bounds_wgs84 = raster_bounds_wgs84 or _compute_bounds_wgs84(cog_path)
         minzoom, maxzoom = _compute_zoom_range(cog_path)
         if image_path is not None:
             image_png_data_url = None
+    else:
+        reference_imagery_key = None
+        canonical_cog_path = None
+        materialization_method = None
 
     storage_strategy = "raster_tiles" if cog_path else "image_overlay"
     return TemporalReferenceImagery(
@@ -489,6 +648,9 @@ def build_temporal_reference_imagery(
         minzoom=minzoom if cog_path else None,
         maxzoom=maxzoom if cog_path else None,
         tile_size=DEFAULT_TILE_SIZE if cog_path else None,
+        reference_imagery_key=reference_imagery_key,
+        canonical_cog_path=str(canonical_cog_path) if canonical_cog_path else None,
+        materialization_method=materialization_method,
     )
 
 

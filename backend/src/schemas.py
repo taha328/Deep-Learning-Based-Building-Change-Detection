@@ -337,6 +337,9 @@ class TemporalReferenceImagery(BaseModel):
     minzoom: int | None = None
     maxzoom: int | None = None
     tile_size: int | None = None
+    reference_imagery_key: str | None = None
+    canonical_cog_path: str | None = None
+    materialization_method: str | None = None
 
 
 class TemporalMilestone(BaseModel):

@@ -130,8 +130,8 @@ def test_run_detection_supports_bandon_backend(tmp_path, monkeypatch) -> None:
         )(),
     )
     monkeypatch.setattr(
-        "src.services.processing.download_wayback_mosaic",
-        lambda release, bbox, **kwargs: scene_t1 if release.identifier == "WB_2022_R03" else scene_t2,
+        "src.services.processing.get_or_create_inference_reference_imagery",
+        lambda *, release, **kwargs: scene_t1 if release.identifier == "WB_2022_R03" else scene_t2,
     )
     monkeypatch.setattr(
         "src.services.processing.align_mosaic_pair",

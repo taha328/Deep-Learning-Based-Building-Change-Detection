@@ -56,6 +56,10 @@ export interface TemporalMapPresentation {
   projectUpdatedAt: string | null;
   isHydratingProject: boolean;
   availableMilestoneIds: string[];
+  availableMilestones: Array<{
+    releaseIdentifier: string;
+    date: string | null;
+  }>;
   selectedMilestoneIndex: number;
   selectedReleaseIdentifier: string | null;
   selectedMilestoneStatus: "pending" | "validated" | "complete" | "error" | null;

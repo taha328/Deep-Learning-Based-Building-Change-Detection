@@ -23,6 +23,7 @@ from src.domain.bandon_runner import run_bandon_inference
 from src.domain.change_products import derive_new_building_products
 from src.domain.exports import create_export_bundle_from_manifest, export_bandon_outputs, write_geojson, write_run_manifest
 from src.domain.imagery_providers import MapboxCurrentProvider
+from src.domain.inference_reference_imagery import get_or_create_inference_reference_imagery
 from src.domain.mapbox_current import MAPBOX_ATTRIBUTION, MAPBOX_SOURCE_ID
 from src.domain.mosaic import MosaicResult, WaybackTileDownloadError, align_mosaic_pair, download_wayback_mosaic
 from src.domain.tiled_inference import (
@@ -1223,6 +1224,10 @@ def run_detection(
     remote_patch_budget_enabled: bool = False,
     request_hash_context: dict[str, object] | None = None,
 ) -> RunResponse:
+    request_hash_context = {
+        **(request_hash_context or {}),
+        "imagery_source_recipe": "canonical_cog_inference_v1",
+    }
     validation_started_ns = time.perf_counter_ns()
     releases = list_releases(settings)
     validation, prepared = validate_request(
@@ -1498,15 +1503,15 @@ def run_detection(
                     if tilemap_t1 is not None and tilemap_t1.preflight_complete
                     else None,
                 )
-                scene_t1 = download_wayback_mosaic(
-                    prepared.t1_release,
-                    aoi_bbox,
+                scene_t1 = get_or_create_inference_reference_imagery(
+                    release=prepared.t1_release,
+                    normalized_aoi=prepared.normalized_aoi,
+                    bbox=aoi_bbox,
                     settings=settings,
                     zoom=resolved_t1.zoom,
                     out_dir=result_dir,
-                    label="t1",
-                    max_tiles=None,
                     available_tiles=selected_tiles_t1,
+                    source_role="t1",
                     progress_callback=lambda payload: _report(
                         progress,
                         0.18,
@@ -1552,15 +1557,15 @@ def run_detection(
                         if tilemap_t2 is not None and tilemap_t2.preflight_complete
                         else None,
                     )
-                    scene_t2 = download_wayback_mosaic(
-                        prepared.t2_release,
-                        aoi_bbox,
+                    scene_t2 = get_or_create_inference_reference_imagery(
+                        release=prepared.t2_release,
+                        normalized_aoi=prepared.normalized_aoi,
+                        bbox=aoi_bbox,
                         settings=settings,
                         zoom=resolved_t2.zoom,
                         out_dir=result_dir,
-                        label="t2",
-                        max_tiles=None,
                         available_tiles=selected_tiles_t2,
+                        source_role="t2",
                         progress_callback=lambda payload: _report(
                             progress,
                             0.18,
@@ -1635,6 +1640,26 @@ def run_detection(
                     backend=backend_diagnostics,
                 ),
             )
+
+        imagery_source_diagnostics = {
+            "t1": {
+                "imagery_source_mode": (scene_t1.metadata or {}).get("imagery_source_mode"),
+                "reference_imagery_key": (scene_t1.metadata or {}).get("reference_imagery_key"),
+                "canonical_cog_path": (scene_t1.metadata or {}).get("canonical_cog_path"),
+                "valid_mask_source": (scene_t1.metadata or {}).get("valid_mask_source"),
+                "fallback_reason": (scene_t1.metadata or {}).get("fallback_reason"),
+                "canonical_cog_validation": (scene_t1.metadata or {}).get("canonical_cog_validation"),
+            },
+            "t2": {
+                "imagery_source_mode": (scene_t2.metadata or {}).get("imagery_source_mode"),
+                "reference_imagery_key": (scene_t2.metadata or {}).get("reference_imagery_key"),
+                "canonical_cog_path": (scene_t2.metadata or {}).get("canonical_cog_path"),
+                "valid_mask_source": (scene_t2.metadata or {}).get("valid_mask_source"),
+                "fallback_reason": (scene_t2.metadata or {}).get("fallback_reason"),
+                "canonical_cog_validation": (scene_t2.metadata or {}).get("canonical_cog_validation"),
+            },
+        }
+        backend_diagnostics["imagery_sources"] = imagery_source_diagnostics
 
         with rasterio.open(scene_t2.geotiff_path) as _tiled_probe_src:
             inference_decision = select_inference_mode(
@@ -1857,7 +1882,7 @@ def run_detection(
                     run_id=prepared.request_hash,
                     scenes=[scene_t1, scene_t2],
                 ),
-                run_metadata={**run_identity, "inference_mode": "tiled", "tiled_inference": tiled_result.metadata},
+                run_metadata={**run_identity, "inference_mode": "tiled", "tiled_inference": tiled_result.metadata, "imagery_sources": imagery_source_diagnostics},
             )
             try:
                 response.downloadable_zip_path = str(create_export_bundle_from_manifest(result_dir))
@@ -2303,7 +2328,7 @@ def run_detection(
                     run_id=prepared.request_hash,
                     scenes=[scene_t1, scene_t2],
                 ),
-                run_metadata=run_identity,
+                run_metadata={**run_identity, "imagery_sources": imagery_source_diagnostics},
             )
             _report(progress, 1.0, "Completed")
             run_succeeded = True
