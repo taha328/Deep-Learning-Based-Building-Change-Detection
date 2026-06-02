@@ -9,7 +9,14 @@ export type TemporalMilestoneColorInput =
       release_date?: string | null;
     };
 
-export type TemporalStyledLayerKind = "additions" | "buffer10m";
+export type TemporalStyledLayerKind =
+  | "additions"
+  | "buffer10m"
+  | "buffer15m"
+  | "buffer20m"
+  | "cumulativeBuffer10m"
+  | "cumulativeBuffer15m"
+  | "cumulativeBuffer20m";
 
 export type TemporalLayerPaint = {
   fillPaint: {
@@ -26,25 +33,74 @@ export type TemporalLayerPaint = {
   lineOpacity: number;
 };
 
-export const TEMPORAL_MILESTONE_COLOR_PALETTE = [
-  "#B91C1C",
-  "#1D4ED8",
-  "#C2410C",
-  "#6D28D9",
-  "#047857",
-  "#0E7490",
-  "#BE185D",
-  "#854D0E",
-  "#374151",
-  "#312E81",
-  "#166534",
-  "#7F1D1D",
-  "#1E3A8A",
-  "#581C87",
-  "#064E3B",
+export type IncludedTemporalMilestone = {
+  releaseIdentifier: string;
+  label: string;
+};
+
+export type TemporalLayerLabels = {
+  allPreviousAdditions: string;
+  selectedAdditions: string;
+  buffer10m: string;
+  buffer15m: string;
+  buffer20m: string;
+  cumulativeBuffer10m: string;
+  cumulativeBuffer15m: string;
+  cumulativeBuffer20m: string;
+};
+
+export type TemporalReleaseMode = "selected" | "cumulative";
+
+export type TemporalLayerContract = {
+  artifactKey: "additions" | "building_change_buffer_10m" | "building_change_buffer_15m" | "building_change_buffer_20m";
+  mode: TemporalReleaseMode;
+};
+
+export type TemporalLayerPlanningKey =
+  | "allNewBuildings"
+  | "selectedAdditions"
+  | "buffer10m"
+  | "buffer15m"
+  | "buffer20m"
+  | "temporalCumulativeBuffer10m"
+  | "temporalCumulativeBuffer15m"
+  | "temporalCumulativeBuffer20m"
+  | "convexHull"
+  | "cumulativeUnion"
+  | "concavePolygon"
+  | "manualOverride";
+
+export const TEMPORAL_LAYER_CONTRACTS: Record<TemporalLayerPlanningKey, TemporalLayerContract> = {
+  allNewBuildings: { artifactKey: "additions", mode: "cumulative" },
+  selectedAdditions: { artifactKey: "additions", mode: "selected" },
+  buffer10m: { artifactKey: "building_change_buffer_10m", mode: "selected" },
+  buffer15m: { artifactKey: "building_change_buffer_15m", mode: "selected" },
+  buffer20m: { artifactKey: "building_change_buffer_20m", mode: "selected" },
+  temporalCumulativeBuffer10m: { artifactKey: "building_change_buffer_10m", mode: "cumulative" },
+  temporalCumulativeBuffer15m: { artifactKey: "building_change_buffer_15m", mode: "cumulative" },
+  temporalCumulativeBuffer20m: { artifactKey: "building_change_buffer_20m", mode: "cumulative" },
+  convexHull: { artifactKey: "additions", mode: "selected" },
+  cumulativeUnion: { artifactKey: "additions", mode: "selected" },
+  concavePolygon: { artifactKey: "additions", mode: "selected" },
+  manualOverride: { artifactKey: "additions", mode: "selected" },
+};
+
+export const HIGH_CONTRAST_TEMPORAL_COLORS = [
+  "#00B050",
+  "#FFD700",
+  "#0066FF",
+  "#E31A1C",
+  "#00C8C8",
+  "#FF1493",
+  "#7FFF00",
+  "#8B4513",
 ] as const;
 
-const LATEST_MILESTONE_COLOR = TEMPORAL_MILESTONE_COLOR_PALETTE[0];
+export const TEMPORAL_MILESTONE_COLOR_PALETTE = HIGH_CONTRAST_TEMPORAL_COLORS;
+
+const BASELINE_MILESTONE_COLOR = "#64748B";
+const LATEST_MILESTONE_COLOR = HIGH_CONTRAST_TEMPORAL_COLORS[3];
+const TRANSPARENT_COLOR = "rgba(0, 0, 0, 0)";
 const MIN_GENERATED_RGB_DISTANCE = 90;
 const GOLDEN_ANGLE = 137.508;
 
@@ -70,6 +126,33 @@ function milestoneDateValue(milestone: TemporalMilestoneColorInput): number {
     return Date.UTC(Number(yearMatch[0]), 0, 1);
   }
   return Number.NEGATIVE_INFINITY;
+}
+
+function milestoneDisplayLabel(milestone: TemporalMilestoneColorInput): string {
+  const dateValue =
+    typeof milestone === "string" ? null : milestone.releaseDate ?? milestone.release_date ?? milestone.date ?? null;
+  if (dateValue) {
+    const normalizedDate = String(dateValue).slice(0, 10);
+    const year = normalizedDate.slice(0, 4);
+    return /^\d{4}$/.test(year) ? year : normalizedDate;
+  }
+  const identifier = normalizeIdentifier(milestone);
+  const yearMatch = identifier.match(/(?:19|20)\d{2}/);
+  return yearMatch?.[0] ?? identifier;
+}
+
+function sortedUniqueMilestones(milestones: TemporalMilestoneColorInput[]): Array<[string, TemporalMilestoneColorInput]> {
+  const uniqueMilestones = new Map<string, TemporalMilestoneColorInput>();
+  for (const milestone of milestones) {
+    const identifier = normalizeIdentifier(milestone);
+    if (identifier && !uniqueMilestones.has(identifier)) {
+      uniqueMilestones.set(identifier, milestone);
+    }
+  }
+  return Array.from(uniqueMilestones.entries()).sort(([leftId, left], [rightId, right]) => {
+    const dateDelta = milestoneDateValue(left) - milestoneDateValue(right);
+    return dateDelta === 0 ? leftId.localeCompare(rightId) : dateDelta;
+  });
 }
 
 function hexToRgb(color: string): [number, number, number] {
@@ -140,28 +223,25 @@ function generateDarkMilestoneColor(index: number, previousColor: string, usedCo
 }
 
 export function getMilestoneColorMap(milestones: TemporalMilestoneColorInput[]): Record<string, string> {
-  const uniqueMilestones = new Map<string, TemporalMilestoneColorInput>();
-  for (const milestone of milestones) {
-    const identifier = normalizeIdentifier(milestone);
-    if (identifier && !uniqueMilestones.has(identifier)) {
-      uniqueMilestones.set(identifier, milestone);
-    }
+  const sorted = sortedUniqueMilestones(milestones);
+  const baselineReleaseIdentifier = sorted[0]?.[0] ?? null;
+  const usedColors = new Set<string>(baselineReleaseIdentifier ? [BASELINE_MILESTONE_COLOR] : []);
+  const colorByReleaseIdentifier: Record<string, string> = {};
+  if (baselineReleaseIdentifier) {
+    colorByReleaseIdentifier[baselineReleaseIdentifier] = BASELINE_MILESTONE_COLOR;
   }
 
-  const sorted = Array.from(uniqueMilestones.entries()).sort(([leftId, left], [rightId, right]) => {
-    const dateDelta = milestoneDateValue(left) - milestoneDateValue(right);
-    return dateDelta === 0 ? leftId.localeCompare(rightId) : dateDelta;
-  });
-  const newestFirst = [...sorted].reverse();
-  const usedColors = new Set<string>();
-  const colorByReleaseIdentifier: Record<string, string> = {};
-
-  newestFirst.forEach(([identifier], index) => {
-    const previousColor = index > 0 ? colorByReleaseIdentifier[newestFirst[index - 1][0]] : LATEST_MILESTONE_COLOR;
+  sorted.forEach(([identifier], chronologicalIndex) => {
+    if (identifier === baselineReleaseIdentifier) {
+      return;
+    }
+    const nonBaselineIndex = chronologicalIndex - (baselineReleaseIdentifier ? 1 : 0);
+    const previousIdentifier = sorted[chronologicalIndex - 1]?.[0] ?? baselineReleaseIdentifier;
+    const previousColor = previousIdentifier ? (colorByReleaseIdentifier[previousIdentifier] ?? LATEST_MILESTONE_COLOR) : LATEST_MILESTONE_COLOR;
     const color =
-      index < TEMPORAL_MILESTONE_COLOR_PALETTE.length
-        ? TEMPORAL_MILESTONE_COLOR_PALETTE[index]
-        : generateDarkMilestoneColor(index, previousColor, usedColors);
+      nonBaselineIndex < HIGH_CONTRAST_TEMPORAL_COLORS.length
+        ? HIGH_CONTRAST_TEMPORAL_COLORS[nonBaselineIndex]
+        : generateDarkMilestoneColor(nonBaselineIndex, previousColor, usedColors);
     usedColors.add(color);
     colorByReleaseIdentifier[identifier] = color;
   });
@@ -169,25 +249,183 @@ export function getMilestoneColorMap(milestones: TemporalMilestoneColorInput[]):
   return colorByReleaseIdentifier;
 }
 
+export function getIncludedTemporalMilestones(
+  milestones: TemporalMilestoneColorInput[],
+  selectedReleaseIdentifier: string | null | undefined,
+): IncludedTemporalMilestone[] {
+  if (!selectedReleaseIdentifier) {
+    return [];
+  }
+  const sorted = sortedUniqueMilestones(milestones);
+  const selectedIndex = sorted.findIndex(([identifier]) => identifier === selectedReleaseIdentifier);
+  if (selectedIndex < 0) {
+    return [];
+  }
+  return sorted.slice(0, selectedIndex + 1).map(([releaseIdentifier, milestone]) => ({
+    releaseIdentifier,
+    label: milestoneDisplayLabel(milestone),
+  }));
+}
+
+export function getIncludedAdditionReleasesForCumulativeLayer(
+  milestones: TemporalMilestoneColorInput[],
+  selectedReleaseIdentifier: string | null | undefined,
+  additionsAvailableReleaseIdentifiers: Iterable<string>,
+): string[] {
+  return getCumulativeReleaseSet(milestones, selectedReleaseIdentifier, additionsAvailableReleaseIdentifiers);
+}
+
+export function getSelectedReleaseSet(
+  selectedReleaseIdentifier: string | null | undefined,
+  availableReleaseIdentifiers?: Iterable<string>,
+): string[] {
+  if (!selectedReleaseIdentifier) {
+    return [];
+  }
+  if (!availableReleaseIdentifiers) {
+    return [selectedReleaseIdentifier];
+  }
+  return new Set(availableReleaseIdentifiers).has(selectedReleaseIdentifier) ? [selectedReleaseIdentifier] : [];
+}
+
+export function getCumulativeReleaseSet(
+  milestones: TemporalMilestoneColorInput[],
+  selectedReleaseIdentifier: string | null | undefined,
+  availableReleaseIdentifiers: Iterable<string>,
+): string[] {
+  if (!selectedReleaseIdentifier) {
+    return [];
+  }
+  const sorted = sortedUniqueMilestones(milestones);
+  const baselineReleaseIdentifier = sorted[0]?.[0] ?? null;
+  const selectedIndex = sorted.findIndex(([identifier]) => identifier === selectedReleaseIdentifier);
+  if (selectedIndex < 0) {
+    return [];
+  }
+  const availableReleaseIdentifierSet = new Set(availableReleaseIdentifiers);
+  return sorted
+    .slice(0, selectedIndex + 1)
+    .map(([releaseIdentifier]) => releaseIdentifier)
+    .filter(
+      (releaseIdentifier) =>
+        releaseIdentifier !== baselineReleaseIdentifier && availableReleaseIdentifierSet.has(releaseIdentifier),
+    );
+}
+
+export function getTemporalLayerExpectedReleases(params: {
+  layerKey: TemporalLayerPlanningKey;
+  milestones: TemporalMilestoneColorInput[];
+  selectedReleaseIdentifier: string | null | undefined;
+  availableReleaseIdentifiers: Iterable<string>;
+}): string[] {
+  const mode = TEMPORAL_LAYER_CONTRACTS[params.layerKey].mode;
+  if (mode === "selected") {
+    return getSelectedReleaseSet(params.selectedReleaseIdentifier, params.availableReleaseIdentifiers);
+  }
+  return getCumulativeReleaseSet(
+    params.milestones,
+    params.selectedReleaseIdentifier,
+    params.availableReleaseIdentifiers,
+  );
+}
+
+export function temporalAdditionVisibilityReason(params: {
+  releaseIdentifier: string;
+  selectedReleaseIdentifier: string | null | undefined;
+  includedAdditionReleaseIdentifiers: Iterable<string>;
+  allNewBuildingsEnabled: boolean;
+  selectedAdditionsEnabled: boolean;
+}): "allNewBuildings" | "selectedMilestoneAdditions" | null {
+  const includedReleaseIdentifiers = new Set(params.includedAdditionReleaseIdentifiers);
+  if (params.allNewBuildingsEnabled && includedReleaseIdentifiers.has(params.releaseIdentifier)) {
+    return "allNewBuildings";
+  }
+  if (params.selectedAdditionsEnabled && params.releaseIdentifier === params.selectedReleaseIdentifier) {
+    return "selectedMilestoneAdditions";
+  }
+  return null;
+}
+
+export function getTemporalMilestoneLabel(
+  milestones: TemporalMilestoneColorInput[],
+  releaseIdentifier: string | null | undefined,
+): string {
+  const sorted = sortedUniqueMilestones(milestones);
+  const match = sorted.find(([identifier]) => identifier === releaseIdentifier);
+  if (match) {
+    return milestoneDisplayLabel(match[1]);
+  }
+  return releaseIdentifier ? milestoneDisplayLabel(releaseIdentifier) : "";
+}
+
+export function getTemporalMilestoneRangeLabel(
+  milestones: TemporalMilestoneColorInput[],
+  selectedReleaseIdentifier: string | null | undefined,
+): string {
+  const sorted = sortedUniqueMilestones(milestones);
+  if (!sorted.length) {
+    return selectedReleaseIdentifier ? getTemporalMilestoneLabel(milestones, selectedReleaseIdentifier) : "";
+  }
+  const firstLabel = milestoneDisplayLabel(sorted[0][1]);
+  const selected = sorted.find(([identifier]) => identifier === selectedReleaseIdentifier) ?? sorted[sorted.length - 1];
+  const selectedLabel = milestoneDisplayLabel(selected[1]);
+  return firstLabel === selectedLabel ? firstLabel : `${firstLabel} -> ${selectedLabel}`;
+}
+
+export function buildTemporalLayerLabels(
+  milestones: TemporalMilestoneColorInput[],
+  selectedReleaseIdentifier: string | null | undefined,
+): TemporalLayerLabels {
+  const selectedLabel = getTemporalMilestoneLabel(milestones, selectedReleaseIdentifier);
+  const rangeLabel = getTemporalMilestoneRangeLabel(milestones, selectedReleaseIdentifier);
+  return {
+    allPreviousAdditions: rangeLabel ? `All new buildings ${rangeLabel}` : "All new buildings",
+    selectedAdditions: selectedLabel ? `Added building in ${selectedLabel}` : "Added building",
+    buffer10m: selectedLabel ? `Buffer 10m ${selectedLabel}` : "Buffer 10m",
+    buffer15m: selectedLabel ? `Buffer 15m ${selectedLabel}` : "Buffer 15m",
+    buffer20m: selectedLabel ? `Buffer 20m ${selectedLabel}` : "Buffer 20m",
+    cumulativeBuffer10m: rangeLabel ? `Buffer 10m ${rangeLabel}` : "Buffer 10m",
+    cumulativeBuffer15m: rangeLabel ? `Buffer 15m ${rangeLabel}` : "Buffer 15m",
+    cumulativeBuffer20m: rangeLabel ? `Buffer 20m ${rangeLabel}` : "Buffer 20m",
+  };
+}
+
 export function usesGeneratedMilestoneColors(milestoneCount: number): boolean {
   return milestoneCount > TEMPORAL_MILESTONE_COLOR_PALETTE.length;
 }
 
 export function getTemporalLayerPaint(layerKind: TemporalStyledLayerKind, milestoneColor: string): TemporalLayerPaint {
-  if (layerKind === "buffer10m") {
+  if (layerKind.startsWith("cumulativeBuffer")) {
     return {
       fillPaint: {
         "fill-color": milestoneColor,
-        "fill-opacity": 0.3,
-        "fill-outline-color": milestoneColor,
+        "fill-opacity": 1,
+        "fill-outline-color": TRANSPARENT_COLOR,
       },
       linePaint: {
         "line-color": milestoneColor,
-        "line-opacity": 0.95,
-        "line-width": 1.5,
+        "line-opacity": 0,
+        "line-width": 0,
       },
-      fillOpacity: 0.3,
-      lineOpacity: 0.95,
+      fillOpacity: 1,
+      lineOpacity: 0,
+    };
+  }
+
+  if (layerKind.startsWith("buffer")) {
+    return {
+      fillPaint: {
+        "fill-color": milestoneColor,
+        "fill-opacity": 1,
+        "fill-outline-color": TRANSPARENT_COLOR,
+      },
+      linePaint: {
+        "line-color": milestoneColor,
+        "line-opacity": 0,
+        "line-width": 0,
+      },
+      fillOpacity: 1,
+      lineOpacity: 0,
     };
   }
 

@@ -81,6 +81,17 @@ function milestoneYear(milestone: TemporalMilestone): string {
   return date && !Number.isNaN(date.getTime()) ? date.getFullYear().toString() : milestone.release_identifier;
 }
 
+function milestoneTransitionLabel(milestones: TemporalMilestone[], index: number): string {
+  const milestone = milestones[index];
+  if (!milestone) {
+    return "";
+  }
+  if (index === 0) {
+    return milestoneYear(milestone);
+  }
+  return `${milestoneYear(milestones[index - 1])} → ${milestoneYear(milestone)}`;
+}
+
 function growthIntensityLabel(addedSharePercent: number, t: TranslateFn): string {
   if (addedSharePercent >= 50) return t("temporal.metrics.major_expansion");
   if (addedSharePercent >= 20) return t("temporal.metrics.moderate_expansion");
@@ -126,9 +137,10 @@ function TemporalBarChart({
     <div className="rounded-lg border border-sidebar-border/60 bg-surface/40 p-3.5">
       <p className="mb-3 text-caption font-semibold uppercase tracking-wider text-muted-foreground">Added surface over time</p>
       <div className="space-y-2">
-        {completedMilestones.map((milestone) => {
+        {completedMilestones.map((milestone, index) => {
           const isSelected = milestone.release_identifier === selectedMilestoneId;
           const barWidth = maxAddedArea > 0 && milestone.metrics ? (milestone.metrics.added_area_m2 / maxAddedArea) * 100 : 0;
+          const displayLabel = milestoneTransitionLabel(completedMilestones, index);
 
           return (
             <button
@@ -142,7 +154,7 @@ function TemporalBarChart({
               )}
             >
               <div className="mb-1.5 flex items-center justify-between gap-2">
-                <span className="text-label font-semibold text-foreground">{milestoneYear(milestone)}</span>
+                <span className="text-label font-semibold text-foreground">{displayLabel}</span>
                 <span className="text-caption font-mono text-muted-foreground">{formatArea(milestone.metrics?.added_area_m2, "—")}</span>
               </div>
               <div className="h-2 overflow-hidden rounded-full bg-muted">

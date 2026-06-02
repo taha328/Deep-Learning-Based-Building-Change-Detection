@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 ModeName = Literal["fast_preview", "full_run"]
 InferenceBackendName = Literal["bandon_mps", "mtgcdnet_s2looking_mps"]
 PersistenceBackendName = Literal["filesystem", "postgres"]
+PostCompletionRequestCleanupMode = Literal["off", "compact_heavy", "delete_full"]
 
 
 class ModeLimits(BaseModel):
@@ -86,6 +87,9 @@ class Settings(BaseModel):
     mapbox_current_imagery_max_tiles: int = 1024
     reference_tile_cache_dir: Path | None = None
     reference_tile_prewarm_max_tiles: int = 256
+    reference_imagery_cache_enabled: bool = True
+    reference_imagery_cache_dir: Path | None = None
+    reference_imagery_materialization: Literal["hardlink", "symlink", "copy"] = "hardlink"
     patch_size: int = 1024
     stride: int = 768
     inference_tiled_mode_auto: bool = True
@@ -98,8 +102,8 @@ class Settings(BaseModel):
     generate_full_mosaic_png_for_heavy_batch: bool = False
     mosaic_preview_max_dimension: int = 4096
     scene_segmentation_concurrency: int = 2
-    default_change_threshold: float = 0.35
-    default_semantic_threshold: float = 0.35
+    default_change_threshold: float = 0.50
+    default_semantic_threshold: float = 0.50
     default_min_new_building_pixels: int = 30
     addition_min_area_m2: float = 8.0
     addition_max_existing_overlap_ratio: float = 0.50
@@ -130,7 +134,7 @@ class Settings(BaseModel):
     bandon_skip_nodata_crops: bool = True
     bandon_min_valid_ratio_within_aoi: float = 0.01
     s2looking_checkpoint_path: Path | None = None
-    s2looking_change_threshold: float = 0.35
+    s2looking_change_threshold: float = 0.50
     database_url: str = "postgresql+psycopg://building_change:building_change@localhost:5432/building_change"
     database_echo: bool = False
     db_inline_json_max_bytes: int = 256 * 1024
@@ -147,6 +151,11 @@ class Settings(BaseModel):
     jobs_enabled: bool = True
     keep_intermediate_artifacts: bool = False
     materialize_source_imagery_in_requests: bool = False
+    post_completion_request_cleanup_enabled: bool = True
+    post_completion_request_cleanup_mode: PostCompletionRequestCleanupMode = "compact_heavy"
+    post_completion_request_cleanup_grace_seconds: int = 300
+    post_completion_request_cleanup_keep_provenance: bool = True
+    post_completion_request_cleanup_delete_export_bundle: bool = True
     enable_client_log_relay: bool = True
     temporal_imagery_prefetch_enabled: bool = False
     temporal_imagery_prefetch_workers: int = 2
@@ -215,6 +224,8 @@ class Settings(BaseModel):
             self.mapbox_current_imagery_cache_dir = self.runtime_cache_dir / "mapbox_mosaics"
         if self.reference_tile_cache_dir is None:
             self.reference_tile_cache_dir = self.runtime_cache_dir / "reference_tiles"
+        if self.reference_imagery_cache_dir is None:
+            self.reference_imagery_cache_dir = self.runtime_cache_dir / "imagery_cache"
         if self.reference_tile_prewarm_max_tiles < 1:
             raise ValueError("reference_tile_prewarm_max_tiles must be greater than or equal to 1.")
         if self.mapbox_max_tiles_per_request < 1:
@@ -314,6 +325,10 @@ class Settings(BaseModel):
             raise ValueError("addition_thin_artifact_max_area_m2 must be greater than or equal to 0.")
         if self.addition_edge_buffer_m < 0:
             raise ValueError("addition_edge_buffer_m must be greater than or equal to 0.")
+        if self.post_completion_request_cleanup_mode not in {"off", "compact_heavy", "delete_full"}:
+            raise ValueError("APP_POST_COMPLETION_REQUEST_CLEANUP_MODE must be one of: off, compact_heavy, delete_full.")
+        if self.post_completion_request_cleanup_grace_seconds < 0:
+            raise ValueError("APP_POST_COMPLETION_REQUEST_CLEANUP_GRACE_SECONDS must be greater than or equal to 0.")
         self.ensure_runtime_cache_dirs()
         if not self.allowed_file_roots:
             self.allowed_file_roots = (self.request_cache_dir, self.temporal_projects_dir)
@@ -331,6 +346,7 @@ class Settings(BaseModel):
         self.wayback_tile_sqlite_cache_dir.mkdir(parents=True, exist_ok=True)
         self.mapbox_current_imagery_cache_dir.mkdir(parents=True, exist_ok=True)
         self.reference_tile_cache_dir.mkdir(parents=True, exist_ok=True)
+        self.reference_imagery_cache_dir.mkdir(parents=True, exist_ok=True)
         self.tmp_cache_dir.mkdir(parents=True, exist_ok=True)
 
     @property
@@ -668,6 +684,19 @@ def get_settings() -> Settings:
             "APP_REFERENCE_TILE_PREWARM_MAX_TILES",
             base.reference_tile_prewarm_max_tiles,
         ),
+        reference_imagery_cache_enabled=_bool_env(
+            "APP_REFERENCE_IMAGERY_CACHE_ENABLED",
+            base.reference_imagery_cache_enabled,
+        ),
+        reference_imagery_cache_dir=(
+            Path(cache_dir_env)
+            if (cache_dir_env := _optional_str_env("APP_REFERENCE_IMAGERY_CACHE_DIR"))
+            else None
+        ),
+        reference_imagery_materialization=os.getenv(
+            "APP_REFERENCE_IMAGERY_MATERIALIZATION",
+            base.reference_imagery_materialization,
+        ),  # type: ignore[arg-type]
         patch_size=_int_env("APP_PATCH_SIZE", base.patch_size),
         stride=_int_env("APP_STRIDE", base.stride),
         inference_tiled_mode_auto=_bool_env(
@@ -819,6 +848,26 @@ def get_settings() -> Settings:
         materialize_source_imagery_in_requests=_bool_env(
             "MATERIALIZE_SOURCE_IMAGERY_IN_REQUESTS",
             base.materialize_source_imagery_in_requests,
+        ),
+        post_completion_request_cleanup_enabled=_bool_env(
+            "APP_POST_COMPLETION_REQUEST_CLEANUP_ENABLED",
+            base.post_completion_request_cleanup_enabled,
+        ),
+        post_completion_request_cleanup_mode=os.getenv(
+            "APP_POST_COMPLETION_REQUEST_CLEANUP_MODE",
+            base.post_completion_request_cleanup_mode,
+        ),  # type: ignore[arg-type]
+        post_completion_request_cleanup_grace_seconds=_int_env(
+            "APP_POST_COMPLETION_REQUEST_CLEANUP_GRACE_SECONDS",
+            base.post_completion_request_cleanup_grace_seconds,
+        ),
+        post_completion_request_cleanup_keep_provenance=_bool_env(
+            "APP_POST_COMPLETION_REQUEST_CLEANUP_KEEP_PROVENANCE",
+            base.post_completion_request_cleanup_keep_provenance,
+        ),
+        post_completion_request_cleanup_delete_export_bundle=_bool_env(
+            "APP_POST_COMPLETION_REQUEST_CLEANUP_DELETE_EXPORT_BUNDLE",
+            base.post_completion_request_cleanup_delete_export_bundle,
         ),
         enable_client_log_relay=_bool_env(
             "APP_ENABLE_CLIENT_LOG_RELAY",

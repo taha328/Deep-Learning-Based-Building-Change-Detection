@@ -36,6 +36,12 @@ from src.config import Settings
 from src.domain.cache import load_cached_response, request_result_dir, save_cached_response
 from src.domain.imagery_providers import EsriWaybackProvider, MapboxCurrentProvider
 from src.domain.mapbox_current import MAPBOX_SOURCE_ID
+from src.domain.reference_imagery_cache import (
+    append_reference_imagery_materialization,
+    materialize_reference_imagery_cog,
+    read_reference_imagery_cache_metadata,
+    write_reference_imagery_cache_metadata,
+)
 from src.domain.stage_timing import StageTimingRecorder
 from src.domain.tiling import tile_bounds_3857, tile_range_for_bbox
 from src.domain.vectorize import (
@@ -308,6 +314,31 @@ def _complete_reference_imagery_metadata_payload(
     return changed
 
 
+def _payload_has_incomplete_reference_imagery(payload: dict[str, Any], project_dir: Path) -> bool:
+    milestones = payload.get("milestones")
+    if not isinstance(milestones, list):
+        return False
+    for milestone in milestones:
+        if not isinstance(milestone, dict):
+            continue
+        release_identifier = milestone.get("release_identifier")
+        if not isinstance(release_identifier, str) or not release_identifier:
+            continue
+        reference_payload = milestone.get("reference_imagery")
+        target_cog_path = project_dir / "milestones" / release_identifier / "reference_imagery_cog.tif"
+        if not isinstance(reference_payload, dict):
+            return True
+        cog_path_value = reference_payload.get("cog_path") or str(target_cog_path)
+        cog_path = Path(str(cog_path_value)).expanduser()
+        if not cog_path.is_file():
+            return True
+        if not reference_payload.get("tilejson_url") or not reference_payload.get("tiles_url_template"):
+            return True
+        if not reference_payload.get("canonical_cog_path") or not reference_payload.get("reference_imagery_key"):
+            return True
+    return False
+
+
 def load_temporal_project_response_payload(project_id: str, settings: Settings) -> dict[str, Any]:
     started_at = time.perf_counter()
     path = _project_json_path(settings, project_id)
@@ -345,11 +376,39 @@ def load_temporal_project_response_payload(project_id: str, settings: Settings) 
         payload=payload,
         project_dir=project_dir,
     )
+    reference_materialized_count = 0
+    if _payload_has_incomplete_reference_imagery(payload, project_dir):
+        try:
+            project_for_repair = TemporalProject.model_validate(payload)
+            project_for_repair.project_dir = str(project_dir)
+            reference_materialized_count = _ensure_temporal_project_reference_imagery_from_canonical_cache(
+                project=project_for_repair,
+                settings=settings,
+                project_dir=project_dir,
+            )
+            if reference_materialized_count:
+                payload = project_for_repair.model_dump(mode="json")
+                payload.setdefault("project_id", project_id)
+                payload.setdefault("project_dir", str(project_dir))
+                logger.info(
+                    "TEMPORAL_REFERENCE_LOAD_TIME_REPAIR_DONE projectId=%s repairedCount=%s",
+                    project_id,
+                    reference_materialized_count,
+                )
+        except Exception:
+            logger.debug("TEMPORAL_REFERENCE_LOAD_TIME_REPAIR_FAILED projectId=%s", project_id, exc_info=True)
     milestones = payload.get("milestones")
     if isinstance(milestones, list):
         milestones.sort(key=lambda item: str(item.get("release_date") or "") if isinstance(item, dict) else "")
     artifact_metadata_changed = artifact_metadata_before != json.dumps(payload.get("milestones"), sort_keys=True, default=str)
-    if artifact_metadata_changed or artifact_metadata_repaired or reference_metadata_repaired or externalized_count or empty_baseline_artifacts_removed:
+    if (
+        artifact_metadata_changed
+        or artifact_metadata_repaired
+        or reference_metadata_repaired
+        or reference_materialized_count
+        or externalized_count
+        or empty_baseline_artifacts_removed
+    ):
         try:
             path.write_text(json.dumps(payload, indent=2))
             manifest_path = path.with_name("project_manifest.json")
@@ -1147,25 +1206,39 @@ def _reference_imagery_from_pair_response(
     use_t1_preview: bool,
     aoi_geojson: dict[str, Any] | None = None,
     include_data_url: bool = True,
+    settings: Settings | None = None,
 ) -> TemporalReferenceImagery | None:
-    if response is None or response.preview_images is None:
+    if response is None:
         return None
 
     preview_images = response.preview_images
-    image_path = preview_images.t1_preview_path if use_t1_preview else preview_images.t2_preview_path
+    image_path = None
     image_png_data_url = None
-    if include_data_url:
-        image_png_data_url = (
-            preview_images.t1_preview_png_data_url
-            if use_t1_preview
-            else preview_images.t2_preview_png_data_url
-        )
+    raster_bounds_wgs84 = None
+    if preview_images is not None:
+        image_path = preview_images.t1_preview_path if use_t1_preview else preview_images.t2_preview_path
+        raster_bounds_wgs84 = preview_images.raster_bounds_wgs84
+        if include_data_url:
+            image_png_data_url = (
+                preview_images.t1_preview_png_data_url
+                if use_t1_preview
+                else preview_images.t2_preview_png_data_url
+            )
     if include_data_url and image_png_data_url is None:
         image_png_data_url = _png_file_to_data_url(image_path)
-    raster_bounds_wgs84 = preview_images.raster_bounds_wgs84
 
-    source_raster_path = _reference_source_raster_path_from_pair_response(response, use_t1_preview=use_t1_preview)
-    valid_mask_path = _reference_valid_mask_path_from_pair_response(response, use_t1_preview=use_t1_preview)
+    source_raster_path = _reference_source_raster_path_from_pair_response(
+        response,
+        use_t1_preview=use_t1_preview,
+        release_identifier=release_identifier,
+        settings=settings,
+    )
+    valid_mask_path = _reference_valid_mask_path_from_pair_response(
+        response,
+        use_t1_preview=use_t1_preview,
+        release_identifier=release_identifier,
+        settings=settings,
+    )
 
     if image_path is None and image_png_data_url is None and source_raster_path is None:
         return None
@@ -1190,6 +1263,7 @@ def _reference_imagery_from_pair_response(
             valid_mask_path=valid_mask_path,
             aoi_geojson=aoi_geojson,
         ),
+        settings=settings,
     )
 
 
@@ -1197,6 +1271,8 @@ def _reference_source_raster_path_from_pair_response(
     response: RunResponse | None,
     *,
     use_t1_preview: bool,
+    release_identifier: str | None = None,
+    settings: Settings | None = None,
 ) -> str | None:
     if response is None:
         return None
@@ -1208,7 +1284,12 @@ def _reference_source_raster_path_from_pair_response(
 
     preview_images = response.preview_images
     if preview_images is None:
-        return None
+        return _reference_source_raster_path_from_manifest(
+            response=response,
+            release_identifier=release_identifier,
+            settings=settings,
+            want_valid_mask=False,
+        )
     preview_path = preview_images.t1_preview_path if use_t1_preview else preview_images.t2_preview_path
     if not preview_path:
         return None
@@ -1217,25 +1298,130 @@ def _reference_source_raster_path_from_pair_response(
     fallback_path = request_dir / fallback_name
     if fallback_path.is_file():
         return str(fallback_path)
-    return None
+    return _reference_source_raster_path_from_manifest(
+        response=response,
+        release_identifier=release_identifier,
+        settings=settings,
+        want_valid_mask=False,
+    )
 
 
 def _reference_valid_mask_path_from_pair_response(
     response: RunResponse | None,
     *,
     use_t1_preview: bool,
+    release_identifier: str | None = None,
+    settings: Settings | None = None,
 ) -> str | None:
-    if response is None or response.preview_images is None:
+    if response is None:
         return None
+    if response.preview_images is None:
+        return _reference_source_raster_path_from_manifest(
+            response=response,
+            release_identifier=release_identifier,
+            settings=settings,
+            want_valid_mask=True,
+        )
     preview_path = response.preview_images.t1_preview_path if use_t1_preview else response.preview_images.t2_preview_path
     if not preview_path:
-        return None
+        return _reference_source_raster_path_from_manifest(
+            response=response,
+            release_identifier=release_identifier,
+            settings=settings,
+            want_valid_mask=True,
+        )
     request_dir = Path(preview_path).expanduser().resolve().parent
     pattern = "t1_*_valid_mask.tif" if use_t1_preview else "t2_*_valid_mask.tif"
     matches = sorted(request_dir.glob(pattern))
     if matches:
         return str(matches[0])
+    return _reference_source_raster_path_from_manifest(
+        response=response,
+        release_identifier=release_identifier,
+        settings=settings,
+        want_valid_mask=True,
+    )
+
+
+def _request_dir_from_pair_response(response: RunResponse | None, settings: Settings | None) -> Path | None:
+    if response is None or response.summary is None or not response.summary.request_hash:
+        return None
+    if settings is not None:
+        return settings.request_cache_dir / response.summary.request_hash
+    for artifact in response.artifacts:
+        if artifact.path:
+            candidate = Path(artifact.path).expanduser()
+            if candidate.name:
+                return candidate.resolve().parent
     return None
+
+
+def _reference_source_raster_path_from_manifest(
+    *,
+    response: RunResponse | None,
+    release_identifier: str | None,
+    settings: Settings | None,
+    want_valid_mask: bool,
+) -> str | None:
+    if response is None or not release_identifier:
+        return None
+    request_dir = _request_dir_from_pair_response(response, settings)
+    if request_dir is None:
+        return None
+    manifest_path = request_dir / "manifest.json"
+    if not manifest_path.is_file():
+        return None
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        logger.debug(
+            "TEMPORAL_REFERENCE_MANIFEST_READ_FAILED requestDir=%s releaseIdentifier=%s",
+            request_dir,
+            release_identifier,
+            exc_info=True,
+        )
+        return None
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, list):
+        return None
+    selected: list[Path] = []
+    for item in artifacts:
+        if not isinstance(item, dict) or item.get("artifact_type") != "source" or item.get("format") != "tif":
+            continue
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        if metadata.get("provider") != "esri_wayback":
+            continue
+        source_id = metadata.get("source_id")
+        purpose = str(item.get("purpose") or "")
+        if source_id != release_identifier and release_identifier not in purpose:
+            continue
+        is_valid_mask = "valid mask" in purpose.lower() or str(item.get("path") or "").endswith("valid_mask.tif")
+        if is_valid_mask != want_valid_mask:
+            continue
+        path_value = item.get("resolved_path") or item.get("path")
+        if not isinstance(path_value, str) or not path_value:
+            continue
+        candidate = Path(path_value).expanduser().resolve()
+        if candidate.is_file():
+            selected.append(candidate)
+    if len(selected) != 1:
+        if selected:
+            logger.info(
+                "TEMPORAL_REFERENCE_MANIFEST_SOURCE_AMBIGUOUS requestDir=%s releaseIdentifier=%s wantValidMask=%s count=%s",
+                request_dir,
+                release_identifier,
+                want_valid_mask,
+                len(selected),
+            )
+        return None
+    logger.info(
+        "TEMPORAL_REFERENCE_MANIFEST_SOURCE_RESOLVED requestDir=%s releaseIdentifier=%s wantValidMask=%s path=%s",
+        request_dir,
+        release_identifier,
+        want_valid_mask,
+        selected[0],
+    )
+    return str(selected[0])
 
 
 def _temporal_reference_aoi_hash(aoi_geojson: dict[str, Any] | None) -> str:
@@ -1243,6 +1429,43 @@ def _temporal_reference_aoi_hash(aoi_geojson: dict[str, Any] | None) -> str:
         return "no-aoi"
     normalized = normalized_aoi_geojson(aoi_geojson)
     return hashlib.sha256(json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _find_matching_canonical_reference_imagery(
+    *,
+    settings: Settings,
+    release_identifier: str,
+    aoi_hash: str,
+) -> tuple[Path, dict[str, Any]] | None:
+    cache_dir = settings.reference_imagery_cache_dir
+    if not settings.reference_imagery_cache_enabled or cache_dir is None or not cache_dir.is_dir():
+        return None
+
+    matches: list[tuple[Path, dict[str, Any]]] = []
+    for metadata_path in sorted(cache_dir.glob("refimg-v1-*/metadata.json")):
+        metadata = read_reference_imagery_cache_metadata(metadata_path)
+        if not metadata:
+            continue
+        metadata_release = metadata.get("release_identifier") or metadata.get("source_release_identifier")
+        if metadata_release != release_identifier or metadata.get("aoi_hash") != aoi_hash:
+            continue
+        canonical_value = metadata.get("canonical_cog_path")
+        if not isinstance(canonical_value, str) or not canonical_value:
+            continue
+        canonical_cog_path = Path(canonical_value).expanduser().resolve()
+        if canonical_cog_path.is_file() and canonical_cog_path.stat().st_size > 0:
+            matches.append((canonical_cog_path, metadata))
+
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        logger.info(
+            "TEMPORAL_REFERENCE_CANONICAL_CACHE_REJECTED releaseIdentifier=%s aoiHash=%s reason=ambiguous_canonical_cache_matches count=%s",
+            release_identifier,
+            aoi_hash,
+            len(matches),
+        )
+    return None
 
 
 def _temporal_reference_route(project_id: str, release_identifier: str, suffix: str) -> str:
@@ -1255,6 +1478,9 @@ def _reference_imagery_from_cog_path(
     release_identifier: str,
     cog_path: Path,
     source_reference: TemporalReferenceImagery | None = None,
+    reference_imagery_key: str | None = None,
+    canonical_cog_path: Path | str | None = None,
+    materialization_method: str | None = None,
 ) -> TemporalReferenceImagery:
     raster_bounds_wgs84 = source_reference.raster_bounds_wgs84 if source_reference else None
     minzoom = source_reference.minzoom if source_reference else None
@@ -1308,6 +1534,13 @@ def _reference_imagery_from_cog_path(
         minzoom=minzoom,
         maxzoom=maxzoom,
         tile_size=tile_size,
+        reference_imagery_key=reference_imagery_key
+        or (source_reference.reference_imagery_key if source_reference else None),
+        canonical_cog_path=str(canonical_cog_path)
+        if canonical_cog_path is not None
+        else (source_reference.canonical_cog_path if source_reference else None),
+        materialization_method=materialization_method
+        or (source_reference.materialization_method if source_reference else None),
     )
 
 
@@ -1319,8 +1552,12 @@ def _link_or_copy_reference_cog(source_path: Path, target_path: Path) -> str:
         target_path.hardlink_to(source_path)
         return "linked"
     except OSError:
-        shutil.copy2(source_path, target_path)
-        return "copied"
+        try:
+            target_path.symlink_to(source_path)
+            return "symlinked"
+        except OSError:
+            shutil.copy2(source_path, target_path)
+            return "copied"
 
 
 def _temporal_reference_transform_is_identity(transform: Any) -> bool:
@@ -1572,6 +1809,17 @@ def _persist_temporal_project_reference_repair(project: TemporalProject, setting
     project.updated_at = _utc_now_iso()
     project_dir = _resolve_project_dir(settings, project.project_id, project.project_dir)
     project.project_dir = str(project_dir)
+    reference_materialized_count = _ensure_temporal_project_reference_imagery_from_canonical_cache(
+        project=project,
+        settings=settings,
+        project_dir=project_dir,
+    )
+    if reference_materialized_count:
+        logger.info(
+            "TEMPORAL_REFERENCE_FINALIZATION_DONE projectId=%s materializedCount=%s",
+            project.project_id,
+            reference_materialized_count,
+        )
     externalized_count, empty_baseline_artifacts_removed = _externalize_temporal_artifact_payloads_in_project(
         project=project,
         project_dir=project_dir,
@@ -1587,13 +1835,12 @@ def _persist_temporal_project_reference_repair(project: TemporalProject, setting
     project_json_path = project_dir / "project.json"
     project_json_path.write_text(json.dumps(payload, indent=2))
     manifest_path = project_dir / "project_manifest.json"
-    if manifest_path.exists():
-        manifest_path.write_text(json.dumps(payload, indent=2))
-        logger.info(
-            "TEMPORAL_PROJECT_MANIFEST_UPDATED projectId=%s path=%s reason=reference_imagery_repair",
-            project.project_id,
-            manifest_path,
-        )
+    manifest_path.write_text(json.dumps(payload, indent=2))
+    logger.info(
+        "TEMPORAL_PROJECT_MANIFEST_UPDATED projectId=%s path=%s reason=reference_imagery_repair",
+        project.project_id,
+        manifest_path,
+    )
     _write_project_summary(project, project_json_path)
     logger.info(
         "TEMPORAL_PROJECT_SUMMARY_UPDATED projectId=%s path=%s reason=reference_imagery_repair",
@@ -1665,6 +1912,57 @@ def repair_temporal_project_reference_imagery(project_id: str, settings: Setting
             )
             continue
 
+        canonical_match = _find_matching_canonical_reference_imagery(
+            settings=settings,
+            release_identifier=release_identifier,
+            aoi_hash=aoi_hash,
+        )
+        if canonical_match is not None:
+            canonical_cog_path, canonical_metadata = canonical_match
+            logger.info(
+                "TEMPORAL_REFERENCE_SOURCE_RESOLVED projectId=%s releaseIdentifier=%s source=canonical_imagery_cache referenceImageryKey=%s canonicalCogPath=%s",
+                project.project_id,
+                release_identifier,
+                canonical_metadata.get("reference_imagery_key"),
+                canonical_cog_path,
+            )
+            materialization = materialize_reference_imagery_cog(
+                canonical_cog_path=canonical_cog_path,
+                project_cog_path=target_cog_path,
+                mode=settings.reference_imagery_materialization,
+            )
+            append_reference_imagery_materialization(
+                canonical_metadata,
+                project_id=project.project_id,
+                release_identifier=release_identifier,
+                project_cog_path=target_cog_path,
+                method=str(materialization.get("method") or "unknown"),
+            )
+            write_reference_imagery_cache_metadata(canonical_cog_path.with_name("metadata.json"), canonical_metadata)
+            milestone.reference_imagery = _reference_imagery_from_cog_path(
+                project_id=project.project_id,
+                release_identifier=release_identifier,
+                cog_path=target_cog_path,
+                source_reference=milestone.reference_imagery,
+                reference_imagery_key=(
+                    str(canonical_metadata.get("reference_imagery_key"))
+                    if canonical_metadata.get("reference_imagery_key")
+                    else None
+                ),
+                canonical_cog_path=canonical_cog_path,
+                materialization_method=str(materialization.get("method") or "unknown"),
+            )
+            repaired_count += 1
+            logger.info(
+                "TEMPORAL_REFERENCE_METADATA_REGISTERED projectId=%s releaseIdentifier=%s cogPath=%s canonicalCogPath=%s tilejsonUrl=%s",
+                project.project_id,
+                release_identifier,
+                target_cog_path,
+                canonical_cog_path,
+                milestone.reference_imagery.tilejson_url if milestone.reference_imagery else None,
+            )
+            continue
+
         match = _find_matching_project_reference_cog(
             settings=settings,
             project=project,
@@ -1692,12 +1990,14 @@ def repair_temporal_project_reference_imagery(project_id: str, settings: Setting
                 "TEMPORAL_REFERENCE_METADATA_REGISTERED projectId=%s releaseIdentifier=%s cogPath=%s tilejsonUrl=%s",
                 project.project_id,
                 release_identifier,
-                target_cog_path,
+                milestone.reference_imagery.cog_path if milestone.reference_imagery else target_cog_path,
                 milestone.reference_imagery.tilejson_url if milestone.reference_imagery else None,
             )
             logger.info(
                 "REFERENCE_REUSE_COG_%s projectId=%s releaseIdentifier=%s aoiHash=%s sourceProjectId=%s sourcePath=%s targetPath=%s durationMs=%s",
-                "LINKED" if action == "linked" else "COPIED",
+                "CANONICAL_CACHE_MATERIALIZED"
+                if action == "canonical_cache_materialized"
+                else ("LINKED" if action == "linked" else "COPIED"),
                 project.project_id,
                 release_identifier,
                 aoi_hash,
@@ -1724,7 +2024,7 @@ def repair_temporal_project_reference_imagery(project_id: str, settings: Setting
                 valid_mask_path,
             )
             reusable, reusable_reason = _reference_raster_is_project_reusable(source_raster_path)
-            if reusable:
+            if reusable and not settings.reference_imagery_cache_enabled:
                 action = _link_or_copy_reference_cog(source_raster_path, target_cog_path)
                 logger.info(
                     "TEMPORAL_REFERENCE_COG_WRITTEN projectId=%s releaseIdentifier=%s action=%s reason=%s sourcePath=%s cogPath=%s",
@@ -1742,6 +2042,15 @@ def repair_temporal_project_reference_imagery(project_id: str, settings: Setting
                     source_reference=milestone.reference_imagery,
                 )
             else:
+                if reusable:
+                    logger.info(
+                        "TEMPORAL_REFERENCE_COG_WRITTEN projectId=%s releaseIdentifier=%s action=canonical_cache_materialize reason=%s sourcePath=%s cogPath=%s",
+                        project.project_id,
+                        release_identifier,
+                        reusable_reason,
+                        source_raster_path,
+                        target_cog_path,
+                    )
                 reference = build_temporal_reference_imagery(
                     project_id=project.project_id,
                     project_dir=project_dir,
@@ -1754,6 +2063,7 @@ def repair_temporal_project_reference_imagery(project_id: str, settings: Setting
                         valid_mask_path=str(valid_mask_path) if valid_mask_path else None,
                         aoi_geojson=project.aoi_geojson,
                     ),
+                    settings=settings,
                 )
             if reference and reference.cog_path:
                 milestone.reference_imagery = reference
@@ -1898,6 +2208,128 @@ def repair_temporal_project_reference_imagery_for_publication(
         "milestone_count": len(project.milestones),
         "milestones": milestones,
     }
+
+
+def _temporal_reference_imagery_is_complete(
+    reference: TemporalReferenceImagery | None,
+    *,
+    fallback_cog_path: Path,
+) -> bool:
+    if reference is None:
+        return False
+    cog_path = Path(reference.cog_path).expanduser() if reference.cog_path else fallback_cog_path
+    return (
+        cog_path.is_file()
+        and bool(reference.tilejson_url)
+        and bool(reference.tiles_url_template)
+        and bool(reference.reference_imagery_key)
+        and bool(reference.canonical_cog_path)
+    )
+
+
+def _ensure_temporal_project_reference_imagery_from_canonical_cache(
+    *,
+    project: TemporalProject,
+    settings: Settings,
+    project_dir: Path,
+) -> int:
+    """Materialize exact canonical reference COGs into a temporal project.
+
+    This is intentionally narrower than the manual repair path: it only uses an
+    unambiguous canonical cache match keyed by the project AOI hash and milestone
+    release identifier. That keeps normal project finalization deterministic and
+    avoids broad project/shared-mosaic scans during every save.
+    """
+
+    if project.aoi_geojson is None:
+        return 0
+
+    aoi_hash = _temporal_reference_aoi_hash(project.aoi_geojson)
+    materialized_count = 0
+    for milestone in project.milestones:
+        release_identifier = milestone.release_identifier
+        target_cog_path = project_dir / "milestones" / release_identifier / "reference_imagery_cog.tif"
+        if _temporal_reference_imagery_is_complete(milestone.reference_imagery, fallback_cog_path=target_cog_path):
+            continue
+
+        if target_cog_path.is_file():
+            milestone.reference_imagery = _reference_imagery_from_cog_path(
+                project_id=project.project_id,
+                release_identifier=release_identifier,
+                cog_path=target_cog_path,
+                source_reference=milestone.reference_imagery,
+                reference_imagery_key=milestone.reference_imagery.reference_imagery_key
+                if milestone.reference_imagery
+                else None,
+                canonical_cog_path=milestone.reference_imagery.canonical_cog_path
+                if milestone.reference_imagery
+                else None,
+                materialization_method=milestone.reference_imagery.materialization_method
+                if milestone.reference_imagery
+                else "existing",
+            )
+            materialized_count += 1
+            logger.info(
+                "TEMPORAL_REFERENCE_FINALIZATION_METADATA_COMPLETED projectId=%s releaseIdentifier=%s source=project_local_cog cogPath=%s",
+                project.project_id,
+                release_identifier,
+                target_cog_path,
+            )
+            continue
+
+        canonical_match = _find_matching_canonical_reference_imagery(
+            settings=settings,
+            release_identifier=release_identifier,
+            aoi_hash=aoi_hash,
+        )
+        if canonical_match is None:
+            logger.info(
+                "TEMPORAL_REFERENCE_FINALIZATION_NO_CANONICAL_MATCH projectId=%s releaseIdentifier=%s aoiHash=%s",
+                project.project_id,
+                release_identifier,
+                aoi_hash,
+            )
+            continue
+
+        canonical_cog_path, canonical_metadata = canonical_match
+        materialization = materialize_reference_imagery_cog(
+            canonical_cog_path=canonical_cog_path,
+            project_cog_path=target_cog_path,
+            mode=settings.reference_imagery_materialization,
+        )
+        method = str(materialization.get("method") or "unknown")
+        append_reference_imagery_materialization(
+            canonical_metadata,
+            project_id=project.project_id,
+            release_identifier=release_identifier,
+            project_cog_path=target_cog_path,
+            method=method,
+        )
+        write_reference_imagery_cache_metadata(canonical_cog_path.with_name("metadata.json"), canonical_metadata)
+        milestone.reference_imagery = _reference_imagery_from_cog_path(
+            project_id=project.project_id,
+            release_identifier=release_identifier,
+            cog_path=target_cog_path,
+            source_reference=milestone.reference_imagery,
+            reference_imagery_key=(
+                str(canonical_metadata.get("reference_imagery_key"))
+                if canonical_metadata.get("reference_imagery_key")
+                else None
+            ),
+            canonical_cog_path=canonical_cog_path,
+            materialization_method=method,
+        )
+        materialized_count += 1
+        logger.info(
+            "TEMPORAL_REFERENCE_FINALIZATION_MATERIALIZED projectId=%s releaseIdentifier=%s referenceImageryKey=%s method=%s canonicalCogPath=%s projectCogPath=%s",
+            project.project_id,
+            release_identifier,
+            canonical_metadata.get("reference_imagery_key"),
+            method,
+            canonical_cog_path,
+            target_cog_path,
+        )
+    return materialized_count
 
 
 def _load_geojson_file(path: Path) -> dict[str, Any] | None:
@@ -2707,6 +3139,7 @@ def _hydrate_reference_imagery(
                 use_t1_preview=False,
                 aoi_geojson=project.aoi_geojson,
                 include_data_url=include_data_urls,
+                settings=settings,
             )
 
         if reference_imagery is None and index + 1 < len(milestones):
@@ -2720,6 +3153,7 @@ def _hydrate_reference_imagery(
                     use_t1_preview=True,
                     aoi_geojson=project.aoi_geojson,
                     include_data_url=include_data_urls,
+                    settings=settings,
                 )
 
         milestone.reference_imagery = reference_imagery
@@ -3746,6 +4180,17 @@ def _save_project(project: TemporalProject, settings: Settings) -> TemporalProje
     project.updated_at = _utc_now_iso()
     project_dir = _resolve_project_dir(settings, project.project_id, project.project_dir)
     project.project_dir = str(project_dir)
+    reference_materialized_count = _ensure_temporal_project_reference_imagery_from_canonical_cache(
+        project=project,
+        settings=settings,
+        project_dir=project_dir,
+    )
+    if reference_materialized_count:
+        logger.info(
+            "TEMPORAL_REFERENCE_FINALIZATION_DONE projectId=%s materializedCount=%s",
+            project.project_id,
+            reference_materialized_count,
+        )
     externalized_count, empty_baseline_artifacts_removed = _externalize_temporal_artifact_payloads_in_project(
         project=project,
         project_dir=project_dir,
@@ -3762,6 +4207,7 @@ def _save_project(project: TemporalProject, settings: Settings) -> TemporalProje
     _save_project_registry(settings, registry)
     path = project_dir / "project.json"
     path.write_text(json.dumps(project.model_dump(mode="json"), indent=2))
+    (project_dir / "project_manifest.json").write_text(json.dumps(project.model_dump(mode="json"), indent=2))
     _write_project_summary(project, path)
     logger.info(
         "TEMPORAL_PROJECT_PUBLICATION_SUMMARY_UPDATED projectId=%s path=%s",
@@ -4498,6 +4944,14 @@ def publish_completed_tiled_request(
             target_release,
             len(target_milestone.artifacts),
             round((time.perf_counter() - started_at) * 1000, 2),
+        )
+        from src.services.request_cleanup import run_post_completion_request_cleanup_if_enabled
+
+        run_post_completion_request_cleanup_if_enabled(
+            request_hash=request_id,
+            project_id=project.project_id,
+            release_identifier=target_release,
+            settings=settings,
         )
         return result
     except Exception as exc:
@@ -5315,6 +5769,16 @@ def run_temporal_project(
     project = _refresh_project_bundle(project, settings)
     _save_project(project, settings)
     _write_temporal_project_timing_safely(timing, project)
+    from src.services.request_cleanup import run_post_completion_request_cleanup_if_enabled
+
+    for milestone in project.milestones:
+        if milestone.status == "complete" and milestone.pair_request_hash:
+            run_post_completion_request_cleanup_if_enabled(
+                request_hash=milestone.pair_request_hash,
+                project_id=project.project_id,
+                release_identifier=milestone.release_identifier,
+                settings=settings,
+            )
     return TemporalProjectRunResponse(success=True, project=project)
 
 

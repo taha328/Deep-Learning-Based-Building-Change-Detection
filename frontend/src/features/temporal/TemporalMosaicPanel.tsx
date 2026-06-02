@@ -128,6 +128,15 @@ function formatReleaseDate(value: string | undefined | null, locale: string, fal
   }).format(date);
 }
 
+function temporalMilestoneChronologicalValue(milestone: TemporalMilestone): number {
+  const parsedDate = Date.parse(milestone.release_date ?? "");
+  if (Number.isFinite(parsedDate)) {
+    return parsedDate;
+  }
+  const releaseYear = milestone.release_identifier.match(/(?:WB_|^)(\d{4})/)?.[1];
+  return releaseYear ? Date.UTC(Number(releaseYear), 0, 1) : Number.MAX_SAFE_INTEGER;
+}
+
 function formatArea(areaM2: number | undefined, fallback: string): string {
   if (!areaM2 || areaM2 <= 0) {
     return fallback;
@@ -615,6 +624,7 @@ export function TemporalMosaicPanel({
   const setIsRunning = useAppStore((state) => state.setIsRunning);
   const previousAoiRef = useRef<Polygon | null>(aoi);
   const latestProjectLoadRef = useRef<string | null>(null);
+  const cumulativeAdditionsFetchesRef = useRef<Set<string>>(new Set());
 
   const { t, language } = useI18n();
   const locale = language === "fr" ? "fr-FR" : "en-GB";
@@ -1056,6 +1066,133 @@ export function TemporalMosaicPanel({
   }, [project?.project_id, selectedMilestone, setProject]);
 
   useEffect(() => {
+    if (!project?.project_id || !selectedMilestone) {
+      return;
+    }
+
+    const chronologicalMilestones = [...project.milestones].sort(
+      (left, right) => temporalMilestoneChronologicalValue(left) - temporalMilestoneChronologicalValue(right),
+    );
+    const selectedIndex = chronologicalMilestones.findIndex(
+      (milestone) => milestone.release_identifier === selectedMilestone.release_identifier,
+    );
+    relayClientLog("TEMPORAL_CUMULATIVE_ADDITIONS_FETCH_EVALUATED", {
+      projectId: project.project_id,
+      selectedReleaseIdentifier: selectedMilestone.release_identifier,
+      selectedIndex,
+      milestoneOrder: chronologicalMilestones.map((milestone) => milestone.release_identifier),
+    });
+    if (selectedIndex <= 0) {
+      return;
+    }
+
+    const controller = new AbortController();
+    const releasesToFetch = chronologicalMilestones
+      .slice(1, selectedIndex + 1)
+      .filter((milestone) => milestone.release_identifier !== selectedMilestone.release_identifier)
+      .filter((milestone) => !hasFeatureCollectionFeatures(milestone.additions_geojson))
+      .filter((milestone) => milestoneHasArtifact(milestone, "additions"))
+      .filter((milestone) => {
+        if (isHugeTemporalArtifact(milestone, "additions")) {
+          relayClientLog("TEMPORAL_CUMULATIVE_ADDITIONS_FETCH_SKIPPED", {
+            projectId: project.project_id,
+            releaseIdentifier: milestone.release_identifier,
+            selectedReleaseIdentifier: selectedMilestone.release_identifier,
+            artifactKey: "additions",
+            reason: "vector_tile_available",
+          });
+          return false;
+        }
+        const fetchKey = `${project.project_id}:${milestone.release_identifier}:additions`;
+        if (cumulativeAdditionsFetchesRef.current.has(fetchKey)) {
+          return false;
+        }
+        cumulativeAdditionsFetchesRef.current.add(fetchKey);
+        return true;
+      });
+
+    if (!releasesToFetch.length) {
+      relayClientLog("TEMPORAL_CUMULATIVE_ADDITIONS_FETCH_NOOP", {
+        projectId: project.project_id,
+        selectedReleaseIdentifier: selectedMilestone.release_identifier,
+        selectedIndex,
+        reason: "no_missing_included_additions",
+      });
+      return () => {
+        controller.abort();
+      };
+    }
+
+    relayClientLog("TEMPORAL_CUMULATIVE_ADDITIONS_FETCH_START", {
+      projectId: project.project_id,
+      selectedReleaseIdentifier: selectedMilestone.release_identifier,
+      releaseIdentifiers: releasesToFetch.map((milestone) => milestone.release_identifier),
+      artifactKey: "additions",
+      reason: "hydrate_all_new_buildings_initial_runtime",
+    });
+
+    Promise.all(
+      releasesToFetch.map((milestone) =>
+        getTemporalMilestoneArtifact(project.project_id, milestone.release_identifier, "additions", {
+          signal: controller.signal,
+        }).then((payload: Record<string, unknown>) => [milestone.release_identifier, payload] as const),
+      ),
+    )
+      .then((entries) => {
+        if (controller.signal.aborted) {
+          return;
+        }
+        setProject((current) => {
+          if (!current || current.project_id !== project.project_id) {
+            return current;
+          }
+          const additionsByRelease = new Map(entries);
+          return {
+            ...current,
+            milestones: current.milestones.map((milestone) => {
+              const additionsGeojson = additionsByRelease.get(milestone.release_identifier);
+              return additionsGeojson ? { ...milestone, additions_geojson: additionsGeojson } : milestone;
+            }),
+          };
+        });
+        relayClientLog("TEMPORAL_CUMULATIVE_ADDITIONS_FETCH_DONE", {
+          projectId: project.project_id,
+          selectedReleaseIdentifier: selectedMilestone.release_identifier,
+          releaseIdentifiers: entries.map(([releaseIdentifier]) => releaseIdentifier),
+          artifactKey: "additions",
+          featureCounts: entries.map(([releaseIdentifier, payload]) => ({
+            releaseIdentifier,
+            featureCount: ensureFeatureCollection(payload).features.length,
+          })),
+        });
+      })
+      .catch((error) => {
+        if (controller.signal.aborted) {
+          return;
+        }
+        relayClientLog("TEMPORAL_CUMULATIVE_ADDITIONS_FETCH_FAILED", {
+          projectId: project.project_id,
+          selectedReleaseIdentifier: selectedMilestone.release_identifier,
+          releaseIdentifiers: releasesToFetch.map((milestone) => milestone.release_identifier),
+          artifactKey: "additions",
+          error: error instanceof Error ? error.message : String(error),
+        });
+      })
+      .finally(() => {
+        for (const milestone of releasesToFetch) {
+          cumulativeAdditionsFetchesRef.current.delete(`${project.project_id}:${milestone.release_identifier}:additions`);
+        }
+      });
+
+    return () => {
+      controller.abort();
+      for (const milestone of releasesToFetch) {
+        cumulativeAdditionsFetchesRef.current.delete(`${project.project_id}:${milestone.release_identifier}:additions`);
+      }
+    };
+  }, [project?.project_id, project?.milestones, selectedMilestone, setProject]);
+
+  useEffect(() => {
     if (!project?.project_id || !referenceLayersQuery.isSuccess) {
       return;
     }
@@ -1248,6 +1385,10 @@ export function TemporalMosaicPanel({
       projectUpdatedAt: project.updated_at,
       isHydratingProject: Boolean(temporalProjectBootstrap || loadProjectMutation.isPending || hydratingAoiRef.current),
       availableMilestoneIds: project.milestones.map((milestone) => milestone.release_identifier),
+      availableMilestones: project.milestones.map((milestone) => ({
+        releaseIdentifier: milestone.release_identifier,
+        date: milestone.release_date ?? null,
+      })),
       selectedMilestoneIndex,
       selectedReleaseIdentifier: selectedMilestone.release_identifier,
       selectedMilestoneStatus: selectedMilestone.status,
