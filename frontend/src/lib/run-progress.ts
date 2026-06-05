@@ -139,6 +139,49 @@ export function createErrorRunProgress(message: string): RunProgressState {
   };
 }
 
+function isCompletedStatus(value: string | null | undefined): boolean {
+  if (!value) {
+    return false;
+  }
+  return ["complete", "completed", "success", "succeeded", "done", "process_completed"].includes(value.toLowerCase());
+}
+
+function isFailureStatus(value: string | null | undefined): boolean {
+  if (!value) {
+    return false;
+  }
+  return ["error", "failed", "failure", "cancelled", "canceled", "cancel_requested"].includes(value.toLowerCase());
+}
+
+export function shouldShowExecutionProgressPanel(progress: RunProgressState): boolean {
+  const detail = progress.detail.trim();
+  const stageLabel = progress.stageLabel.trim();
+  const hasErrorMessage =
+    detail.length > 0 &&
+    detail !== DEFAULT_IDLE_STATUS &&
+    detail !== "Artifacts are ready." &&
+    /error|fail|failed|cancel|cancelled|canceled/i.test(detail);
+  const hasFailedStage = /error|fail|failed|cancel|cancelled|canceled/i.test(stageLabel);
+
+  if (progress.phase === "error" || isFailureStatus(progress.rawEvent) || hasErrorMessage || hasFailedStage) {
+    return true;
+  }
+
+  if (progress.phase === "queued" || progress.phase === "running") {
+    return true;
+  }
+
+  if (progress.phase === "complete" || isCompletedStatus(progress.rawEvent) || isCompletedStatus(stageLabel)) {
+    return false;
+  }
+
+  if (progress.percent < 100 && progress.phase !== "idle") {
+    return true;
+  }
+
+  return false;
+}
+
 export function updateRunProgressFromEvent(
   previous: RunProgressState,
   event: Record<string, unknown>,

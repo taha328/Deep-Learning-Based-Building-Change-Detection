@@ -533,6 +533,61 @@ def _log_effective_detection_identity(identity: dict[str, object]) -> None:
     LOGGER.info("EFFECTIVE_REQUEST_HASH value=%s", identity.get("request_hash"))
 
 
+def _scene_imagery_provenance(scene: MosaicResult) -> dict[str, object]:
+    metadata = dict(scene.metadata or {})
+    inference_path = str(scene.geotiff_path)
+    canonical_path = metadata.get("canonical_cog_path")
+    source_mode = metadata.get("imagery_source_mode")
+    inference_input_source = source_mode
+    if isinstance(canonical_path, str) and canonical_path and Path(canonical_path) == scene.geotiff_path:
+        inference_input_source = "canonical_cog"
+    return {
+        "release_identifier": scene.identifier,
+        "reference_imagery_cache_key": metadata.get("reference_imagery_key") or scene.cache_key,
+        "canonical_cog_path": canonical_path,
+        "project_cog_path": metadata.get("project_cog_path"),
+        "project_cog_link_type": metadata.get("project_cog_link_type"),
+        "project_cog_inode": metadata.get("project_cog_inode"),
+        "inference_input_path": inference_path,
+        "inference_input_source": inference_input_source,
+        "imagery_source_mode": source_mode,
+        "fallback_reason": metadata.get("fallback_reason"),
+        "canonical_cog_validation": metadata.get("canonical_cog_validation"),
+        "canonical_cog_promoted": metadata.get("canonical_cog_promoted"),
+    }
+
+
+def _cached_response_has_stale_fallback_imagery(settings: Settings, request_hash: str) -> bool:
+    manifest_path = settings.request_cache_dir / request_hash / "manifest.json"
+    if not manifest_path.is_file():
+        return False
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    imagery_sources = manifest.get("imagery_sources")
+    if not isinstance(imagery_sources, dict):
+        return False
+    for role, payload in imagery_sources.items():
+        if not isinstance(payload, dict):
+            continue
+        canonical_path = payload.get("canonical_cog_path")
+        if (
+            payload.get("imagery_source_mode") == "wayback_mosaic_fallback"
+            and payload.get("fallback_reason") == "missing_canonical_cog"
+            and isinstance(canonical_path, str)
+            and Path(canonical_path).is_file()
+        ):
+            LOGGER.info(
+                "CACHED_RESPONSE_INVALIDATED reason=stale_wayback_fallback_with_existing_canonical requestHash=%s sceneRole=%s canonicalCogPath=%s",
+                request_hash,
+                role,
+                canonical_path,
+            )
+            return True
+    return False
+
+
 def _summarize_release_metadata_for_request(
     settings: Settings,
     *,
@@ -1287,6 +1342,8 @@ def run_detection(
 
     with timing.stage("imagery_cache_lookup"):
         cached = load_cached_response(settings, prepared.request_hash)
+        if cached is not None and _cached_response_has_stale_fallback_imagery(settings, prepared.request_hash):
+            cached = None
     if cached is not None:
         if cached.diagnostics is not None:
             cached.diagnostics.cache_hit = True
@@ -1642,22 +1699,8 @@ def run_detection(
             )
 
         imagery_source_diagnostics = {
-            "t1": {
-                "imagery_source_mode": (scene_t1.metadata or {}).get("imagery_source_mode"),
-                "reference_imagery_key": (scene_t1.metadata or {}).get("reference_imagery_key"),
-                "canonical_cog_path": (scene_t1.metadata or {}).get("canonical_cog_path"),
-                "valid_mask_source": (scene_t1.metadata or {}).get("valid_mask_source"),
-                "fallback_reason": (scene_t1.metadata or {}).get("fallback_reason"),
-                "canonical_cog_validation": (scene_t1.metadata or {}).get("canonical_cog_validation"),
-            },
-            "t2": {
-                "imagery_source_mode": (scene_t2.metadata or {}).get("imagery_source_mode"),
-                "reference_imagery_key": (scene_t2.metadata or {}).get("reference_imagery_key"),
-                "canonical_cog_path": (scene_t2.metadata or {}).get("canonical_cog_path"),
-                "valid_mask_source": (scene_t2.metadata or {}).get("valid_mask_source"),
-                "fallback_reason": (scene_t2.metadata or {}).get("fallback_reason"),
-                "canonical_cog_validation": (scene_t2.metadata or {}).get("canonical_cog_validation"),
-            },
+            "t1": _scene_imagery_provenance(scene_t1),
+            "t2": _scene_imagery_provenance(scene_t2),
         }
         backend_diagnostics["imagery_sources"] = imagery_source_diagnostics
 

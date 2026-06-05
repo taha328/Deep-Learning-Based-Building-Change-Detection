@@ -1,5 +1,5 @@
 import type { FeatureCollection } from "geojson";
-import type { ReferenceLayer } from "@/api/contracts";
+import type { ReferenceLayer, TemporalMilestone } from "@/api/contracts";
 
 export interface ReferenceLayerPresentation extends ReferenceLayer {
   resolvedDisplayUrl: string | null;
@@ -63,6 +63,8 @@ export interface TemporalMapPresentation {
   selectedMilestoneIndex: number;
   selectedReleaseIdentifier: string | null;
   selectedMilestoneStatus: "pending" | "validated" | "complete" | "error" | null;
+  selectedMilestone: TemporalMilestone | null;
+  milestones: TemporalMilestone[];
   milestoneCount: number;
   referenceImagery: TemporalReferenceImageryPresentation | null;
   referenceImageryTimeline: TemporalReferenceImageryPresentation[];
@@ -83,4 +85,30 @@ export interface TemporalMapPresentation {
   cumulativeGrowthEnvelope: FeatureCollection;
   manualOverride: FeatureCollection;
   referenceLayers: ReferenceLayerPresentation[];
+}
+
+export interface TemporalLayerControlEntryPresentation {
+  key: string;
+  label: string;
+  enabled: boolean;
+  checked: boolean;
+  description?: string;
+  swatch?: {
+    color: string;
+    opacity?: number;
+  };
+  onCheckedChange: (checked: boolean) => void;
+}
+
+export interface TemporalLayerControlsPresentation {
+  satellite: TemporalLayerControlEntryPresentation[];
+  buildingEvolution: TemporalLayerControlEntryPresentation[];
+  manualReferenceLayers: Array<{
+    id: string;
+    name: string;
+    geometryType: string | null;
+    storageStrategy: string | null;
+    opacity: number;
+  }>;
+  referenceWarning: string | null;
 }

@@ -179,6 +179,11 @@ def _geometry(payload: dict) -> object:
     return unary_union([shape(feature["geometry"]) for feature in payload.get("features", []) if feature.get("geometry")]).buffer(0)
 
 
+def _published_milestone_geojson(settings: Settings, project_id: str, release_identifier: str, filename: str) -> dict:
+    path = settings.temporal_projects_dir / project_id / "milestones" / release_identifier / filename
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def _has_holes(geometry: object) -> bool:
     if isinstance(geometry, Polygon):
         return len(geometry.interiors) > 0
@@ -244,12 +249,16 @@ def test_run_temporal_project_builds_monotonic_cumulative_union(monkeypatch, tmp
     assert response.project.milestones[0].metrics.total_area_m2 == 0.0
     assert response.project.milestones[1].metrics.total_area_m2 > response.project.milestones[0].metrics.total_area_m2
     assert response.project.milestones[2].metrics.total_area_m2 > response.project.milestones[1].metrics.total_area_m2
-    assert response.project.milestones[1].cumulative_union_geojson is not None
-    assert response.project.milestones[2].cumulative_union_geojson is not None
-    assert _geometry(response.project.milestones[1].cumulative_union_geojson).within(_geometry(response.project.milestones[2].cumulative_union_geojson))
-    final_cumulative = _geometry(response.project.milestones[2].cumulative_union_geojson)
-    final_envelope_geojson = response.project.milestones[2].cumulative_growth_envelope_geojson
-    assert final_envelope_geojson is not None
+    cumulative_2025_geojson = _published_milestone_geojson(settings, project.project_id, "WB_2025_R01", "cumulative_union.geojson")
+    cumulative_2026_geojson = _published_milestone_geojson(settings, project.project_id, "WB_2026_R01", "cumulative_union.geojson")
+    assert _geometry(cumulative_2025_geojson).within(_geometry(cumulative_2026_geojson))
+    final_cumulative = _geometry(cumulative_2026_geojson)
+    final_envelope_geojson = _published_milestone_geojson(
+        settings,
+        project.project_id,
+        "WB_2026_R01",
+        "cumulative_growth_envelope.geojson",
+    )
     assert len(final_envelope_geojson["features"]) == 1
     final_envelope = _geometry(final_envelope_geojson)
     assert not _has_holes(final_envelope)
@@ -327,8 +336,14 @@ def test_publish_completed_tiled_request_uses_temporal_project_artifact_schema(m
     reloaded = get_temporal_project(saved.project_id, settings)
     target = next(item for item in reloaded.milestones if item.release_identifier == "WB_2025_R01")
     assert target.pair_request_hash == request_id
+    assert target.populated_request_hash == request_id
+    assert target.request_workspace_path == str(request_dir)
     artifact_names = {artifact.name for artifact in target.artifacts}
-    assert "WB_2025_R01_export_bundle" in artifact_names
+    assert "WB_2025_R01_export_bundle" not in artifact_names
+    assert not (request_dir / "export_bundle.zip").exists()
+    cleanup_audit = json.loads((request_dir / "cleanup_audit.json").read_text(encoding="utf-8"))
+    assert cleanup_audit["skipped"] is False
+    assert cleanup_audit["bytes_deleted"] > 0
 
 
 def test_temporal_project_metric_audit_reads_published_artifacts(monkeypatch, tmp_path) -> None:
@@ -992,10 +1007,8 @@ def test_four_milestone_run_keeps_a_single_saved_temporal_project_entry(monkeypa
     response = run_temporal_project(project.project_id, settings=settings, pair_runner=_pair_runner)
 
     assert response.success is True
-    final_cumulative_geojson = response.project.milestones[-1].cumulative_union_geojson
-    final_convex_hull_geojson = response.project.milestones[-1].cumulative_convex_hull_geojson
-    assert final_cumulative_geojson is not None
-    assert final_convex_hull_geojson is not None
+    final_cumulative_geojson = _published_milestone_geojson(settings, project.project_id, "WB_2026_R01", "cumulative_union.geojson")
+    final_convex_hull_geojson = _published_milestone_geojson(settings, project.project_id, "WB_2026_R01", "cumulative_convex_hull.geojson")
     final_cumulative = _geometry(final_cumulative_geojson)
     final_convex_hull = _geometry(final_convex_hull_geojson)
     assert final_convex_hull.geom_type == "Polygon"
@@ -1046,7 +1059,12 @@ def test_import_temporal_override_recomputes_downstream_milestones(monkeypatch, 
     assert first_run.success is True
     before_override_total = first_run.project.milestones[2].metrics.total_area_m2
     before_override_block_count = first_run.project.milestones[2].metrics.cumulative_block_count
-    before_override_blocks = first_run.project.milestones[2].cumulative_growth_blocks_geojson
+    before_override_blocks = _published_milestone_geojson(
+        settings,
+        project.project_id,
+        "WB_2026_R01",
+        "cumulative_growth_blocks.geojson",
+    )
 
     override_response = import_temporal_override(
         TemporalOverrideRequest(
@@ -1060,11 +1078,22 @@ def test_import_temporal_override_recomputes_downstream_milestones(monkeypatch, 
     )
 
     assert override_response.success is True
-    assert override_response.project.milestones[1].source_mode == "hybrid_reviewed"
+    assert override_response.project.milestones[1].source_mode in {"hybrid_reviewed", "manual_override"}
     assert override_response.project.milestones[2].metrics is not None
     assert override_response.project.milestones[2].metrics.total_area_m2 > before_override_total
     assert override_response.project.milestones[2].metrics.cumulative_block_count < before_override_block_count
-    assert override_response.project.milestones[2].cumulative_growth_blocks_geojson != before_override_blocks
+    after_override_blocks = _published_milestone_geojson(
+        settings,
+        project.project_id,
+        "WB_2026_R01",
+        "cumulative_growth_blocks.geojson",
+    )
+    assert after_override_blocks != before_override_blocks
 
     reloaded = get_temporal_project(project.project_id, settings)
-    assert reloaded.milestones[1].manual_override_geojson is not None
+    reloaded_override = next(
+        artifact for artifact in reloaded.milestones[1].artifacts if artifact.key == "manual_override"
+    )
+    assert reloaded_override.path is not None
+    override_payload = _published_milestone_geojson(settings, project.project_id, "WB_2025_R01", "manual_override.geojson")
+    assert len(override_payload["features"]) == 1

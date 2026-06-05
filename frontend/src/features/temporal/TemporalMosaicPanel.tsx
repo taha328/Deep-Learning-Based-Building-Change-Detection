@@ -67,14 +67,19 @@ import { cn, formatNumber } from "@/lib/utils";
 import { downloadFileFromUrl } from "@/lib/download";
 import { useI18n } from "@/lib/i18n";
 import { getProjectDisplayName } from "@/lib/project-summary";
-import { createActiveRunProgress, createCompletedRunProgress, createErrorRunProgress } from "@/lib/run-progress";
+import { createActiveRunProgress, createCompletedRunProgress, createErrorRunProgress, shouldShowExecutionProgressPanel } from "@/lib/run-progress";
 import { relayClientLog } from "@/lib/client-log-relay";
 import { AOIImportModal } from "@/features/aoi/AOIImportModal";
 import { RunProgressPanel } from "@/features/results/RunProgressPanel";
 import { GeometryImportModal } from "@/features/temporal/GeometryImportModal";
 import { MilestoneMetricCards } from "@/features/temporal/MilestoneMetricCards";
 import { ReferenceLayerImportModal } from "@/features/temporal/ReferenceLayerImportModal";
-import type { TemporalMapPresentation, TemporalOutputArtifactPresentation } from "@/features/temporal/types";
+import type {
+  TemporalLayerControlEntryPresentation,
+  TemporalLayerControlsPresentation,
+  TemporalMapPresentation,
+  TemporalOutputArtifactPresentation,
+} from "@/features/temporal/types";
 import { SharedAoiSection } from "@/features/workspace/SharedAoiSection";
 import { WorkflowParametersPanel } from "@/features/workspace/WorkflowParametersPanel";
 import { WorkflowSectionCard } from "@/features/workspace/WorkflowSectionCard";
@@ -255,6 +260,102 @@ function ReleaseItem({
       </div>
       {selected ? <Check className="h-4 w-4 shrink-0 text-primary" aria-hidden="true" /> : null}
     </button>
+  );
+}
+
+function TimelineSectionHeader({ number, label }: { number: number; label: string }) {
+  return (
+    <div className="flex items-center gap-2">
+      <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">
+        {number}
+      </span>
+      <span className="text-xs font-semibold uppercase tracking-[0.08em] text-foreground">{label}</span>
+    </div>
+  );
+}
+
+function TemporalLayerControlRow({ entry }: { entry: TemporalLayerControlEntryPresentation }) {
+  return (
+    <label
+      className={cn(
+        "flex items-start justify-between gap-3 rounded px-2 py-1.5 text-sm",
+        entry.enabled ? "text-foreground" : "text-muted-foreground",
+      )}
+    >
+      <span className="min-w-0">
+        <span className="flex min-w-0 items-center gap-2">
+          {entry.swatch ? (
+            <span
+              aria-hidden="true"
+              className="h-3 w-3 shrink-0 rounded-[2px] border border-sidebar-border"
+              style={{ backgroundColor: entry.swatch.color, opacity: entry.swatch.opacity ?? 1 }}
+            />
+          ) : null}
+          <span>{entry.label}</span>
+        </span>
+        {entry.description ? <span className="mt-0.5 block text-caption text-muted-foreground">{entry.description}</span> : null}
+      </span>
+      <input
+        type="checkbox"
+        checked={entry.checked}
+        onChange={(event) => entry.onCheckedChange(event.target.checked)}
+        disabled={!entry.enabled}
+        className="mt-0.5 h-4 w-4 rounded border-sidebar-border bg-sidebar accent-primary disabled:opacity-40"
+      />
+    </label>
+  );
+}
+
+function TemporalLayerControlsBlock({
+  controls,
+  t,
+}: {
+  controls: TemporalLayerControlsPresentation | null;
+  t: (key: string, fallback?: string) => string;
+}) {
+  return (
+    <div className="space-y-3">
+      <TimelineSectionHeader number={2} label={t("map.layers")} />
+      <div className="rounded-lg border border-sidebar-border bg-sidebar p-3">
+        {controls?.referenceWarning ? (
+          <p className="mb-2 rounded border border-warning/30 bg-warning/10 px-2 py-1.5 text-caption text-warning-foreground">
+            {controls.referenceWarning}
+          </p>
+        ) : null}
+        <div className="space-y-3">
+          <div>
+            <p className="px-2 pb-1 text-xs font-semibold text-foreground">{t("map.satellite_view_section")}</p>
+            {(controls?.satellite ?? []).length > 0 ? (
+              controls?.satellite.map((entry) => <TemporalLayerControlRow key={entry.key} entry={entry} />)
+            ) : (
+              <p className="px-2 py-1.5 text-sm text-muted-foreground">{t("map.reference_imagery_unavailable")}</p>
+            )}
+          </div>
+          <div>
+            <p className="px-2 pb-1 text-xs font-semibold text-foreground">{t("map.building_evolution_section")}</p>
+            {(controls?.buildingEvolution ?? []).map((entry) => (
+              <TemporalLayerControlRow key={entry.key} entry={entry} />
+            ))}
+          </div>
+          {controls?.manualReferenceLayers.length ? (
+            <div>
+              <p className="px-2 pb-1 text-xs font-semibold text-foreground">{t("reference_layer.map_section")}</p>
+              {controls.manualReferenceLayers.map((layer) => (
+                <div key={layer.id} className="rounded px-2 py-1.5 text-sm text-foreground">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="min-w-0 truncate">{layer.name}</span>
+                    <span className="text-caption text-muted-foreground">{Math.round(layer.opacity * 100)}%</span>
+                  </div>
+                  <p className="mt-0.5 text-caption text-muted-foreground">
+                    {layer.geometryType ?? "—"} / {layer.storageStrategy ?? "—"}
+                  </p>
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -562,6 +663,7 @@ interface TemporalMosaicPanelProps {
   isCollapsed: boolean;
   onToggleCollapse: () => void;
   onMapPresentationChange: (presentation: TemporalMapPresentation | null) => void;
+  temporalLayerControls: TemporalLayerControlsPresentation | null;
 }
 
 export function TemporalMosaicPanel({
@@ -578,6 +680,7 @@ export function TemporalMosaicPanel({
   isCollapsed,
   onToggleCollapse,
   onMapPresentationChange,
+  temporalLayerControls,
 }: TemporalMosaicPanelProps) {
   const queryClient = useQueryClient();
   const hydratingAoiRef = useRef(false);
@@ -1392,6 +1495,8 @@ export function TemporalMosaicPanel({
       selectedMilestoneIndex,
       selectedReleaseIdentifier: selectedMilestone.release_identifier,
       selectedMilestoneStatus: selectedMilestone.status,
+      selectedMilestone,
+      milestones: project.milestones,
       milestoneCount: project.milestones.length,
       referenceImagery: referenceImagery ? toReferenceImageryPresentation(selectedMilestone) : null,
       referenceImageryTimeline,
@@ -1659,7 +1764,7 @@ export function TemporalMosaicPanel({
   const visibleValidationWarnings = validation ? filterProgressWarnings(validation.warnings) : [];
   const visibleMilestoneWarnings = selectedMilestone ? filterProgressWarnings(selectedMilestone.warnings) : [];
   const aoiVertices = draftVertices.length || (aoi ? aoi.coordinates[0].length - 1 : 0);
-  const showRunProgress = runProjectMutation.isPending || runProgress.phase !== "idle";
+  const showRunProgress = runProjectMutation.isPending || shouldShowExecutionProgressPanel(runProgress);
   const showMilestoneRunData = progressMetricsVisible && Boolean(selectedMilestone);
   const hasCompletedTemporalResult = Boolean(project?.milestones.some((milestone) => milestone.status === "complete" && milestone.metrics));
 
@@ -2018,7 +2123,6 @@ export function TemporalMosaicPanel({
           <div className="space-y-4 p-5">
             <WorkflowSectionCard
               title={t("temporal.progress_title")}
-              description={t("temporal.progress_description")}
               contentClassName="space-y-3"
             >
                 {validation ? (
@@ -2060,24 +2164,41 @@ export function TemporalMosaicPanel({
                   <>
                     <Card className="border-sidebar-border bg-sidebar shadow-panel">
                       <CardContent className="space-y-6 p-5 lg:p-6">
-                        <div className="flex flex-col items-stretch gap-2 sm:flex-row sm:items-start sm:justify-end">
+                        <div className="space-y-3">
+                          <TimelineSectionHeader number={1} label={t("temporal.timeline_short")} />
+                          <MilestoneMetricCards
+                            milestone={selectedMilestone}
+                            milestones={project?.milestones ?? []}
+                            selectedMilestoneId={selectedMilestoneId}
+                            onSelectMilestone={setSelectedMilestoneId}
+                            t={t}
+                            variant="timeline"
+                          />
+                        </div>
+
+                        <TemporalLayerControlsBlock controls={temporalLayerControls} t={t} />
+
+                        <div className="space-y-3">
+                          <TimelineSectionHeader number={3} label={t("temporal.download_results")} />
                           <div className="relative">
                             <Button
                               type="button"
                               variant="outline"
-                              className="h-10 w-full border-sidebar-border bg-card px-3 sm:w-auto"
+                              className="h-10 w-full justify-between border-sidebar-border bg-card px-3"
                               onClick={() => {
                                 setResultsExportError(null);
                                 setResultsExportMenuOpen((open) => !open);
                               }}
                               disabled={!hasCompletedTemporalResult || Boolean(resultsExportBusy)}
                             >
-                              {resultsExportBusy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Download className="mr-2 h-4 w-4" />}
-                              Télécharger les résultats
-                              <ChevronDown className="ml-2 h-4 w-4" />
+                              <span className="flex items-center">
+                                {resultsExportBusy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Download className="mr-2 h-4 w-4" />}
+                                {t("temporal.download_results")}
+                              </span>
+                              <ChevronDown className="h-4 w-4" />
                             </Button>
                             {resultsExportMenuOpen ? (
-                              <div className="absolute right-0 z-20 mt-2 w-64 rounded-lg border border-sidebar-border bg-card p-1.5 shadow-panel">
+                              <div className="absolute left-0 right-0 z-20 mt-2 rounded-lg border border-sidebar-border bg-card p-1.5 shadow-panel">
                                 {RESULTS_EXPORT_OPTIONS.map((option) => (
                                   <button
                                     key={option.format}
@@ -2085,7 +2206,7 @@ export function TemporalMosaicPanel({
                                     className="flex w-full items-center rounded-md px-3 py-2 text-left text-sm text-foreground transition hover:bg-surface"
                                     onClick={() => void handleDownloadResults(option.format)}
                                   >
-                                    Télécharger {option.label}
+                                    {t("temporal.download_format")} {option.label}
                                   </button>
                                 ))}
                               </div>
@@ -2097,14 +2218,6 @@ export function TemporalMosaicPanel({
                             {resultsExportError}
                           </div>
                         ) : null}
-
-                        <MilestoneMetricCards
-                          milestone={selectedMilestone}
-                          milestones={project?.milestones ?? []}
-                          selectedMilestoneId={selectedMilestoneId}
-                          onSelectMilestone={setSelectedMilestoneId}
-                          t={t}
-                        />
 
                         {selectedMilestone.error_message ? (
                           <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-3 text-sm text-destructive-foreground">

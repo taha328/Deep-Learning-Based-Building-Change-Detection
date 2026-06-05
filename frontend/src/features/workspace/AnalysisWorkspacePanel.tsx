@@ -1,6 +1,6 @@
 import type { FrontendRuntimeConfig } from "@/lib/env";
 import type { BackendAvailability, ReleaseMetadata } from "@/api/contracts";
-import type { TemporalMapPresentation } from "@/features/temporal/types";
+import type { TemporalLayerControlsPresentation, TemporalMapPresentation } from "@/features/temporal/types";
 import { TemporalMosaicPanel } from "@/features/temporal/TemporalMosaicPanel";
 
 export function AnalysisWorkspacePanel({
@@ -17,6 +17,7 @@ export function AnalysisWorkspacePanel({
   isCollapsed,
   onToggleCollapse,
   onTemporalMapPresentationChange,
+  temporalLayerControls,
 }: {
   workflowMode: "pairwise" | "temporal";
   onWorkflowModeChange: (mode: "pairwise" | "temporal") => void;
@@ -31,6 +32,7 @@ export function AnalysisWorkspacePanel({
   isCollapsed: boolean;
   onToggleCollapse: () => void;
   onTemporalMapPresentationChange: (presentation: TemporalMapPresentation | null) => void;
+  temporalLayerControls: TemporalLayerControlsPresentation | null;
 }) {
   return (
     <div className="h-full">
@@ -48,6 +50,7 @@ export function AnalysisWorkspacePanel({
         isCollapsed={isCollapsed}
         onToggleCollapse={onToggleCollapse}
         onMapPresentationChange={onTemporalMapPresentationChange}
+        temporalLayerControls={temporalLayerControls}
       />
     </div>
   );

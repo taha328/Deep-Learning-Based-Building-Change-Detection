@@ -6,6 +6,7 @@ import {
 } from "lucide-react";
 
 import type { TemporalMilestone } from "@/api/contracts";
+import { buildTimelineLabelsFromReleases, getTemporalMilestoneLabel } from "@/features/map/temporal-layer-colors";
 import { cn, formatNumber } from "@/lib/utils";
 
 type TranslateFn = (key: string) => string;
@@ -17,6 +18,7 @@ type MilestoneMetricCardsProps = {
   onSelectMilestone: (releaseIdentifier: string) => void;
   t: TranslateFn;
   className?: string;
+  variant?: "all" | "timeline" | "stats";
 };
 
 type DonutMetricProps = {
@@ -76,22 +78,6 @@ function formatDelta(value: number | undefined | null, formatter: (v: number) =>
   return `${sign}${formatter(value)}`;
 }
 
-function milestoneYear(milestone: TemporalMilestone): string {
-  const date = milestone.release_date ? new Date(milestone.release_date) : null;
-  return date && !Number.isNaN(date.getTime()) ? date.getFullYear().toString() : milestone.release_identifier;
-}
-
-function milestoneTransitionLabel(milestones: TemporalMilestone[], index: number): string {
-  const milestone = milestones[index];
-  if (!milestone) {
-    return "";
-  }
-  if (index === 0) {
-    return milestoneYear(milestone);
-  }
-  return `${milestoneYear(milestones[index - 1])} → ${milestoneYear(milestone)}`;
-}
-
 function growthIntensityLabel(addedSharePercent: number, t: TranslateFn): string {
   if (addedSharePercent >= 50) return t("temporal.metrics.major_expansion");
   if (addedSharePercent >= 20) return t("temporal.metrics.moderate_expansion");
@@ -119,6 +105,7 @@ type TemporalBarChartProps = {
   selectedMilestoneId: string | null;
   onSelectMilestone: (id: string) => void;
   maxAddedArea: number;
+  t: TranslateFn;
 };
 
 function TemporalBarChart({
@@ -126,8 +113,20 @@ function TemporalBarChart({
   selectedMilestoneId,
   onSelectMilestone,
   maxAddedArea,
+  t,
 }: TemporalBarChartProps) {
-  const completedMilestones = milestones.filter((m) => m.status === "complete" && hasMetrics(m));
+  const completeMilestoneByReleaseIdentifier = new Map(
+    milestones
+      .filter((m) => m.status === "complete" && hasMetrics(m))
+      .map((milestone) => [milestone.release_identifier, milestone] as const),
+  );
+  const timelineLabels = buildTimelineLabelsFromReleases(Array.from(completeMilestoneByReleaseIdentifier.values()), {
+    before: t("temporal.before"),
+  });
+  const completedMilestones = timelineLabels
+    .map((item) => completeMilestoneByReleaseIdentifier.get(item.releaseIdentifier) ?? null)
+    .filter((milestone): milestone is TemporalMilestone & { metrics: NonNullable<TemporalMilestone["metrics"]> } => Boolean(milestone));
+  const labelByReleaseIdentifier = new Map(timelineLabels.map((item) => [item.releaseIdentifier, item.label]));
 
   if (completedMilestones.length === 0) {
     return null;
@@ -135,12 +134,11 @@ function TemporalBarChart({
 
   return (
     <div className="rounded-lg border border-sidebar-border/60 bg-surface/40 p-3.5">
-      <p className="mb-3 text-caption font-semibold uppercase tracking-wider text-muted-foreground">Added surface over time</p>
       <div className="space-y-2">
         {completedMilestones.map((milestone, index) => {
           const isSelected = milestone.release_identifier === selectedMilestoneId;
           const barWidth = maxAddedArea > 0 && milestone.metrics ? (milestone.metrics.added_area_m2 / maxAddedArea) * 100 : 0;
-          const displayLabel = milestoneTransitionLabel(completedMilestones, index);
+          const displayLabel = labelByReleaseIdentifier.get(milestone.release_identifier) ?? milestone.release_identifier;
 
           return (
             <button
@@ -154,7 +152,16 @@ function TemporalBarChart({
               )}
             >
               <div className="mb-1.5 flex items-center justify-between gap-2">
-                <span className="text-label font-semibold text-foreground">{displayLabel}</span>
+                <span className="flex min-w-0 items-center gap-2 text-label font-semibold text-foreground">
+                  <span
+                    aria-hidden="true"
+                    className={cn(
+                      "h-4 w-4 shrink-0 rounded-full border",
+                      isSelected ? "border-primary bg-primary ring-2 ring-primary/20" : "border-muted-foreground bg-transparent",
+                    )}
+                  />
+                  <span className="truncate">{displayLabel}</span>
+                </span>
                 <span className="text-caption font-mono text-muted-foreground">{formatArea(milestone.metrics?.added_area_m2, "—")}</span>
               </div>
               <div className="h-2 overflow-hidden rounded-full bg-muted">
@@ -251,7 +258,7 @@ function ComparisonCard({ milestone, previousMilestone, t }: ComparisonCardProps
   return (
     <div className="rounded-lg border border-sidebar-border/60 bg-surface/50 p-3.5">
       <p className="mb-3 text-caption font-semibold uppercase tracking-wider text-muted-foreground">
-        {t("temporal.metrics.compared_with")} {milestoneYear(previousMilestone)}
+        {t("temporal.metrics.compared_with")} {getTemporalMilestoneLabel([previousMilestone], previousMilestone.release_identifier)}
       </p>
       <div className="space-y-2">
         <div className="flex items-center justify-between gap-2">
@@ -346,6 +353,7 @@ export function MilestoneMetricCards({
   onSelectMilestone,
   t,
   className,
+  variant = "all",
 }: MilestoneMetricCardsProps) {
   const metrics = milestone.metrics;
 
@@ -375,15 +383,18 @@ export function MilestoneMetricCards({
 
   return (
     <div className={cn("space-y-3", className)}>
-      {completedMilestones.length > 1 ? (
+      {variant !== "stats" && completedMilestones.length > 1 ? (
         <TemporalBarChart
           milestones={milestones}
           selectedMilestoneId={selectedMilestoneId}
           onSelectMilestone={onSelectMilestone}
           maxAddedArea={maxAddedArea}
+          t={t}
         />
       ) : null}
 
+      {variant === "timeline" ? null : (
+        <>
       {/* Executive KPI card - primary visual emphasis */}
       <div className="rounded-2xl border border-primary/35 bg-gradient-to-br from-primary/12 via-surface to-surface p-4 shadow-md">
         <div className="mb-2 flex items-center justify-between">
@@ -457,6 +468,8 @@ export function MilestoneMetricCards({
 
       {/* Spatial composition */}
       <SpatialCompositionCard metrics={metrics} t={t} />
+        </>
+      )}
     </div>
   );
 }
