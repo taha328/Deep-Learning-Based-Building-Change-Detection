@@ -1,7 +1,7 @@
 import { featureCollection } from "@turf/helpers";
 import type { Feature, FeatureCollection, GeoJsonProperties, MultiPolygon, Polygon } from "geojson";
 import maplibregl, { type GeoJSONSource, type Map as MapLibreMap } from "maplibre-gl";
-import { Check, Layers3, Loader2, Maximize2, Minus, Plus, Search, X } from "lucide-react";
+import { BarChart3, Check, Layers3, Loader2, Maximize2, Minus, Plus, Search, X } from "lucide-react";
 import { Protocol } from "pmtiles";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -13,6 +13,7 @@ import { buildBackendFileUrl } from "@/lib/backend-files";
 import { isDevClientLogEnabled } from "@/lib/client-log-config";
 import { relayClientLog } from "@/lib/client-log-relay";
 import { cn } from "@/lib/utils";
+import { MilestoneMetricCards } from "@/features/temporal/MilestoneMetricCards";
 import {
   buildTemporalLayerLabels,
   getIncludedAdditionReleasesForCumulativeLayer,
@@ -36,6 +37,7 @@ import {
 } from "@/features/map/temporal-map-performance";
 import type {
   TemporalAddedOverlayPresentation,
+  TemporalLayerControlsPresentation,
   ReferenceLayerPresentation,
   TemporalMapPresentation,
   TemporalReferenceImageryPresentation,
@@ -53,6 +55,7 @@ const BUILDING_CHANGE_BUFFER_FILL_COLORS = {
 } as const;
 
 const NON_CUMULATIVE_BUFFER_FILL_OPACITY = 1;
+const TEMPORAL_BUFFER_FILL_OPACITY = 0.5;
 
 type SearchResult = {
   id: string;
@@ -780,37 +783,37 @@ const TEMPORAL_ADDED_LAYER_DEFINITIONS: TemporalAddedLayerDefinition[] = [
   {
     kind: "buffer10m",
     toggleKey: "buffer10m",
-    paint: { "fill-color": "#B91C1C", "fill-opacity": 1, "fill-outline-color": "rgba(0, 0, 0, 0)" },
+    paint: { "fill-color": "#B91C1C", "fill-opacity": TEMPORAL_BUFFER_FILL_OPACITY, "fill-outline-color": "rgba(0, 0, 0, 0)" },
     data: (overlay) => ensureFeatureCollection(overlay.buffer10m),
   },
   {
     kind: "buffer15m",
     toggleKey: "buffer15m",
-    paint: { "fill-color": BUILDING_CHANGE_BUFFER_FILL_COLORS["15m"], "fill-opacity": NON_CUMULATIVE_BUFFER_FILL_OPACITY, "fill-outline-color": "rgba(0, 0, 0, 0)" },
+    paint: { "fill-color": BUILDING_CHANGE_BUFFER_FILL_COLORS["15m"], "fill-opacity": TEMPORAL_BUFFER_FILL_OPACITY, "fill-outline-color": "rgba(0, 0, 0, 0)" },
     data: (overlay) => ensureFeatureCollection(overlay.buffer15m),
   },
   {
     kind: "buffer20m",
     toggleKey: "buffer20m",
-    paint: { "fill-color": BUILDING_CHANGE_BUFFER_FILL_COLORS["20m"], "fill-opacity": NON_CUMULATIVE_BUFFER_FILL_OPACITY, "fill-outline-color": "rgba(0, 0, 0, 0)" },
+    paint: { "fill-color": BUILDING_CHANGE_BUFFER_FILL_COLORS["20m"], "fill-opacity": TEMPORAL_BUFFER_FILL_OPACITY, "fill-outline-color": "rgba(0, 0, 0, 0)" },
     data: (overlay) => ensureFeatureCollection(overlay.buffer20m),
   },
   {
     kind: "cumulativeBuffer10m",
     toggleKey: "temporalCumulativeBuffer10m",
-    paint: { "fill-color": BUILDING_CHANGE_BUFFER_FILL_COLORS["10m"], "fill-opacity": 1 },
+    paint: { "fill-color": BUILDING_CHANGE_BUFFER_FILL_COLORS["10m"], "fill-opacity": TEMPORAL_BUFFER_FILL_OPACITY },
     data: (overlay) => ensureFeatureCollection(overlay.cumulativeBuffer10m),
   },
   {
     kind: "cumulativeBuffer15m",
     toggleKey: "temporalCumulativeBuffer15m",
-    paint: { "fill-color": BUILDING_CHANGE_BUFFER_FILL_COLORS["15m"], "fill-opacity": 1 },
+    paint: { "fill-color": BUILDING_CHANGE_BUFFER_FILL_COLORS["15m"], "fill-opacity": TEMPORAL_BUFFER_FILL_OPACITY },
     data: (overlay) => ensureFeatureCollection(overlay.cumulativeBuffer15m),
   },
   {
     kind: "cumulativeBuffer20m",
     toggleKey: "temporalCumulativeBuffer20m",
-    paint: { "fill-color": BUILDING_CHANGE_BUFFER_FILL_COLORS["20m"], "fill-opacity": 1 },
+    paint: { "fill-color": BUILDING_CHANGE_BUFFER_FILL_COLORS["20m"], "fill-opacity": TEMPORAL_BUFFER_FILL_OPACITY },
     data: (overlay) => ensureFeatureCollection(overlay.cumulativeBuffer20m),
   },
   {
@@ -3724,11 +3727,13 @@ export function MapView({
   backendUrl,
   workflowMode,
   temporalPresentation,
+  onTemporalLayerControlsChange,
 }: {
   apiKey: string;
   backendUrl: string;
   workflowMode: WorkflowMode;
   temporalPresentation: TemporalMapPresentation | null;
+  onTemporalLayerControlsChange?: (controls: TemporalLayerControlsPresentation | null) => void;
 }) {
   const { t } = useI18n();
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -3737,6 +3742,7 @@ export function MapView({
   const [mapError, setMapError] = useState<string | null>(null);
   const [mapStyleRevision, setMapStyleRevision] = useState(0);
   const [layersOpen, setLayersOpen] = useState(false);
+  const [statisticsOpen, setStatisticsOpen] = useState(false);
   const [layerState, setLayerState] = useState<LayerToggleState>(() => defaultLayerState("pairwise", false));
   const [searchValue, setSearchValue] = useState("");
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
@@ -3770,6 +3776,7 @@ export function MapView({
   const temporalReferencePrewarmAbortRef = useRef<AbortController | null>(null);
   const preloadedImageUrlsRef = useRef<Set<string>>(new Set());
   const temporalLayerStateByProjectRef = useRef<Record<string, LayerToggleState>>({});
+  const lastTemporalControlsSignatureRef = useRef<string | null>(null);
   const activeLayerStateScopeRef = useRef<string | null>(null);
   const activeTemporalReferenceLayerIdRef = useRef<string | null>(null);
   const activeTemporalReferenceReleaseIdentifierRef = useRef<string | null>(null);
@@ -3913,8 +3920,16 @@ export function MapView({
       buildTemporalLayerLabels(
         temporalAvailableMilestones,
         workflowMode === "temporal" ? temporalPresentation?.selectedReleaseIdentifier : null,
+        {
+          allNewBuildings: t("map.all_new_buildings"),
+          addedBuildingIn: t("map.added_building_in"),
+          buffer10m: t("map.buffer_10m"),
+          buffer15m: t("map.buffer_15m"),
+          buffer20m: t("map.buffer_20m"),
+          rangeSeparator: "→",
+        },
       ),
-    [temporalAvailableMilestones, temporalPresentation?.selectedReleaseIdentifier, workflowMode],
+    [temporalAvailableMilestones, temporalPresentation?.selectedReleaseIdentifier, t, workflowMode],
   );
   const includedTemporalAdditionMilestones = useMemo<IncludedTemporalMilestone[]>(
     () =>
@@ -4037,9 +4052,7 @@ export function MapView({
   ]);
   const allPreviousAdditionsAvailable = availableAdditionsByDateEntries.length > 0;
   const selectedMilestoneAdditionsAvailable = Boolean(selectedMilestoneAdditionsEntry);
-  const selectedMilestoneAdditionsLabel = selectedMilestoneAdditionsEntry
-    ? temporalLayerLabels.selectedAdditions
-    : "Added building";
+  const selectedMilestoneAdditionsLabel = temporalLayerLabels.selectedAdditions;
   const temporalSelectedMilestoneIndex =
     workflowMode === "temporal" ? temporalPresentation?.selectedMilestoneIndex ?? -1 : -1;
   const temporalHydratingProject =
@@ -6349,23 +6362,6 @@ export function MapView({
                 (temporalVectors.temporalCumulativeBuffer20m.features.length > 0 ||
                   activeTemporalArtifactAvailable("building_change_buffer_20m")),
             },
-            {
-              key: "temporalConvexHull",
-              label: t("map.convex_hull"),
-              enabled: selectedTemporalMilestoneReady && temporalVectors.temporalConvexHull.features.length > 0,
-            },
-            {
-              key: "temporalCumulative",
-              label: t("map.cumulative_union"),
-              enabled:
-                selectedTemporalMilestoneReady &&
-                (temporalVectors.temporalCumulative.features.length > 0 || activeTemporalArtifactAvailable("cumulative_union")),
-            },
-            {
-              key: "temporalCumulativeGrowthEnvelope",
-              label: t("map.growth_envelope"),
-              enabled: selectedTemporalMilestoneReady && temporalVectors.temporalCumulativeGrowthEnvelope.features.length > 0,
-            },
           ] satisfies LayerEntry[])
       : ([] satisfies LayerEntry[]);
   useEffect(() => {
@@ -6410,7 +6406,12 @@ export function MapView({
     pairwiseBuffers.buffer15m.features.length,
     pairwiseBuffers.buffer20m.features.length,
   ]);
-  const showLayerPanel = hasPairwiseLayerContext || hasTemporalMosaicLayerContext || referenceLayers.length > 0;
+  const showLayerPanel = workflowMode !== "temporal" && (hasPairwiseLayerContext || referenceLayers.length > 0);
+  const temporalStatisticsAvailable = Boolean(
+    workflowMode === "temporal" &&
+      temporalPresentation?.selectedMilestone &&
+      temporalPresentation.selectedMilestone.metrics,
+  );
   const renderLayerEntry = (entry: LayerEntry) => (
     <label
       key={entry.key}
@@ -6441,6 +6442,74 @@ export function MapView({
       />
     </label>
   );
+
+  useEffect(() => {
+    if (!onTemporalLayerControlsChange) {
+      return;
+    }
+    if (!hasTemporalMosaicLayerContext) {
+      if (lastTemporalControlsSignatureRef.current !== "none") {
+        lastTemporalControlsSignatureRef.current = "none";
+        onTemporalLayerControlsChange(null);
+      }
+      return;
+    }
+    const controls: TemporalLayerControlsPresentation = {
+      satellite: imagerySectionEntries.map((entry) => ({
+        ...entry,
+        checked: layerState[entry.key],
+        onCheckedChange: (checked: boolean) => updateLayerState({ [entry.key]: checked }),
+      })),
+      buildingEvolution: analysisSectionEntries.map((entry) => ({
+        ...entry,
+        checked: layerState[entry.key],
+        onCheckedChange: (checked: boolean) => updateLayerState({ [entry.key]: checked }),
+      })),
+      manualReferenceLayers: referenceLayerSectionEntries.map((layer) => ({
+        id: layer.layer_id,
+        name: layer.name,
+        geometryType: layer.geometry_type ?? null,
+        storageStrategy: layer.storage_strategy ?? null,
+        opacity: layer.opacity,
+      })),
+      referenceWarning: temporalReferenceWarningVisible ? t("map.georeference_warning") : null,
+    };
+    const signature = JSON.stringify({
+      satellite: controls.satellite.map((entry) => ({
+        key: entry.key,
+        label: entry.label,
+        enabled: entry.enabled,
+        checked: entry.checked,
+        description: entry.description ?? null,
+        swatch: entry.swatch ?? null,
+      })),
+      buildingEvolution: controls.buildingEvolution.map((entry) => ({
+        key: entry.key,
+        label: entry.label,
+        enabled: entry.enabled,
+        checked: entry.checked,
+        description: entry.description ?? null,
+        swatch: entry.swatch ?? null,
+      })),
+      manualReferenceLayers: controls.manualReferenceLayers,
+      referenceWarning: controls.referenceWarning,
+    });
+    if (lastTemporalControlsSignatureRef.current === signature) {
+      return;
+    }
+    lastTemporalControlsSignatureRef.current = signature;
+    onTemporalLayerControlsChange(controls);
+  }, [
+    analysisSectionEntries,
+    hasTemporalMosaicLayerContext,
+    imagerySectionEntries,
+    layerState,
+    onTemporalLayerControlsChange,
+    referenceLayerSectionEntries,
+    t,
+    temporalReferenceWarningVisible,
+    updateLayerState,
+  ]);
 
   if (mapError) {
     return (
@@ -6586,6 +6655,20 @@ export function MapView({
         ) : null}
       </div>
 
+      {temporalStatisticsAvailable ? (
+        <div className="absolute right-4 top-4 z-10">
+          <button
+            type="button"
+            onClick={() => setStatisticsOpen((current) => !current)}
+            className="flex h-11 items-center gap-2 rounded-sm border border-border bg-card px-4 text-sm font-medium text-foreground shadow-panel transition hover:bg-surface"
+            aria-expanded={statisticsOpen}
+          >
+            <BarChart3 className="h-4 w-4 text-primary" aria-hidden="true" />
+            <span>{statisticsOpen ? t("map.hide_statistics") : t("map.show_statistics")}</span>
+          </button>
+        </div>
+      ) : null}
+
       {showLayerPanel ? (
       <div className="absolute right-4 top-4 z-10 w-72 max-w-[calc(100%-2rem)]">
         <div className="rounded-sm bg-card shadow-panel backdrop-blur-sm border border-border">
@@ -6651,23 +6734,37 @@ export function MapView({
       </div>
       ) : null}
 
-      {visibleAdditionsLegendEntries.length > 0 ? (
-        <div className="pointer-events-none absolute bottom-4 right-4 z-10 max-w-[calc(100%-2rem)]">
-          <div className="rounded-sm border border-border bg-card/95 px-3 py-2 text-sm text-foreground shadow-panel backdrop-blur-sm">
-            <div className="mb-1.5 text-caption font-medium text-foreground">{t("map.additions_by_date")}</div>
-            <div className="space-y-1">
-              {visibleAdditionsLegendEntries.map((entry) => (
-                <div key={entry.releaseIdentifier} className="flex items-center gap-2 text-caption text-foreground">
-                  <span
-                    aria-hidden="true"
-                    className="h-3 w-3 shrink-0 rounded-[2px] border border-border"
-                    style={{ backgroundColor: entry.color }}
-                  />
-                  <span>{entry.label}</span>
-                </div>
-              ))}
+      {statisticsOpen || visibleAdditionsLegendEntries.length > 0 ? (
+        <div className="absolute bottom-4 right-4 z-10 flex max-h-[calc(100%-6rem)] w-[24rem] max-w-[calc(100%-2rem)] flex-col items-end gap-3 overflow-y-auto">
+          {statisticsOpen && temporalPresentation?.selectedMilestone ? (
+            <div className="pointer-events-auto w-full rounded-sm border border-border bg-card/95 p-3 shadow-panel backdrop-blur-sm">
+              <MilestoneMetricCards
+                milestone={temporalPresentation.selectedMilestone}
+                milestones={temporalPresentation.milestones}
+                selectedMilestoneId={temporalPresentation.selectedReleaseIdentifier}
+                onSelectMilestone={() => undefined}
+                t={t}
+                variant="stats"
+              />
             </div>
-          </div>
+          ) : null}
+          {visibleAdditionsLegendEntries.length > 0 ? (
+            <div className="pointer-events-none w-48 rounded-sm border border-border bg-card/95 px-4 py-3 text-sm text-foreground shadow-panel backdrop-blur-sm">
+              <div className="mb-2 text-sm font-semibold text-foreground">{t("map.additions_by_date")}</div>
+              <div className="space-y-1.5">
+                {visibleAdditionsLegendEntries.map((entry) => (
+                  <div key={entry.releaseIdentifier} className="flex items-center gap-2 text-sm text-foreground">
+                    <span
+                      aria-hidden="true"
+                      className="h-3.5 w-3.5 shrink-0 rounded-[2px] border border-border"
+                      style={{ backgroundColor: entry.color }}
+                    />
+                    <span>{entry.label}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
         </div>
       ) : null}
 

@@ -7,7 +7,7 @@ import { useAppStore } from "@/app/store";
 import { I18nProvider } from "@/app/I18nProvider";
 import { getFrontendRuntimeConfig, getMapboxApiKey, type FrontendRuntimeConfig } from "@/lib/env";
 import { useI18n } from "@/lib/i18n";
-import type { TemporalMapPresentation } from "@/features/temporal/types";
+import type { TemporalLayerControlsPresentation, TemporalMapPresentation } from "@/features/temporal/types";
 
 const AnalysisWorkspacePanel = lazy(() =>
   import("@/features/workspace/AnalysisWorkspacePanel").then((module) => ({
@@ -51,6 +51,7 @@ function AppContent() {
   const [panelCollapsed, setPanelCollapsed] = useState(false);
   const [workflowMode, setWorkflowModeState] = useState<"pairwise" | "temporal">("temporal");
   const [temporalMapPresentation, setTemporalMapPresentation] = useState<TemporalMapPresentation | null>(null);
+  const [temporalLayerControls, setTemporalLayerControls] = useState<TemporalLayerControlsPresentation | null>(null);
   const setWorkflowMode = () => setWorkflowModeState("temporal");
   let runtimeConfig: FrontendRuntimeConfig | null = null;
   let backendUrl = "";
@@ -115,6 +116,7 @@ function AppContent() {
             isCollapsed={panelCollapsed}
             onToggleCollapse={() => setPanelCollapsed((prev) => !prev)}
             onTemporalMapPresentationChange={setTemporalMapPresentation}
+            temporalLayerControls={temporalLayerControls}
           />
         </Suspense>
         <Suspense fallback={<MapSkeleton label="Loading…" />}>
@@ -123,6 +125,7 @@ function AppContent() {
             backendUrl={backendUrl}
             workflowMode={workflowMode}
             temporalPresentation={temporalMapPresentation}
+            onTemporalLayerControlsChange={setTemporalLayerControls}
           />
         </Suspense>
       </div>

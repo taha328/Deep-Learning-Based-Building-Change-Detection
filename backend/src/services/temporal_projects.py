@@ -68,7 +68,7 @@ from src.schemas import (
     TemporalProjectValidationResponse,
     ValidationRequest,
 )
-from src.services.processing import ResolvedWaybackRelease, _resolve_release_for_aoi
+from src.services.processing import ResolvedWaybackRelease, _cached_response_has_stale_fallback_imagery, _resolve_release_for_aoi
 from src.services.temporal_reference_imagery import TemporalReferenceSource, build_temporal_reference_imagery
 from src.services.releases import list_releases
 from src.services.validation import validate_request
@@ -4238,6 +4238,8 @@ def _pair_summary_rows(result_dir: Path) -> dict[str, dict[str, str]] | None:
 
 def _load_cached_run_response(settings: Settings, request_hash: str) -> RunResponse | None:
     try:
+        if _cached_response_has_stale_fallback_imagery(settings, request_hash):
+            return None
         return load_cached_response(settings, request_hash)
     except Exception:
         return None
@@ -4641,6 +4643,8 @@ def _apply_pair_response_to_milestone(
     previous_cumulative: BaseGeometry,
     aoi_geometry: BaseGeometry,
     request_hash: str | None = None,
+    populated_request_hash: str | None = None,
+    request_workspace_path: str | None = None,
 ) -> None:
     automated_additions_geojson = (
         response.new_buildings_geojson
@@ -4650,7 +4654,10 @@ def _apply_pair_response_to_milestone(
     automated_additions_geometry = _geometry_from_geojson(automated_additions_geojson).intersection(aoi_geometry).buffer(0)
     automated_candidate_geometry = unary_union([previous_cumulative, automated_additions_geometry]).intersection(aoi_geometry).buffer(0)
 
-    milestone.pair_request_hash = request_hash or (response.summary.request_hash if response.summary is not None else None)
+    response_request_hash = response.summary.request_hash if response.summary is not None else None
+    milestone.pair_request_hash = request_hash or response_request_hash
+    milestone.populated_request_hash = populated_request_hash or response_request_hash
+    milestone.request_workspace_path = request_workspace_path
     milestone.automated_additions_geojson = automated_additions_geojson
     milestone.automated_candidate_footprint_geojson = _feature_collection_from_geometry(automated_candidate_geometry)
     milestone.automated_building_blocks_geojson = response.building_blocks_geojson or _empty_feature_collection()
@@ -4784,9 +4791,6 @@ def publish_completed_tiled_request(
         request_dir = request_result_dir(settings, request_id)
         required_paths = {
             "run_response": request_dir / "run_response.json",
-            "building_change_polygons": request_dir / "building_change_polygons.geojson",
-            "prediction_change_mask": request_dir / "prediction_change_mask.tif",
-            "prediction_change_probability": request_dir / "prediction_change_probability.tif",
         }
         missing = [name for name, path in required_paths.items() if not path.is_file()]
         if missing:
@@ -4887,6 +4891,17 @@ def publish_completed_tiled_request(
                 _project_summary_json_path(project_json_path),
             )
         else:
+            heavy_required_paths = {
+                "building_change_polygons": request_dir / "building_change_polygons.geojson",
+                "prediction_change_mask": request_dir / "prediction_change_mask.tif",
+                "prediction_change_probability": request_dir / "prediction_change_probability.tif",
+            }
+            missing_heavy = [name for name, path in heavy_required_paths.items() if not path.is_file()]
+            if missing_heavy:
+                raise FileNotFoundError(
+                    "Completed tiled request is missing required unpublished outputs: "
+                    + ", ".join(missing_heavy)
+                )
             aoi_geometry = parse_aoi_geometry(project.aoi_geojson)
             if project.milestones:
                 _normalize_baseline_milestone(project.milestones[0])
@@ -4902,6 +4917,8 @@ def publish_completed_tiled_request(
                 previous_cumulative=previous_cumulative,
                 aoi_geometry=aoi_geometry,
                 request_hash=request_id,
+                populated_request_hash=response.summary.request_hash if response.summary is not None else request_id,
+                request_workspace_path=str(request_result_dir(settings, response.summary.request_hash if response.summary is not None else request_id)),
             )
             project = _recompute_project_outputs_from_index(project, aoi_geometry, target_index)
             project.updated_at = _utc_now_iso()
@@ -4949,6 +4966,9 @@ def publish_completed_tiled_request(
 
         run_post_completion_request_cleanup_if_enabled(
             request_hash=request_id,
+            pair_request_hash=target_milestone.pair_request_hash,
+            populated_request_hash=target_milestone.populated_request_hash or request_id,
+            request_workspace_path=target_milestone.request_workspace_path,
             project_id=project.project_id,
             release_identifier=target_release,
             settings=settings,
@@ -5760,6 +5780,10 @@ def run_temporal_project(
             previous_cumulative=previous_cumulative,
             aoi_geometry=aoi_geometry,
             request_hash=prepared.request_hash,
+            populated_request_hash=response.summary.request_hash if response.summary is not None else None,
+            request_workspace_path=str(request_result_dir(settings, response.summary.request_hash))
+            if response.summary is not None
+            else None,
         )
         project = _recompute_project_outputs_from_index(project, aoi_geometry, index, index)
         previous_cumulative = _geometry_from_geojson(milestone.cumulative_union_geojson)
@@ -5772,9 +5796,12 @@ def run_temporal_project(
     from src.services.request_cleanup import run_post_completion_request_cleanup_if_enabled
 
     for milestone in project.milestones:
-        if milestone.status == "complete" and milestone.pair_request_hash:
+        if milestone.status == "complete" and (milestone.populated_request_hash or milestone.pair_request_hash):
             run_post_completion_request_cleanup_if_enabled(
-                request_hash=milestone.pair_request_hash,
+                request_hash=milestone.pair_request_hash or milestone.populated_request_hash,
+                pair_request_hash=milestone.pair_request_hash,
+                populated_request_hash=milestone.populated_request_hash,
+                request_workspace_path=milestone.request_workspace_path,
                 project_id=project.project_id,
                 release_identifier=milestone.release_identifier,
                 settings=settings,

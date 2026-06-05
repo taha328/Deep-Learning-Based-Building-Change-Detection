@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   buildTemporalLayerLabels,
+  buildTimelineLabelsFromReleases,
   HIGH_CONTRAST_TEMPORAL_COLORS,
   getTemporalLayerExpectedReleases,
   getIncludedAdditionReleasesForCumulativeLayer,
@@ -130,9 +131,9 @@ test("included temporal milestones stop at selected release", () => {
   ];
 
   assert.deepEqual(getIncludedTemporalMilestones(milestones, "WB_2025_R03"), [
-    { releaseIdentifier: "WB_2023_R02", label: "2023" },
-    { releaseIdentifier: "WB_2024_R02", label: "2024" },
-    { releaseIdentifier: "WB_2025_R03", label: "2025" },
+    { releaseIdentifier: "WB_2023_R02", label: "2023 Q1" },
+    { releaseIdentifier: "WB_2024_R02", label: "2024 Q1" },
+    { releaseIdentifier: "WB_2025_R03", label: "2025 Q1" },
   ]);
 });
 
@@ -145,8 +146,8 @@ test("included temporal milestones preserve chronological order independent of i
   ];
 
   assert.deepEqual(getIncludedTemporalMilestones(milestones, "WB_2024_R02"), [
-    { releaseIdentifier: "WB_2023_R02", label: "2023" },
-    { releaseIdentifier: "WB_2024_R02", label: "2024" },
+    { releaseIdentifier: "WB_2023_R02", label: "2023 Q1" },
+    { releaseIdentifier: "WB_2024_R02", label: "2024 Q1" },
   ]);
 });
 
@@ -400,15 +401,18 @@ test("all previous additions paint keeps the release color", () => {
   const paint = getTemporalLayerPaint("additions", "#00B050");
 
   assert.equal(paint.fillPaint["fill-color"], "#00B050");
+  assert.equal(paint.fillPaint["fill-opacity"], 0.88);
+  assert.equal(paint.fillOpacity, 0.88);
   assert.equal(paint.linePaint["line-color"], "#00B050");
 });
 
-test("cumulative buffer paints use release colors at full opacity", () => {
+test("cumulative buffer paints use release colors at half opacity", () => {
   for (const layerKind of ["cumulativeBuffer10m", "cumulativeBuffer15m", "cumulativeBuffer20m"] as const) {
     const paint = getTemporalLayerPaint(layerKind, "#FFD700");
 
     assert.equal(paint.fillPaint["fill-color"], "#FFD700");
-    assert.equal(paint.fillPaint["fill-opacity"], 1);
+    assert.equal(paint.fillPaint["fill-opacity"], 0.5);
+    assert.equal(paint.fillOpacity, 0.5);
     assert.equal(paint.fillPaint["fill-outline-color"], "rgba(0, 0, 0, 0)");
     assert.equal(paint.linePaint["line-color"], "#FFD700");
     assert.equal(paint.linePaint["line-opacity"], 0);
@@ -455,14 +459,15 @@ test("normal buffer paints use release colors", () => {
     const paint = getTemporalLayerPaint(layerKind, "#0066FF");
 
     assert.equal(paint.fillPaint["fill-color"], "#0066FF");
-    assert.equal(paint.fillPaint["fill-opacity"], 1);
+    assert.equal(paint.fillPaint["fill-opacity"], 0.5);
+    assert.equal(paint.fillOpacity, 0.5);
     assert.equal(paint.fillPaint["fill-outline-color"], "rgba(0, 0, 0, 0)");
     assert.equal(paint.linePaint["line-color"], "#0066FF");
     assert.equal(paint.linePaint["line-opacity"], 0);
   }
 });
 
-test("temporal layer labels use baseline to selected year ranges", () => {
+test("temporal layer labels use baseline to selected release ranges", () => {
   const labels = buildTemporalLayerLabels(
     [
       { releaseIdentifier: "WB_2019_R03", releaseDate: "2019-03-13" },
@@ -472,14 +477,14 @@ test("temporal layer labels use baseline to selected year ranges", () => {
     "WB_2026_R05",
   );
 
-  assert.equal(labels.allPreviousAdditions, "All new buildings 2019 -> 2026");
-  assert.equal(labels.selectedAdditions, "Added building in 2026");
-  assert.equal(labels.buffer10m, "Buffer 10m 2026");
-  assert.equal(labels.buffer15m, "Buffer 15m 2026");
-  assert.equal(labels.buffer20m, "Buffer 20m 2026");
-  assert.equal(labels.cumulativeBuffer10m, "Buffer 10m 2019 -> 2026");
-  assert.equal(labels.cumulativeBuffer15m, "Buffer 15m 2019 -> 2026");
-  assert.equal(labels.cumulativeBuffer20m, "Buffer 20m 2019 -> 2026");
+  assert.equal(labels.allPreviousAdditions, "All new buildings 2019 Q1 -> 2026 Q2");
+  assert.equal(labels.selectedAdditions, "Added building in 2026 Q2");
+  assert.equal(labels.buffer10m, "Buffer 10m 2026 Q2");
+  assert.equal(labels.buffer15m, "Buffer 15m 2026 Q2");
+  assert.equal(labels.buffer20m, "Buffer 20m 2026 Q2");
+  assert.equal(labels.cumulativeBuffer10m, "Buffer 10m 2019 Q1 -> 2026 Q2");
+  assert.equal(labels.cumulativeBuffer15m, "Buffer 15m 2019 Q1 -> 2026 Q2");
+  assert.equal(labels.cumulativeBuffer20m, "Buffer 20m 2019 Q1 -> 2026 Q2");
 });
 
 test("temporal layer labels parse years from release identifiers", () => {
@@ -488,4 +493,92 @@ test("temporal layer labels parse years from release identifiers", () => {
   assert.equal(labels.allPreviousAdditions, "All new buildings 2019 -> 2023");
   assert.equal(labels.selectedAdditions, "Added building in 2023");
   assert.equal(labels.buffer10m, "Buffer 10m 2023");
+});
+
+test("temporal layer labels accept translated prefixes and arrow separator", () => {
+  const labels = buildTemporalLayerLabels(
+    [
+      { releaseIdentifier: "WB_2020_R04", releaseDate: "2020-03-23" },
+      { releaseIdentifier: "WB_2025_R03", releaseDate: "2025-03-27" },
+    ],
+    "WB_2025_R03",
+    {
+      allNewBuildings: "Tous les nouveaux bâtiments",
+      addedBuildingIn: "Bâtiments ajoutés en",
+      buffer10m: "Buffer 10m",
+      buffer15m: "Buffer 15m",
+      buffer20m: "Buffer 20m",
+      rangeSeparator: "→",
+    },
+  );
+
+  assert.equal(labels.allPreviousAdditions, "Tous les nouveaux bâtiments 2020 Q1 → 2025 Q1");
+  assert.equal(labels.selectedAdditions, "Bâtiments ajoutés en 2025 Q1");
+  assert.equal(labels.cumulativeBuffer10m, "Buffer 10m 2020 Q1 → 2025 Q1");
+});
+
+test("timeline labels use first comparison label for the baseline row", () => {
+  const labels = buildTimelineLabelsFromReleases(["WB_2020_R04", "WB_2023_R02", "WB_2024_R02"], { before: "Avant" });
+
+  assert.deepEqual(
+    labels.map((item) => item.label),
+    ["Avant 2023", "2023", "2024"],
+  );
+});
+
+test("timeline labels use release quarters from full dates", () => {
+  const labels = buildTimelineLabelsFromReleases(
+    [
+      { releaseIdentifier: "WB_2025_R02", releaseDate: "26/06/2025" },
+      { releaseIdentifier: "WB_2025_R03", releaseDate: "25/09/2025" },
+      { releaseIdentifier: "WB_2025_R04", releaseDate: "18/12/2025" },
+      { releaseIdentifier: "WB_2026_R01", releaseDate: "25/03/2026" },
+    ],
+    { before: "Avant" },
+  );
+
+  assert.deepEqual(
+    labels.map((item) => item.label),
+    ["Avant 2025 Q3", "2025 Q3", "2025 Q4", "2026 Q1"],
+  );
+});
+
+test("timeline labels map quarter boundaries correctly", () => {
+  const labels = buildTimelineLabelsFromReleases(
+    [
+      { releaseIdentifier: "baseline", releaseDate: "2024" },
+      { releaseIdentifier: "march", releaseDate: "2025-03-31" },
+      { releaseIdentifier: "june", releaseDate: "2025-06-30" },
+      { releaseIdentifier: "september", releaseDate: "2025-09-30" },
+      { releaseIdentifier: "december", releaseDate: "2025-12-31" },
+    ],
+    { before: "Before" },
+  );
+
+  assert.deepEqual(
+    labels.map((item) => item.label),
+    ["Before 2025 Q1", "2025 Q1", "2025 Q2", "2025 Q3", "2025 Q4"],
+  );
+});
+
+test("timeline baseline prefix is localized", () => {
+  const milestones = ["WB_2020_R04", "WB_2023_R02"];
+
+  assert.equal(buildTimelineLabelsFromReleases(milestones, { before: "Avant" })[0]?.label, "Avant 2023");
+  assert.equal(buildTimelineLabelsFromReleases(milestones, { before: "Before" })[0]?.label, "Before 2023");
+});
+
+test("timeline labels treat month-based release dates as quarter labels", () => {
+  const labels = buildTimelineLabelsFromReleases(
+    [
+      { releaseIdentifier: "WB_2025_R02", releaseDate: "2025-06" },
+      { releaseIdentifier: "WB_2025_R03", releaseDate: "2025-09" },
+    ],
+    { before: "Before" },
+  );
+
+  assert.deepEqual(
+    labels.map((item) => item.label),
+    ["Before 2025 Q3", "2025 Q3"],
+  );
 });

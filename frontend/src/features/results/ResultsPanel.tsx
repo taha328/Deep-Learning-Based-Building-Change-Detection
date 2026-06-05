@@ -16,6 +16,7 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { RunProgressPanel } from "@/features/results/RunProgressPanel";
 import { buildBackendFileUrl } from "@/lib/backend-files";
+import { shouldShowExecutionProgressPanel } from "@/lib/run-progress";
 import { cn, formatNumber } from "@/lib/utils";
 
 function resolvePreviewSource(backendUrl: string, path?: string | null, dataUrl?: string | null): string | null {
@@ -182,7 +183,7 @@ export function ResultsPanel({ backendUrl }: { backendUrl: string }) {
       </header>
 
       <div className="space-y-5 p-4">
-          {(isRunning || runProgress.phase !== "idle") && <RunProgressPanel progress={runProgress} />}
+          {(isRunning || shouldShowExecutionProgressPanel(runProgress)) && <RunProgressPanel progress={runProgress} />}
 
           {!result ? (
             <>

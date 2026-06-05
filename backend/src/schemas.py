@@ -352,6 +352,8 @@ class TemporalMilestone(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     error_message: str | None = None
     pair_request_hash: str | None = None
+    populated_request_hash: str | None = None
+    request_workspace_path: str | None = None
     automated_additions_geojson: dict[str, Any] | None = None
     automated_candidate_footprint_geojson: dict[str, Any] | None = None
     automated_building_blocks_geojson: dict[str, Any] | None = None

@@ -80,8 +80,8 @@ class Settings(BaseModel):
     mapbox_current_imagery_enabled: bool = False
     mapbox_current_imagery_cache_dir: Path | None = None
     mapbox_current_imagery_format: str = "jpg90"
-    mapbox_current_imagery_max_zoom: int = 19
-    mapbox_current_imagery_default_zoom: int = 19
+    mapbox_current_imagery_max_zoom: int = 18
+    mapbox_current_imagery_default_zoom: int = 18
     mapbox_current_imagery_timeout_seconds: int = 30
     mapbox_max_tiles_per_request: int = 1024
     mapbox_current_imagery_max_tiles: int = 1024
@@ -102,8 +102,8 @@ class Settings(BaseModel):
     generate_full_mosaic_png_for_heavy_batch: bool = False
     mosaic_preview_max_dimension: int = 4096
     scene_segmentation_concurrency: int = 2
-    default_change_threshold: float = 0.50
-    default_semantic_threshold: float = 0.50
+    default_change_threshold: float = 0.65
+    default_semantic_threshold: float = 0.65
     default_min_new_building_pixels: int = 30
     addition_min_area_m2: float = 8.0
     addition_max_existing_overlap_ratio: float = 0.50
@@ -134,7 +134,7 @@ class Settings(BaseModel):
     bandon_skip_nodata_crops: bool = True
     bandon_min_valid_ratio_within_aoi: float = 0.01
     s2looking_checkpoint_path: Path | None = None
-    s2looking_change_threshold: float = 0.50
+    s2looking_change_threshold: float = 0.65
     database_url: str = "postgresql+psycopg://building_change:building_change@localhost:5432/building_change"
     database_echo: bool = False
     db_inline_json_max_bytes: int = 256 * 1024
