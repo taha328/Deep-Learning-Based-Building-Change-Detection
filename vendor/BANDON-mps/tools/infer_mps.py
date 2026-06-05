@@ -14,7 +14,7 @@ from typing import Any
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Single-device MTGCDNet inference on macOS Apple Silicon."
+        description="Single-device MTGCDNet inference with auto/cpu/cuda/mps device selection."
     )
     parser.add_argument(
         "--config",
@@ -30,9 +30,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image-b", required=True, help="Second RGB image path.")
     parser.add_argument(
         "--device",
-        choices=["mps", "cpu"],
-        default="mps",
-        help="Inference device. Use cpu only if MPS is unavailable.",
+        choices=["auto", "cpu", "cuda", "mps"],
+        default="auto",
+        help="Inference device. auto prefers CUDA, then native macOS MPS, then CPU.",
     )
     parser.add_argument("--outdir", required=True, help="Output directory.")
     parser.add_argument(
@@ -169,12 +169,17 @@ class ChildStageRecorder:
         }
 
 
-def _maybe_sync_mps(device: torch.device) -> None:
-    if device.type != "mps":
+def _maybe_sync_device(device: torch.device) -> None:
+    if device.type == "cuda":
+        try:
+            torch.cuda.synchronize(device)
+        except Exception:
+            pass
         return
-    sync = getattr(getattr(torch, "mps", None), "synchronize", None)
-    if callable(sync):
-        sync()
+    if device.type == "mps":
+        sync = getattr(getattr(torch, "mps", None), "synchronize", None)
+        if callable(sync):
+            sync()
 
 
 def _mps_memory_metadata(device: torch.device) -> dict[str, Any]:
@@ -197,14 +202,66 @@ def _mps_memory_metadata(device: torch.device) -> dict[str, Any]:
     return payload
 
 
+def _cuda_memory_metadata(device: torch.device) -> dict[str, Any]:
+    if device.type != "cuda":
+        return {}
+    payload: dict[str, Any] = {}
+    try:
+        payload["cuda_current_device"] = int(torch.cuda.current_device())
+    except Exception:
+        pass
+    try:
+        payload["cuda_device_name"] = torch.cuda.get_device_name(device)
+    except Exception:
+        pass
+    for key, getter in (
+        ("cuda_memory_allocated_bytes", torch.cuda.memory_allocated),
+        ("cuda_memory_reserved_bytes", torch.cuda.memory_reserved),
+        ("cuda_max_memory_allocated_bytes", torch.cuda.max_memory_allocated),
+        ("cuda_max_memory_reserved_bytes", torch.cuda.max_memory_reserved),
+    ):
+        try:
+            payload[key] = int(getter(device))
+        except Exception:
+            pass
+    return payload
+
+
+def _device_memory_metadata(device: torch.device) -> dict[str, Any]:
+    return {
+        **_mps_memory_metadata(device),
+        **_cuda_memory_metadata(device),
+    }
+
+
+def _mps_is_available() -> bool:
+    return bool(
+        sys.platform == "darwin"
+        and hasattr(torch.backends, "mps")
+        and torch.backends.mps.is_available()
+    )
+
+
 def resolve_device(requested: str) -> torch.device:
+    if requested == "auto":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if _mps_is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
+    if requested == "cuda":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        raise RuntimeError("CUDA was requested but torch.cuda.is_available() is False.")
     if requested == "mps":
-        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        if _mps_is_available():
             return torch.device("mps")
         raise RuntimeError(
-            "MPS was requested but torch.backends.mps.is_available() is False."
+            "MPS was requested but native macOS torch.backends.mps.is_available() is False."
         )
-    return torch.device("cpu")
+    if requested == "cpu":
+        return torch.device("cpu")
+    raise RuntimeError(f"Unsupported inference device: {requested}")
 
 
 def _sha256_file(path: Path) -> str:
@@ -632,7 +689,7 @@ def main() -> int:
         model_reused=False,
         process_id=os.getpid(),
         checkpoint_path=str(checkpoint_path),
-        **_mps_memory_metadata(device),
+        **_device_memory_metadata(device),
         ),
     ):
         cfg = prepare_config(config_path)
@@ -682,7 +739,17 @@ def main() -> int:
             inference_mode_active=False,
             checkpoint_path=str(checkpoint_path),
             process_id=os.getpid(),
-            mps_memory=_mps_memory_metadata(device),
+            mps_memory=_device_memory_metadata(device),
+        )
+        model_load_metadata.update(
+            {
+                "device_requested": ARGS.device,
+                "device_resolved": str(device),
+                "cuda_available": bool(torch.cuda.is_available()),
+                "cuda_device_count": int(torch.cuda.device_count()) if torch.cuda.is_available() else 0,
+                "torch_cuda_version": torch.version.cuda,
+                **_cuda_memory_metadata(device),
+            }
         )
         model_load_metadata = _drop_legacy_backend_field_for_configured_backend(model_load_metadata)
         model_load_metadata.update(checkpoint_compatibility)
@@ -718,9 +785,12 @@ def main() -> int:
             valid_pair_mask_for_skip = None
 
     mps_sync_used = False
+    cuda_sync_used = False
     if device.type == "mps":
         sync = getattr(getattr(torch, "mps", None), "synchronize", None)
         mps_sync_used = callable(sync)
+    elif device.type == "cuda":
+        cuda_sync_used = True
 
     with timings.stage(
         "forward",
@@ -728,7 +798,7 @@ def main() -> int:
         device=str(device),
         used_inference_mode=False,
         used_no_grad=True,
-        **_mps_memory_metadata(device),
+        **_device_memory_metadata(device),
         ),
     ):
         test_cfg = cfg.get("test_cfg") if hasattr(cfg, "get") else getattr(cfg, "test_cfg", None)
@@ -774,8 +844,8 @@ def main() -> int:
                     skip_outside_aoi=ARGS.skip_outside_aoi_crops,
                     skip_nodata=ARGS.skip_nodata_crops,
                 )
-            if device.type == "mps":
-                _maybe_sync_mps(device)
+            if device.type in {"cuda", "mps"}:
+                _maybe_sync_device(device)
             start_ns = time.perf_counter_ns()
             if decision is not None and decision.skip:
                 output = zero_change_output_like(img)
@@ -785,8 +855,8 @@ def main() -> int:
             else:
                 output = orig_encode_decode(img, img_metas)
                 crop_count_forwarded += 1
-            if device.type == "mps":
-                _maybe_sync_mps(device)
+            if device.type in {"cuda", "mps"}:
+                _maybe_sync_device(device)
             duration_ms = _duration_ms(start_ns, time.perf_counter_ns())
             coverage_before_pixels = int(np.count_nonzero(coverage_counts[y0:y1, x0:x1]))
             crop_summary = build_crop_summary(
@@ -822,11 +892,11 @@ def main() -> int:
 
         model.encode_decode = traced_encode_decode
         try:
-            _maybe_sync_mps(device)
+            _maybe_sync_device(device)
             with torch.no_grad():
                 forward_mode_flags = current_torch_mode_flags()
                 result = model(return_loss=False, img=[input_tensor], img_metas=img_metas, rescale=True)
-            _maybe_sync_mps(device)
+            _maybe_sync_device(device)
             forward_metadata = build_forward_diagnostics(
                 input_tensor=input_tensor,
                 model=model,
@@ -845,7 +915,7 @@ def main() -> int:
                 ),
                 model_reload_count_this_job=1,
                 model_reused=False,
-                mps_available=bool(hasattr(torch.backends, "mps") and torch.backends.mps.is_available()),
+                mps_available=_mps_is_available(),
                 mps_built=bool(hasattr(torch.backends, "mps") and torch.backends.mps.is_built()),
                 crop_summaries=crop_summaries,
                 coverage_counts=coverage_counts,
@@ -860,6 +930,13 @@ def main() -> int:
                     "crop_skip_reason_counts": dict(crop_skip_reason_counts),
                     "min_valid_ratio_within_aoi": float(ARGS.min_valid_ratio_within_aoi),
                     "forward_call_count": int(crop_count_forwarded),
+                    "device_requested": ARGS.device,
+                    "device_resolved": str(device),
+                    "cuda_available": bool(torch.cuda.is_available()),
+                    "cuda_device_count": int(torch.cuda.device_count()) if torch.cuda.is_available() else 0,
+                    "cuda_synchronize_used": bool(cuda_sync_used),
+                    "torch_cuda_version": torch.version.cuda,
+                    **_cuda_memory_metadata(device),
                 }
             )
         finally:
@@ -918,8 +995,12 @@ def main() -> int:
         "pytorch_enable_mps_fallback": os.environ.get("PYTORCH_ENABLE_MPS_FALLBACK"),
         "torch_version": torch.__version__,
         "mmcv_version": mmcv.__version__,
+        "cuda_available": bool(torch.cuda.is_available()),
+        "cuda_device_count": int(torch.cuda.device_count()) if torch.cuda.is_available() else 0,
+        "cuda_device_name": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+        "torch_cuda_version": torch.version.cuda,
         "mps_built": bool(hasattr(torch.backends, "mps") and torch.backends.mps.is_built()),
-        "mps_available": bool(hasattr(torch.backends, "mps") and torch.backends.mps.is_available()),
+        "mps_available": _mps_is_available(),
         "mps_test_cfg": mps_test_cfg,
         "normalization_used": normalization_config(ARGS.normalization),
         "input_order": "t1_then_t2",
@@ -942,6 +1023,7 @@ def main() -> int:
         "crop_count_skipped_before_forward": int(forward_metadata.get("crop_count_skipped_before_forward") or 0),
         "crop_skip_reason_counts": forward_metadata.get("crop_skip_reason_counts") or {},
         "min_valid_ratio_within_aoi": float(ARGS.min_valid_ratio_within_aoi),
+        **_cuda_memory_metadata(device),
         "outputs": {
             "change_probability_npy": str(probability_npy),
             "change_probability_png": str(probability_png),

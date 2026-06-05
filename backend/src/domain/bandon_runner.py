@@ -34,8 +34,13 @@ class BandonRuntimeProbe:
     config_path: str | None = None
     checkpoint_path: str | None = None
     device_requested: str | None = None
+    device_resolved: str | None = None
     torch_version: str | None = None
     mmcv_version: str | None = None
+    cuda_available: bool | None = None
+    cuda_device_count: int | None = None
+    cuda_device_name: str | None = None
+    torch_cuda_version: str | None = None
     mps_built: bool | None = None
     mps_available: bool | None = None
 
@@ -50,12 +55,19 @@ class BandonRuntimeProbe:
             "config_path",
             "checkpoint_path",
             "device_requested",
+            "device_resolved",
             "torch_version",
             "mmcv_version",
+            "cuda_device_name",
+            "torch_cuda_version",
         ):
             value = getattr(self, key)
-            if value:
+            if value is not None:
                 values[key] = value
+        if self.cuda_available is not None:
+            values["cuda_available"] = str(self.cuda_available).lower()
+        if self.cuda_device_count is not None:
+            values["cuda_device_count"] = str(self.cuda_device_count)
         if self.mps_built is not None:
             values["mps_built"] = str(self.mps_built).lower()
         if self.mps_available is not None:
@@ -192,15 +204,30 @@ def _run_command(command: list[str], *, env: dict[str, str]) -> subprocess.Compl
 
 def _probe_command(settings: Settings) -> tuple[list[str], str, dict[str, Path]]:
     paths = _resolve_runtime_paths(settings)
-    launcher_name, launcher_prefix, python_executable = _resolve_launcher(paths["env_prefix"])
+    _launcher_name, launcher_prefix, python_executable = _resolve_launcher(paths["env_prefix"])
     probe_code = (
-        "import json, mmcv, torch; "
+        "import json, mmcv, sys, torch; "
+        f"requested = {settings.bandon_device!r}; "
+        "cuda_available = bool(torch.cuda.is_available()); "
+        "mps_available = bool(hasattr(torch.backends, \"mps\") and torch.backends.mps.is_available()); "
+        "device_resolved = ("
+        "'cpu' if requested == 'cpu' else "
+        "('cuda' if requested == 'cuda' and cuda_available else "
+        "('mps' if requested == 'mps' and sys.platform == 'darwin' and mps_available else "
+        "(('cuda' if cuda_available else ('mps' if sys.platform == 'darwin' and mps_available else 'cpu')) "
+        "if requested == 'auto' else None)))); "
         "print(json.dumps({"
         "'python_executable': __import__(\"sys\").executable, "
         "'torch_version': torch.__version__, "
         "'mmcv_version': mmcv.__version__, "
+        "'device_requested': requested, "
+        "'device_resolved': device_resolved, "
+        "'cuda_available': cuda_available, "
+        "'cuda_device_count': int(torch.cuda.device_count()) if cuda_available else 0, "
+        "'cuda_device_name': torch.cuda.get_device_name(0) if cuda_available else None, "
+        "'torch_cuda_version': torch.version.cuda, "
         "'mps_built': bool(hasattr(torch.backends, \"mps\") and torch.backends.mps.is_built()), "
-        "'mps_available': bool(hasattr(torch.backends, \"mps\") and torch.backends.mps.is_available())"
+        "'mps_available': mps_available"
         "}))"
     )
     return launcher_prefix + ["-c", probe_code], python_executable, paths
@@ -273,7 +300,10 @@ def probe_bandon_runtime(settings: Settings) -> BandonRuntimeProbe:
         )
 
     mps_available = bool(payload.get("mps_available"))
-    if settings.bandon_device == "mps" and not mps_available:
+    cuda_available = bool(payload.get("cuda_available"))
+    cuda_device_count = int(payload.get("cuda_device_count") or 0)
+    device_resolved = payload.get("device_resolved")
+    if settings.bandon_device == "mps" and device_resolved != "mps":
         return BandonRuntimeProbe(
             available=False,
             message="BANDON MPS was requested, but torch.backends.mps.is_available() is false in the BANDON environment.",
@@ -285,8 +315,35 @@ def probe_bandon_runtime(settings: Settings) -> BandonRuntimeProbe:
             config_path=str(paths["config_path"]),
             checkpoint_path=str(paths["checkpoint_path"]),
             device_requested=settings.bandon_device,
+            device_resolved=str(device_resolved or ""),
             torch_version=str(payload.get("torch_version") or ""),
             mmcv_version=str(payload.get("mmcv_version") or ""),
+            cuda_available=cuda_available,
+            cuda_device_count=cuda_device_count,
+            cuda_device_name=payload.get("cuda_device_name"),
+            torch_cuda_version=payload.get("torch_cuda_version"),
+            mps_built=bool(payload.get("mps_built")),
+            mps_available=mps_available,
+        )
+    if settings.bandon_device == "cuda" and device_resolved != "cuda":
+        return BandonRuntimeProbe(
+            available=False,
+            message="BANDON CUDA was requested, but torch.cuda.is_available() is false in the BANDON environment.",
+            launcher=command[0],
+            python_executable=str(payload.get("python_executable") or python_executable),
+            repo_dir=str(paths["repo_dir"]),
+            env_prefix=str(paths["env_prefix"]),
+            runner_path=str(paths["runner_path"]),
+            config_path=str(paths["config_path"]),
+            checkpoint_path=str(paths["checkpoint_path"]),
+            device_requested=settings.bandon_device,
+            device_resolved=str(device_resolved or ""),
+            torch_version=str(payload.get("torch_version") or ""),
+            mmcv_version=str(payload.get("mmcv_version") or ""),
+            cuda_available=cuda_available,
+            cuda_device_count=cuda_device_count,
+            cuda_device_name=payload.get("cuda_device_name"),
+            torch_cuda_version=payload.get("torch_cuda_version"),
             mps_built=bool(payload.get("mps_built")),
             mps_available=mps_available,
         )
@@ -294,7 +351,8 @@ def probe_bandon_runtime(settings: Settings) -> BandonRuntimeProbe:
     return BandonRuntimeProbe(
         available=True,
         message=(
-            f"BANDON MTGCDNet runtime is available via {command[0]} on {settings.bandon_device}. "
+            f"BANDON MTGCDNet runtime is available via {command[0]} on {settings.bandon_device}"
+            f" resolved to {device_resolved}. "
             f"torch={payload.get('torch_version')} mmcv={payload.get('mmcv_version')}"
         ),
         launcher=command[0],
@@ -305,8 +363,13 @@ def probe_bandon_runtime(settings: Settings) -> BandonRuntimeProbe:
         config_path=str(paths["config_path"]),
         checkpoint_path=str(paths["checkpoint_path"]),
         device_requested=settings.bandon_device,
+        device_resolved=str(device_resolved or ""),
         torch_version=str(payload.get("torch_version") or ""),
         mmcv_version=str(payload.get("mmcv_version") or ""),
+        cuda_available=cuda_available,
+        cuda_device_count=cuda_device_count,
+        cuda_device_name=payload.get("cuda_device_name"),
+        torch_cuda_version=payload.get("torch_cuda_version"),
         mps_built=bool(payload.get("mps_built")),
         mps_available=mps_available,
     )
@@ -412,6 +475,8 @@ def run_bandon_inference(
             "checkpoint_sha256": _sha256_file(paths["checkpoint_path"]),
             "threshold": threshold,
             "device": settings.bandon_device,
+            "device_requested": metadata.get("device_requested") or settings.bandon_device,
+            "device_resolved": metadata.get("device_resolved"),
             "config_path": str(paths["config_path"]),
             "normalization_used": metadata.get("normalization_used")
             or {
@@ -431,9 +496,9 @@ def run_bandon_inference(
     change_mask = np.asarray(Image.open(mask_path).convert("L"), dtype=np.uint8) > 0
 
     device_resolved = str(metadata.get("device_resolved") or "")
-    if settings.bandon_device == "mps" and device_resolved != "mps":
+    if settings.bandon_device in {"cuda", "mps"} and device_resolved != settings.bandon_device:
         raise RuntimeError(
-            f"BANDON MTGCDNet resolved device '{device_resolved}' instead of native mps."
+            f"BANDON MTGCDNet resolved device '{device_resolved}' instead of requested {settings.bandon_device}."
         )
     if not settings.bandon_allow_mps_fallback:
         if bool(metadata.get("allow_mps_fallback")):

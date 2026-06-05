@@ -1,3 +1,5 @@
+import { readRuntimeConfigVariable } from "@/lib/runtimeConfig";
+
 export type FrontendRuntimeMode = "local" | "remote";
 export type ModelBackendName = "bandon_mps";
 
@@ -17,7 +19,7 @@ const DEFAULT_FASTAPI_BACKEND_URL = "http://127.0.0.1:8000";
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
 
 function readVariable(key: string): string | undefined {
-  return import.meta.env[key] as string | undefined;
+  return readRuntimeConfigVariable(key as Parameters<typeof readRuntimeConfigVariable>[0]) ?? (import.meta.env[key] as string | undefined);
 }
 
 function readBooleanVariable(key: string): boolean | undefined {

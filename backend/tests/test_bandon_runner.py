@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 from pathlib import Path
 import subprocess
@@ -7,8 +8,92 @@ import subprocess
 import numpy as np
 from PIL import Image
 
-from src.config import Settings
-from src.domain.bandon_runner import _resolve_launcher, probe_bandon_runtime, run_bandon_inference
+from src.config import Settings, get_settings
+from src.domain.bandon_runner import BandonRuntimeProbe, _resolve_launcher, probe_bandon_runtime, run_bandon_inference
+
+
+def _load_validate_bandon_runtime_module():
+    script_path = Path(__file__).resolve().parents[1] / "scripts" / "validate_bandon_runtime.py"
+    spec = importlib.util.spec_from_file_location("validate_bandon_runtime", script_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Unable to load {script_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_bandon_runtime_probe_diagnostics_preserve_meaningful_falsy_values() -> None:
+    probe = BandonRuntimeProbe(
+        available=False,
+        message="CUDA unavailable",
+        device_requested="cuda",
+        device_resolved="",
+        cuda_available=False,
+        cuda_device_count=0,
+        cuda_device_name="",
+        torch_cuda_version="",
+        mps_available=False,
+        mps_built=False,
+    )
+
+    diagnostics = probe.diagnostics()
+
+    assert diagnostics["device_requested"] == "cuda"
+    assert diagnostics["device_resolved"] == ""
+    assert diagnostics["cuda_available"] == "false"
+    assert diagnostics["cuda_device_count"] == "0"
+    assert diagnostics["cuda_device_name"] == ""
+    assert diagnostics["torch_cuda_version"] == ""
+    assert diagnostics["mps_available"] == "false"
+    assert diagnostics["mps_built"] == "false"
+
+
+def test_validate_bandon_runtime_payload_contains_required_fields() -> None:
+    module = _load_validate_bandon_runtime_module()
+    probe = BandonRuntimeProbe(
+        available=False,
+        message="CUDA unavailable",
+        repo_dir="/repo",
+        runner_path="/repo/tools/infer_mps.py",
+        config_path="/repo/workdirs_bandon/MTGCDNet/config.py",
+        checkpoint_path="/repo/checkpoints/mtgcdnet_iter_40000.pth",
+        device_requested="cuda",
+        device_resolved="",
+        cuda_available=False,
+        cuda_device_count=0,
+        cuda_device_name=None,
+        torch_cuda_version=None,
+        mps_available=True,
+        mps_built=True,
+        torch_version="2.11.0",
+        mmcv_version="1.7.0",
+    )
+
+    payload = module.build_payload(probe)
+
+    for key in (
+        "available",
+        "message",
+        "device_requested",
+        "device_resolved",
+        "cuda_available",
+        "cuda_device_count",
+        "cuda_device_name",
+        "torch_cuda_version",
+        "mps_available",
+        "mps_built",
+        "torch_version",
+        "mmcv_version",
+        "repo_dir",
+        "runner_path",
+        "config_path",
+        "checkpoint_path",
+    ):
+        assert key in payload
+    assert payload["available"] is False
+    assert payload["device_resolved"] == ""
+    assert payload["cuda_available"] is False
+    assert payload["cuda_device_count"] == 0
 
 
 def _settings(tmp_path: Path) -> Settings:
@@ -48,6 +133,12 @@ def test_probe_bandon_runtime_reports_success(tmp_path, monkeypatch) -> None:
                     "python_executable": str(settings.bandon_env_prefix / "bin" / "python"),
                     "torch_version": "2.8.0",
                     "mmcv_version": "1.7.0",
+                    "device_requested": "mps",
+                    "device_resolved": "mps",
+                    "cuda_available": False,
+                    "cuda_device_count": 0,
+                    "cuda_device_name": None,
+                    "torch_cuda_version": None,
                     "mps_built": True,
                     "mps_available": True,
                 }
@@ -61,6 +152,204 @@ def test_probe_bandon_runtime_reports_success(tmp_path, monkeypatch) -> None:
     assert probe.available is True
     assert probe.mps_available is True
     assert probe.torch_version == "2.8.0"
+    diagnostics = probe.diagnostics()
+    assert diagnostics["device_requested"] == "mps"
+    assert diagnostics["mps_available"] == "true"
+
+
+def test_probe_bandon_runtime_auto_allows_cpu_fallback(tmp_path, monkeypatch) -> None:
+    settings = _settings(tmp_path).model_copy(update={"bandon_device": "auto"})
+
+    def fake_run(*args, **kwargs):
+        del args, kwargs
+        return subprocess.CompletedProcess(
+            args=["python"],
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "python_executable": str(settings.bandon_env_prefix / "bin" / "python"),
+                    "torch_version": "2.8.0",
+                    "mmcv_version": "1.7.0",
+                    "device_requested": "auto",
+                    "device_resolved": "cpu",
+                    "cuda_available": False,
+                    "cuda_device_count": 0,
+                    "cuda_device_name": None,
+                    "torch_cuda_version": None,
+                    "mps_built": False,
+                    "mps_available": False,
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr("src.domain.bandon_runner.shutil.which", lambda command: None)
+    monkeypatch.setattr("src.domain.bandon_runner._run_command", fake_run)
+    probe = probe_bandon_runtime(settings)
+    assert probe.available is True
+    assert probe.device_requested == "auto"
+    assert probe.device_resolved == "cpu"
+    diagnostics = probe.diagnostics()
+    assert diagnostics["cuda_available"] == "false"
+    assert diagnostics["cuda_device_count"] == "0"
+
+
+def test_probe_bandon_runtime_reports_cuda_diagnostics(tmp_path, monkeypatch) -> None:
+    settings = _settings(tmp_path).model_copy(update={"bandon_device": "cuda"})
+
+    def fake_run(*args, **kwargs):
+        del args, kwargs
+        return subprocess.CompletedProcess(
+            args=["python"],
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "python_executable": str(settings.bandon_env_prefix / "bin" / "python"),
+                    "torch_version": "2.8.0+cu128",
+                    "mmcv_version": "1.7.0",
+                    "device_requested": "cuda",
+                    "device_resolved": "cuda",
+                    "cuda_available": True,
+                    "cuda_device_count": 1,
+                    "cuda_device_name": "NVIDIA Test GPU",
+                    "torch_cuda_version": "12.8",
+                    "mps_built": False,
+                    "mps_available": False,
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr("src.domain.bandon_runner.shutil.which", lambda command: None)
+    monkeypatch.setattr("src.domain.bandon_runner._run_command", fake_run)
+    probe = probe_bandon_runtime(settings)
+    assert probe.available is True
+    assert probe.device_resolved == "cuda"
+    assert probe.cuda_available is True
+    assert probe.cuda_device_count == 1
+    assert probe.cuda_device_name == "NVIDIA Test GPU"
+    assert probe.torch_cuda_version == "12.8"
+
+
+def test_probe_bandon_runtime_cuda_hard_fails_when_unavailable(tmp_path, monkeypatch) -> None:
+    settings = _settings(tmp_path).model_copy(update={"bandon_device": "cuda"})
+
+    def fake_run(*args, **kwargs):
+        del args, kwargs
+        return subprocess.CompletedProcess(
+            args=["python"],
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "python_executable": str(settings.bandon_env_prefix / "bin" / "python"),
+                    "torch_version": "2.8.0",
+                    "mmcv_version": "1.7.0",
+                    "device_requested": "cuda",
+                    "device_resolved": None,
+                    "cuda_available": False,
+                    "cuda_device_count": 0,
+                    "cuda_device_name": None,
+                    "torch_cuda_version": None,
+                    "mps_built": False,
+                    "mps_available": False,
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr("src.domain.bandon_runner.shutil.which", lambda command: None)
+    monkeypatch.setattr("src.domain.bandon_runner._run_command", fake_run)
+    probe = probe_bandon_runtime(settings)
+    assert probe.available is False
+    assert "CUDA was requested" in probe.message
+    assert probe.device_requested == "cuda"
+    assert probe.device_resolved == ""
+    diagnostics = probe.diagnostics()
+    assert diagnostics["device_requested"] == "cuda"
+    assert diagnostics["device_resolved"] == ""
+    assert diagnostics["cuda_available"] == "false"
+    assert diagnostics["cuda_device_count"] == "0"
+    assert diagnostics["mps_available"] == "false"
+    assert diagnostics["mps_built"] == "false"
+
+
+def test_probe_bandon_runtime_mps_hard_fails_when_unavailable(tmp_path, monkeypatch) -> None:
+    settings = _settings(tmp_path).model_copy(update={"bandon_device": "mps"})
+
+    def fake_run(*args, **kwargs):
+        del args, kwargs
+        return subprocess.CompletedProcess(
+            args=["python"],
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "python_executable": str(settings.bandon_env_prefix / "bin" / "python"),
+                    "torch_version": "2.8.0",
+                    "mmcv_version": "1.7.0",
+                    "device_requested": "mps",
+                    "device_resolved": None,
+                    "cuda_available": False,
+                    "cuda_device_count": 0,
+                    "cuda_device_name": None,
+                    "torch_cuda_version": None,
+                    "mps_built": True,
+                    "mps_available": False,
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr("src.domain.bandon_runner.shutil.which", lambda command: None)
+    monkeypatch.setattr("src.domain.bandon_runner._run_command", fake_run)
+    probe = probe_bandon_runtime(settings)
+    assert probe.available is False
+    assert "MPS was requested" in probe.message
+    assert probe.device_requested == "mps"
+    assert probe.device_resolved == ""
+
+
+def test_probe_bandon_runtime_cpu_is_explicit_device(tmp_path, monkeypatch) -> None:
+    settings = _settings(tmp_path).model_copy(update={"bandon_device": "cpu"})
+
+    def fake_run(*args, **kwargs):
+        del args, kwargs
+        return subprocess.CompletedProcess(
+            args=["python"],
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "python_executable": str(settings.bandon_env_prefix / "bin" / "python"),
+                    "torch_version": "2.8.0",
+                    "mmcv_version": "1.7.0",
+                    "device_requested": "cpu",
+                    "device_resolved": "cpu",
+                    "cuda_available": True,
+                    "cuda_device_count": 1,
+                    "cuda_device_name": "NVIDIA Test GPU",
+                    "torch_cuda_version": "12.8",
+                    "mps_built": True,
+                    "mps_available": True,
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr("src.domain.bandon_runner.shutil.which", lambda command: None)
+    monkeypatch.setattr("src.domain.bandon_runner._run_command", fake_run)
+    probe = probe_bandon_runtime(settings)
+    assert probe.available is True
+    assert probe.device_requested == "cpu"
+    assert probe.device_resolved == "cpu"
+
+
+def test_model_device_env_takes_precedence_over_legacy_app_bandon_device(monkeypatch) -> None:
+    get_settings.cache_clear()
+    monkeypatch.setenv("APP_BANDON_DEVICE", "mps")
+    monkeypatch.setenv("MODEL_DEVICE", "cuda")
+    try:
+        assert get_settings().bandon_device == "cuda"
+    finally:
+        get_settings.cache_clear()
 
 
 def test_run_bandon_inference_builds_command_and_parses_outputs(tmp_path, monkeypatch) -> None:

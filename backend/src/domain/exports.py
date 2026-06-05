@@ -597,15 +597,10 @@ def export_bandon_outputs(
         )
         buffer_rows[label] = buffer_df.to_dict(orient="records")
 
-    if bandon_metadata_path is not None and bandon_metadata_path.exists():
-        artifacts.append(
-            ArtifactEntry(
-                name="bandon_run_metadata_json",
-                path=str(bandon_metadata_path),
-                media_type="application/json",
-                description="Raw BANDON MTGCDNet run metadata",
-            )
-        )
+    # BANDON writes raw run metadata in the per-run tmp directory. The durable
+    # response preserves useful diagnostics, so do not expose a path that cleanup
+    # removes after successful runs.
+    del bandon_metadata_path
 
     write_run_manifest(result_dir, artifacts)
     previews = PreviewImages(

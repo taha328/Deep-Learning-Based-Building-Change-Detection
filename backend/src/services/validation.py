@@ -65,10 +65,20 @@ def _pixel_area_estimate_m2(normalized_aoi: dict, settings: Settings) -> float:
 
 
 def _estimated_inference_patch_count(bbox: dict[str, float], settings: Settings) -> int:
+    height, width = _estimated_model_input_size_px(bbox, settings)
+    return estimate_patch_count(height, width, settings.patch_size, settings.stride)
+
+
+def _estimated_model_input_size_px(bbox: dict[str, float], settings: Settings) -> tuple[int, int]:
     x_min, x_max, y_min, y_max = tile_range_for_bbox(bbox, settings.wayback_preferred_inference_zoom)
     width = (x_max - x_min + 1) * 256
     height = (y_max - y_min + 1) * 256
-    return estimate_patch_count(height, width, settings.patch_size, settings.stride)
+    return height, width
+
+
+def _requires_bandon_minimum_input_guard(request: ValidationRequest, settings: Settings) -> bool:
+    backend = request.inference_backend or settings.inference_backend
+    return backend in {"bandon_mps", "mtgcdnet_s2looking_mps"}
 
 
 def validate_request(
@@ -135,6 +145,7 @@ def validate_request(
                 mapbox_zoom,
             )
     patch_count = _estimated_inference_patch_count(bbox, settings)
+    estimated_input_height, estimated_input_width = _estimated_model_input_size_px(bbox, settings)
     total_tiles = tile_count * 2
 
     preview_ok = area_m2 <= settings.preview_limits.max_area_m2 and tile_count <= settings.preview_limits.max_scene_tiles
@@ -173,6 +184,15 @@ def validate_request(
             f"guidance of {mode_limits.max_inference_patches_per_scene}. The request remains allowed, "
             "but local inference may take longer."
         )
+    if _requires_bandon_minimum_input_guard(request, settings):
+        min_input_px = settings.bandon_min_model_input_size_px
+        if estimated_input_height < min_input_px or estimated_input_width < min_input_px:
+            blocking_errors.append(
+                "AOI is too small for BANDON inference at the selected zoom. "
+                f"Estimated aligned model input is {estimated_input_width}x{estimated_input_height} pixels, "
+                f"but BANDON requires at least {min_input_px}x{min_input_px} pixels based on the active "
+                "test_cfg crop_size. Increase the AOI size or use a supported minimum smoke-test AOI."
+            )
     heavy_batch = tile_count > settings.wayback_heavy_batch_tile_threshold
     if heavy_batch:
         warnings.append(
@@ -206,6 +226,11 @@ def validate_request(
             "min_zoom": settings.min_zoom,
             "tile_count_per_scene": tile_count,
             "inference_patch_count": patch_count,
+            "estimated_model_input_width_px": estimated_input_width,
+            "estimated_model_input_height_px": estimated_input_height,
+            "bandon_min_model_input_size_px": settings.bandon_min_model_input_size_px
+            if _requires_bandon_minimum_input_guard(request, settings)
+            else None,
             "heavy_batch": heavy_batch,
             "heavy_batch_tile_threshold": settings.wayback_heavy_batch_tile_threshold,
             "recommended_tile_concurrency": settings.wayback_tile_max_concurrency,

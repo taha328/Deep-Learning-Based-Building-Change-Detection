@@ -71,6 +71,85 @@ cd backend
 python scripts/setup_postgis_db.py --migrate --verify
 ```
 
+## CPU Docker Run
+
+The backend CPU image mounts the BANDON checkpoint instead of baking it into the image. Keep the checkpoint at:
+
+```text
+vendor/BANDON-mps/checkpoints/mtgcdnet_iter_40000.pth
+```
+
+Build and validate the CPU runtime:
+
+```bash
+docker compose build backend-api
+docker compose run --rm -e MODEL_DEVICE=auto backend-api /app/backend/.venv/bin/python /app/backend/scripts/validate_bandon_runtime.py
+docker compose run --rm -e MODEL_DEVICE=cpu backend-api /app/backend/.venv/bin/python /app/backend/scripts/validate_bandon_runtime.py
+```
+
+Run database migrations explicitly, then start the API and worker:
+
+```bash
+docker compose up -d postgres redis
+docker compose run --rm backend-api /app/backend/.venv/bin/python /app/backend/scripts/setup_postgis_db.py --migrate --verify
+docker compose up -d backend-api celery-worker
+curl http://127.0.0.1:8000/api/health
+```
+
+## CUDA Docker Run
+
+The default Compose stack remains CPU-only:
+
+```bash
+docker compose up -d postgres redis backend-api celery-worker
+```
+
+CUDA Docker is an override for Linux NVIDIA hosts. It requires an NVIDIA GPU,
+a compatible host driver, NVIDIA Container Toolkit, and Docker Compose GPU
+support. Mac Docker is not a CUDA target; native macOS MPS remains the separate
+local runtime path.
+
+Build and start the CUDA backend image:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.cuda.yml build backend-api
+docker compose -f docker-compose.yml -f docker-compose.cuda.yml up -d postgres redis backend-api celery-worker
+```
+
+Validate GPU visibility and PyTorch CUDA inside the container:
+
+```bash
+nvidia-smi
+docker run --rm --gpus all nvidia/cuda:<verified-tag> nvidia-smi
+docker compose -f docker-compose.yml -f docker-compose.cuda.yml run --rm backend-api nvidia-smi
+docker compose -f docker-compose.yml -f docker-compose.cuda.yml run --rm backend-api /app/backend/.venv/bin/python - <<'PY'
+import torch
+print("torch", torch.__version__)
+print("torch_cuda_version", torch.version.cuda)
+print("cuda_available", torch.cuda.is_available())
+print("device_count", torch.cuda.device_count())
+print("device_name", torch.cuda.get_device_name(0) if torch.cuda.is_available() else None)
+PY
+```
+
+Validate BANDON device modes:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.cuda.yml run --rm -e MODEL_DEVICE=auto backend-api /app/backend/.venv/bin/python /app/backend/scripts/validate_bandon_runtime.py --json
+docker compose -f docker-compose.yml -f docker-compose.cuda.yml run --rm -e MODEL_DEVICE=cuda backend-api /app/backend/.venv/bin/python /app/backend/scripts/validate_bandon_runtime.py --json
+docker compose -f docker-compose.yml -f docker-compose.cuda.yml run --rm -e MODEL_DEVICE=cpu backend-api /app/backend/.venv/bin/python /app/backend/scripts/validate_bandon_runtime.py --json
+docker compose -f docker-compose.yml -f docker-compose.cuda.yml run --rm -e MODEL_DEVICE=mps backend-api /app/backend/.venv/bin/python /app/backend/scripts/validate_bandon_runtime.py --json
+```
+
+Expected CUDA-host behavior:
+
+```text
+MODEL_DEVICE=auto -> cuda when the GPU is visible, otherwise cpu
+MODEL_DEVICE=cuda -> cuda when visible, clear failure when unavailable
+MODEL_DEVICE=cpu  -> cpu even on a GPU host
+MODEL_DEVICE=mps  -> clear unavailable failure inside Linux CUDA Docker
+```
+
 ## Automatic PostgreSQL/PostGIS Setup
 
 For local PostgreSQL/PostGIS:
