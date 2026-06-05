@@ -12,6 +12,7 @@ from src.domain.bandon_runner import probe_bandon_runtime
 
 InferenceBackendName = Literal["bandon_mps", "mtgcdnet_s2looking_mps"]
 BackendProbeMode = InferenceBackendName
+ModelDeviceName = Literal["auto", "cpu", "cuda", "mps"]
 
 
 def _sha256_file_or_none(path: Path | None) -> str | None:
@@ -47,7 +48,7 @@ class InferenceRuntimeConfig(BaseModel):
     backend: InferenceBackendName
     checkpoint_path: Path
     change_threshold: float
-    device: Literal["mps", "cpu"]
+    device: ModelDeviceName
     repo_dir: Path
     config_path: Path
 
@@ -59,9 +60,9 @@ class LocalInferenceBackend:
         self.execution_config = execution_config
         self.probe_mode: InferenceBackendName = execution_config.inference_backend
         self.label = (
-            "BANDON MTGCDNet (Local MPS)"
+            "BANDON MTGCDNet (Local)"
             if self.probe_mode == "bandon_mps"
-            else "MTGCDNet S2Looking (Local MPS)"
+            else "MTGCDNet S2Looking (Local)"
         )
 
     def configure_settings(self, settings: Settings) -> Settings:

@@ -1,0 +1,118 @@
+# syntax=docker/dockerfile:1.7
+
+FROM ghcr.io/osgeo/gdal:ubuntu-small-3.12.1 AS base
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    VIRTUAL_ENV=/app/backend/.venv \
+    PATH=/app/backend/.venv/bin:$PATH \
+    PYTHONPATH=/app/backend \
+    PYTHONNOUSERSITE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_CACHE_DIR=1
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        curl \
+        git \
+        libffi-dev \
+        libgeos-dev \
+        libglib2.0-0 \
+        libgl1 \
+        libjpeg-dev \
+        libpq-dev \
+        libproj-dev \
+        libspatialindex-dev \
+        libsqlite3-dev \
+        libssl-dev \
+        libtiff-dev \
+        libxml2-dev \
+        libxslt1-dev \
+        pkg-config \
+        proj-bin \
+        python3-dev \
+        python3-pip \
+        python3-venv \
+        zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m venv /app/backend/.venv \
+    && /app/backend/.venv/bin/python -m pip install --upgrade pip "setuptools<81" wheel
+
+WORKDIR /app
+
+FROM base AS cpu
+
+ENV MODEL_DEVICE=auto \
+    APP_INFERENCE_BACKEND=bandon_mps \
+    APP_BANDON_ENV_PREFIX=/app/backend/.venv \
+    APP_BANDON_REPO_DIR=/app/vendor/BANDON-mps \
+    APP_BANDON_CONFIG_PATH=/app/vendor/BANDON-mps/workdirs_bandon/MTGCDNet/config.py \
+    APP_BANDON_CHECKPOINT_PATH=/models/bandon/mtgcdnet_iter_40000.pth \
+    APP_RUNTIME_CACHE_DIR=/data/runtime_cache \
+    PERSISTENCE_BACKEND=postgres
+
+COPY backend/requirements.txt /tmp/backend-requirements.txt
+RUN grep -Ev '^(torch|torchvision)([<>= ].*)?$' /tmp/backend-requirements.txt > /tmp/backend-requirements-no-torch.txt \
+    && /app/backend/.venv/bin/python -m pip install \
+        --index-url https://download.pytorch.org/whl/cpu \
+        torch torchvision \
+    && /app/backend/.venv/bin/python - <<'PY' > /tmp/torch-constraints.txt
+import torch
+import torchvision
+
+for package, version in (("torch", torch.__version__), ("torchvision", torchvision.__version__)):
+    print(f"{package}=={version.split('+', 1)[0]}")
+PY
+RUN /app/backend/.venv/bin/python -m pip install -r /tmp/backend-requirements-no-torch.txt -c /tmp/torch-constraints.txt \
+    && /app/backend/.venv/bin/python -m pip install --no-build-isolation mmcv==1.7.0 gdown==5.2.1 orjson==3.11.5
+
+COPY backend /app/backend
+COPY vendor/BANDON-mps /app/vendor/BANDON-mps
+
+RUN mkdir -p /data/runtime_cache /models/bandon \
+    && chmod 0775 /data/runtime_cache
+
+EXPOSE 8000
+
+CMD ["/app/backend/.venv/bin/python", "/app/backend/scripts/start_backend.py", "--host", "0.0.0.0", "--port", "8000", "--no-reload"]
+
+FROM base AS cuda
+
+ARG PYTORCH_CUDA_INDEX_URL=https://download.pytorch.org/whl/cu126
+
+ENV MODEL_DEVICE=auto \
+    APP_INFERENCE_BACKEND=bandon_mps \
+    APP_BANDON_ENV_PREFIX=/app/backend/.venv \
+    APP_BANDON_REPO_DIR=/app/vendor/BANDON-mps \
+    APP_BANDON_CONFIG_PATH=/app/vendor/BANDON-mps/workdirs_bandon/MTGCDNet/config.py \
+    APP_BANDON_CHECKPOINT_PATH=/models/bandon/mtgcdnet_iter_40000.pth \
+    APP_RUNTIME_CACHE_DIR=/data/runtime_cache \
+    PERSISTENCE_BACKEND=postgres
+
+COPY backend/requirements.txt /tmp/backend-requirements.txt
+RUN grep -Ev '^(torch|torchvision)([<>= ].*)?$' /tmp/backend-requirements.txt > /tmp/backend-requirements-no-torch.txt \
+    && /app/backend/.venv/bin/python -m pip install \
+        --index-url "${PYTORCH_CUDA_INDEX_URL}" \
+        torch torchvision \
+    && /app/backend/.venv/bin/python - <<'PY' > /tmp/torch-constraints.txt
+import torch
+import torchvision
+
+for package, version in (("torch", torch.__version__), ("torchvision", torchvision.__version__)):
+    print(f"{package}=={version.split('+', 1)[0]}")
+PY
+RUN /app/backend/.venv/bin/python -m pip install -r /tmp/backend-requirements-no-torch.txt -c /tmp/torch-constraints.txt \
+    && /app/backend/.venv/bin/python -m pip install --no-build-isolation mmcv==1.7.0 gdown==5.2.1 orjson==3.11.5
+
+COPY backend /app/backend
+COPY vendor/BANDON-mps /app/vendor/BANDON-mps
+
+RUN mkdir -p /data/runtime_cache /models/bandon \
+    && chmod 0775 /data/runtime_cache
+
+EXPOSE 8000
+
+CMD ["/app/backend/.venv/bin/python", "/app/backend/scripts/start_backend.py", "--host", "0.0.0.0", "--port", "8000", "--no-reload"]

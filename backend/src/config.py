@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 ModeName = Literal["fast_preview", "full_run"]
 InferenceBackendName = Literal["bandon_mps", "mtgcdnet_s2looking_mps"]
+ModelDeviceName = Literal["auto", "cpu", "cuda", "mps"]
 PersistenceBackendName = Literal["filesystem", "postgres"]
 PostCompletionRequestCleanupMode = Literal["off", "compact_heavy", "delete_full"]
 
@@ -127,12 +128,15 @@ class Settings(BaseModel):
     bandon_checkpoint_path: Path = Field(
         default_factory=lambda: Path(__file__).resolve().parents[2] / "vendor" / "BANDON-mps" / "checkpoints" / "mtgcdnet_iter_40000.pth"
     )
-    bandon_device: Literal["mps", "cpu"] = "mps"
+    bandon_device: ModelDeviceName = "auto"
     bandon_allow_mps_fallback: bool = False
     bandon_skip_invalid_crops: bool = True
     bandon_skip_outside_aoi_crops: bool = True
     bandon_skip_nodata_crops: bool = True
     bandon_min_valid_ratio_within_aoi: float = 0.01
+    # MTGCDNet's active BANDON test_cfg uses crop_size=(513, 513). Validation
+    # uses this guard without importing mmcv or launching the model.
+    bandon_min_model_input_size_px: int = 513
     s2looking_checkpoint_path: Path | None = None
     s2looking_change_threshold: float = 0.65
     database_url: str = "postgresql+psycopg://building_change:building_change@localhost:5432/building_change"
@@ -310,6 +314,8 @@ class Settings(BaseModel):
             raise ValueError("reference_layer_pmtiles_max_upload_mb must be greater than 0.")
         if self.bandon_min_valid_ratio_within_aoi < 0 or self.bandon_min_valid_ratio_within_aoi > 1:
             raise ValueError("bandon_min_valid_ratio_within_aoi must be between 0 and 1.")
+        if self.bandon_min_model_input_size_px < 1:
+            raise ValueError("bandon_min_model_input_size_px must be greater than or equal to 1.")
         ratio_values = {
             "addition_max_existing_overlap_ratio": self.addition_max_existing_overlap_ratio,
             "addition_thinness_min_ratio": self.addition_thinness_min_ratio,
@@ -791,7 +797,7 @@ def get_settings() -> Settings:
         bandon_env_prefix=Path(os.getenv("APP_BANDON_ENV_PREFIX", str(base.bandon_env_prefix))),
         bandon_config_path=Path(os.getenv("APP_BANDON_CONFIG_PATH", str(base.bandon_config_path))),
         bandon_checkpoint_path=Path(os.getenv("APP_BANDON_CHECKPOINT_PATH", str(base.bandon_checkpoint_path))),
-        bandon_device=os.getenv("APP_BANDON_DEVICE", base.bandon_device),  # type: ignore[arg-type]
+        bandon_device=os.getenv("MODEL_DEVICE", os.getenv("APP_BANDON_DEVICE", base.bandon_device)),  # type: ignore[arg-type]
         bandon_allow_mps_fallback=_bool_env(
             "APP_BANDON_ALLOW_MPS_FALLBACK",
             base.bandon_allow_mps_fallback,
@@ -811,6 +817,10 @@ def get_settings() -> Settings:
         bandon_min_valid_ratio_within_aoi=_float_env(
             "APP_BANDON_MIN_VALID_RATIO_WITHIN_AOI",
             base.bandon_min_valid_ratio_within_aoi,
+        ),
+        bandon_min_model_input_size_px=_int_env(
+            "APP_BANDON_MIN_MODEL_INPUT_SIZE_PX",
+            base.bandon_min_model_input_size_px,
         ),
         s2looking_checkpoint_path=(
             Path(s2looking_checkpoint_env)
