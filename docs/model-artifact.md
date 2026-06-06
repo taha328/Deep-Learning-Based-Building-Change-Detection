@@ -44,7 +44,16 @@ For a controlled download URL:
 MODEL_ARTIFACT_URL=https://github.com/taha328/building_change_app/releases/download/v0.1.0/building-change-model-bandon-mtgcdnet-v0.1.0.zip ./scripts/fetch-model.sh
 ```
 
-Private URLs may require an authentication header supplied through
+Private GitHub release assets require their authenticated API asset URL rather
+than the browser-style `releases/download/...` URL. Discover the API URL with an
+authorized GitHub client:
+
+```bash
+gh api repos/taha328/building_change_app/releases/tags/v0.1.0 \
+  --jq '.assets[] | select(.name == "building-change-model-bandon-mtgcdnet-v0.1.0.zip") | .url'
+```
+
+Pass that URL through `MODEL_ARTIFACT_URL` and the authentication header through
 `MODEL_ARTIFACT_AUTH_HEADER`. Never print it, commit it, or store it in `.env`.
 
 Windows uses `.\scripts\windows\fetch-model.ps1` with

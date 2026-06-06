@@ -59,7 +59,14 @@ if [ -n "${MODEL_ARTIFACT_FILE:-}" ]; then
   cp "$MODEL_ARTIFACT_FILE" "$ARTIFACT_ZIP"
 else
   require_command curl
-  curl_args=(--fail --location --silent --show-error --output "$ARTIFACT_ZIP")
+  curl_args=(
+    --fail
+    --location
+    --silent
+    --show-error
+    --header "Accept: application/octet-stream"
+    --output "$ARTIFACT_ZIP"
+  )
   if [ -n "${MODEL_ARTIFACT_AUTH_HEADER:-}" ]; then
     curl_args+=(--header "$MODEL_ARTIFACT_AUTH_HEADER")
   fi

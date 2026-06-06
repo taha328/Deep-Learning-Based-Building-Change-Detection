@@ -34,7 +34,7 @@ try {
     }
     Copy-Item -LiteralPath $env:MODEL_ARTIFACT_FILE -Destination $ArtifactZip
   } else {
-    $Headers = @{}
+    $Headers = @{ Accept = "application/octet-stream" }
     if ($env:MODEL_ARTIFACT_AUTH_HEADER) {
       $HeaderParts = $env:MODEL_ARTIFACT_AUTH_HEADER -split ":", 2
       if ($HeaderParts.Count -ne 2) {
