@@ -17,7 +17,16 @@ if (-not (Test-Path ".env")) {
 }
 
 if (-not (Test-Path $Checkpoint)) {
-  throw "Missing BANDON checkpoint: $Checkpoint. Place mtgcdnet_iter_40000.pth under models\bandon\."
+  throw @"
+Missing model checkpoint: $Checkpoint
+
+Install it with:
+  `$env:MODEL_ARTIFACT_FILE="C:\path\building-change-model-bandon-mtgcdnet-v0.1.0.zip"
+  .\scripts\windows\fetch-model.ps1
+
+or download the model artifact and place:
+  models\bandon\mtgcdnet_iter_40000.pth
+"@
 }
 
 Write-Host "Pulling images if available..."
