@@ -81,6 +81,18 @@ checkpoints/
 *.ckpt
 *.onnx
 
+# Model checkpoints and generated model artifact packages
+deploy/models/bandon/*.pth
+deploy/models/bandon/*.pt
+deploy/models/bandon/*.ckpt
+vendor/BANDON-mps/checkpoints/*.pth
+vendor/BANDON-mps/checkpoints/*.pt
+vendor/BANDON-mps/checkpoints/*.ckpt
+release/building-change-model-*.zip
+release/building-change-model-*.sha256
+release/building-change-model-*.MANIFEST.txt
+!deploy/models/bandon/.gitkeep
+
 # Large generated geospatial/media artifacts
 *.tif
 *.tiff

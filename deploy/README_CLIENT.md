@@ -61,7 +61,35 @@ Docker GPU support, and separate validation.
 
 ## Checkpoint Placement
 
-The model checkpoint is external and is not baked into any Docker image.
+The model checkpoint is external: it is not in Git and is not baked into any
+Docker image. It is delivered separately as a versioned model artifact ZIP.
+
+Install from a local artifact on macOS/Linux:
+
+```bash
+MODEL_ARTIFACT_FILE=/path/to/building-change-model-bandon-mtgcdnet-v0.1.0.zip ./scripts/fetch-model.sh
+```
+
+Install from a controlled URL:
+
+```bash
+MODEL_ARTIFACT_URL=https://github.com/taha328/building_change_app/releases/download/v0.1.0/building-change-model-bandon-mtgcdnet-v0.1.0.zip ./scripts/fetch-model.sh
+```
+
+For private release assets, authenticated download may be required. Supply
+credentials only through the process environment; never put tokens in `.env`.
+
+Windows PowerShell:
+
+```powershell
+$env:MODEL_ARTIFACT_FILE="C:\path\building-change-model-bandon-mtgcdnet-v0.1.0.zip"
+.\scripts\windows\fetch-model.ps1
+```
+
+The installer verifies the checkpoint checksum included in the artifact. See
+`../docs/model-artifact.md` for packaging and manual checksum verification.
+
+Alternatively, manually place:
 
 Place:
 
@@ -81,6 +109,7 @@ macOS/Linux:
 
 ```bash
 cp .env.example .env
+MODEL_ARTIFACT_FILE=/path/to/building-change-model-bandon-mtgcdnet-v0.1.0.zip ./scripts/fetch-model.sh
 ./scripts/start.sh
 ```
 
@@ -88,6 +117,8 @@ Windows PowerShell:
 
 ```powershell
 Copy-Item .env.example .env
+$env:MODEL_ARTIFACT_FILE="C:\path\building-change-model-bandon-mtgcdnet-v0.1.0.zip"
+.\scripts\windows\fetch-model.ps1
 .\scripts\windows\start.ps1
 ```
 

@@ -22,8 +22,13 @@ if [ ! -f .env ]; then
 fi
 
 if [ ! -f "$CHECKPOINT" ]; then
-  echo "Missing BANDON checkpoint: $DEPLOY_DIR/$CHECKPOINT" >&2
-  echo "Place mtgcdnet_iter_40000.pth under models/bandon/ and run this script again." >&2
+  echo "Missing model checkpoint: $DEPLOY_DIR/$CHECKPOINT" >&2
+  echo >&2
+  echo "Install it with:" >&2
+  echo "  MODEL_ARTIFACT_FILE=/path/to/building-change-model-bandon-mtgcdnet-v0.1.0.zip ./scripts/fetch-model.sh" >&2
+  echo >&2
+  echo "or download the model artifact and place:" >&2
+  echo "  models/bandon/mtgcdnet_iter_40000.pth" >&2
   exit 1
 fi
 
