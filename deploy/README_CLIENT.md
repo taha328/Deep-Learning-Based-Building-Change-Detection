@@ -35,6 +35,12 @@ The CPU backend and frontend images are multi-platform images for `linux/amd64`
 and `linux/arm64`. Docker automatically pulls the correct variant for the host
 architecture. They run on Docker-supported hosts with sufficient RAM and disk.
 
+The client stack uses `imresamu/postgis:16-3.4` for native PostGIS support on
+both `linux/amd64` and `linux/arm64`. This image preserves PostgreSQL 16 and
+PostGIS 3.4 compatibility and identifies its source as the upstream
+`postgis/docker-postgis` project. Override `POSTGIS_IMAGE` only after validating
+the replacement image on the target architecture.
+
 The source repository may remain private while these GHCR packages are public.
 No registry login is required for the public client images. If a future release
 uses private packages, sign in before startup:
@@ -252,6 +258,7 @@ docker compose --env-file .env -f docker-compose.yml -f docker-compose.cuda.yml 
 
 - CPU Docker is the only supported default client delivery mode.
 - CPU Docker supports `linux/amd64` and `linux/arm64` hosts with sufficient resources.
+- The default client PostGIS image supports native `linux/amd64` and `linux/arm64`.
 - CUDA requires separate validation on the target NVIDIA host.
 - The checkpoint distribution/license must be handled outside the Docker image.
 - First smoke run may take longer while imagery and metadata caches are populated.

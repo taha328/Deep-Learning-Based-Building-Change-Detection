@@ -18,6 +18,12 @@ The CPU backend and frontend tags are published as multi-platform images for
 for the host architecture. These images support Docker hosts with sufficient RAM
 and disk on those two architectures.
 
+The client deployment uses `imresamu/postgis:16-3.4`, which publishes native
+`linux/amd64` and `linux/arm64` variants while preserving PostgreSQL 16 and
+PostGIS 3.4 compatibility. The image labels identify its source as the upstream
+`postgis/docker-postgis` project. The selected image is configurable through
+`POSTGIS_IMAGE` in the deployment environment.
+
 Optional CUDA image:
 
 ```text
@@ -94,6 +100,12 @@ Confirm both CPU delivery images include:
 ```text
 linux/amd64
 linux/arm64
+```
+
+Confirm the selected PostGIS image also includes both platforms:
+
+```bash
+docker buildx imagetools inspect imresamu/postgis:16-3.4
 ```
 
 For public packages, verify manifests and pulls after logging out:
