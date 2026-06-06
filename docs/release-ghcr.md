@@ -13,13 +13,19 @@ ghcr.io/taha328/building-change-frontend:v0.1.0
 ghcr.io/taha328/building-change-frontend:latest
 ```
 
+The CPU backend and frontend tags are published as multi-platform images for
+`linux/amd64` and `linux/arm64`. Docker automatically pulls the correct variant
+for the host architecture. These images support Docker hosts with sufficient RAM
+and disk on those two architectures.
+
 Optional CUDA image:
 
 ```text
 ghcr.io/taha328/building-change-backend:cuda-v0.1.0
 ```
 
-CUDA is implemented but is not production-certified until NVIDIA-host validation passes.
+CUDA remains optional, `linux/amd64`-oriented, and not production-certified until
+NVIDIA-host validation passes.
 
 ## Publish With GitHub Actions
 
@@ -50,8 +56,8 @@ manual-only through `workflow_dispatch` with `publish_cuda=true`.
 
 ## Package Visibility And Access
 
-For simplest client delivery, make the GHCR packages public if commercial and
-security policy allows it.
+The source repository may remain private while the GHCR packages are public.
+Public packages allow clients to pull the images without `docker login ghcr.io`.
 
 If packages must remain private:
 
@@ -83,6 +89,23 @@ v0.1.0
 latest
 ```
 
+Confirm both CPU delivery images include:
+
+```text
+linux/amd64
+linux/arm64
+```
+
+For public packages, verify manifests and pulls after logging out:
+
+```bash
+docker logout ghcr.io || true
+docker buildx imagetools inspect ghcr.io/taha328/building-change-backend:cpu-v0.1.0
+docker buildx imagetools inspect ghcr.io/taha328/building-change-frontend:v0.1.0
+docker pull ghcr.io/taha328/building-change-backend:cpu-v0.1.0
+docker pull ghcr.io/taha328/building-change-frontend:v0.1.0
+```
+
 ## Validate Pull From Deploy Bundle
 
 From the repository root after images are published:
@@ -101,7 +124,8 @@ ghcr.io/taha328/building-change-backend:cpu-v0.1.0
 ghcr.io/taha328/building-change-frontend:v0.1.0
 ```
 
-If the packages are private, run `docker login ghcr.io` first.
+No registry login is required when the packages are public. If the packages are
+private, run `docker login ghcr.io` first.
 
 ## Clean GHCR Deployment Validation
 

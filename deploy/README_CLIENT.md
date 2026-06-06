@@ -15,6 +15,7 @@ It is not the development source tree.
 ## System Requirements
 
 - Docker Desktop or Docker Engine with Docker Compose support.
+- A Docker-supported `linux/amd64` or `linux/arm64` host.
 - Internet access for first startup unless images are preloaded.
 - 16 GB RAM minimum; 24 GB or more is recommended for smoother CPU inference.
 - Enough disk space for Docker images, database data, runtime cache, and exported artifacts.
@@ -30,8 +31,13 @@ ghcr.io/taha328/building-change-backend:cpu-v0.1.0
 ghcr.io/taha328/building-change-frontend:v0.1.0
 ```
 
-If the images are public, no registry login is required. If the images are private,
-sign in before startup:
+The CPU backend and frontend images are multi-platform images for `linux/amd64`
+and `linux/arm64`. Docker automatically pulls the correct variant for the host
+architecture. They run on Docker-supported hosts with sufficient RAM and disk.
+
+The source repository may remain private while these GHCR packages are public.
+No registry login is required for the public client images. If a future release
+uses private packages, sign in before startup:
 
 ```bash
 docker login ghcr.io
@@ -245,6 +251,7 @@ docker compose --env-file .env -f docker-compose.yml -f docker-compose.cuda.yml 
 ## Known Limitations
 
 - CPU Docker is the only supported default client delivery mode.
+- CPU Docker supports `linux/amd64` and `linux/arm64` hosts with sufficient resources.
 - CUDA requires separate validation on the target NVIDIA host.
 - The checkpoint distribution/license must be handled outside the Docker image.
 - First smoke run may take longer while imagery and metadata caches are populated.
