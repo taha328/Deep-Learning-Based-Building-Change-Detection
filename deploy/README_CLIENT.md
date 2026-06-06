@@ -67,13 +67,13 @@ Docker image. It is delivered separately as a versioned model artifact ZIP.
 Install from a local artifact on macOS/Linux:
 
 ```bash
-MODEL_ARTIFACT_FILE=/path/to/building-change-model-bandon-mtgcdnet-v0.1.0.zip ./scripts/fetch-model.sh
+MODEL_ARTIFACT_FILE=/path/to/building-change-model-bandon-mtgcdnet-v0.1.1.zip ./scripts/fetch-model.sh
 ```
 
 Install from a controlled URL:
 
 ```bash
-MODEL_ARTIFACT_URL=https://github.com/taha328/building_change_app/releases/download/v0.1.0/building-change-model-bandon-mtgcdnet-v0.1.0.zip ./scripts/fetch-model.sh
+MODEL_ARTIFACT_URL=https://github.com/taha328/building_change_app/releases/download/v0.1.1/building-change-model-bandon-mtgcdnet-v0.1.1.zip ./scripts/fetch-model.sh
 ```
 
 For private release assets, use the asset's GitHub API URL and an authenticated
@@ -81,8 +81,8 @@ download header. The browser-style `releases/download/...` URL returns `404` for
 private assets when used by `curl`. Authorized users can discover the API URL:
 
 ```bash
-gh api repos/taha328/building_change_app/releases/tags/v0.1.0 \
-  --jq '.assets[] | select(.name == "building-change-model-bandon-mtgcdnet-v0.1.0.zip") | .url'
+gh api repos/taha328/building_change_app/releases/tags/v0.1.1 \
+  --jq '.assets[] | select(.name == "building-change-model-bandon-mtgcdnet-v0.1.1.zip") | .url'
 ```
 
 Then run `fetch-model.sh` with that value as `MODEL_ARTIFACT_URL` and provide
@@ -92,7 +92,7 @@ header or put tokens in `.env`.
 Windows PowerShell:
 
 ```powershell
-$env:MODEL_ARTIFACT_FILE="C:\path\building-change-model-bandon-mtgcdnet-v0.1.0.zip"
+$env:MODEL_ARTIFACT_FILE="C:\path\building-change-model-bandon-mtgcdnet-v0.1.1.zip"
 .\scripts\windows\fetch-model.ps1
 ```
 
@@ -119,7 +119,7 @@ macOS/Linux:
 
 ```bash
 cp .env.example .env
-MODEL_ARTIFACT_FILE=/path/to/building-change-model-bandon-mtgcdnet-v0.1.0.zip ./scripts/fetch-model.sh
+MODEL_ARTIFACT_FILE=/path/to/building-change-model-bandon-mtgcdnet-v0.1.1.zip ./scripts/fetch-model.sh
 ./scripts/start.sh
 ```
 
@@ -127,7 +127,7 @@ Windows PowerShell:
 
 ```powershell
 Copy-Item .env.example .env
-$env:MODEL_ARTIFACT_FILE="C:\path\building-change-model-bandon-mtgcdnet-v0.1.0.zip"
+$env:MODEL_ARTIFACT_FILE="C:\path\building-change-model-bandon-mtgcdnet-v0.1.1.zip"
 .\scripts\windows\fetch-model.ps1
 .\scripts\windows\start.ps1
 ```

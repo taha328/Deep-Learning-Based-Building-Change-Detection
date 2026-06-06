@@ -9,7 +9,7 @@ images, or published to GHCR.
 The versioned artifact is named:
 
 ```text
-building-change-model-bandon-mtgcdnet-v0.1.0.zip
+building-change-model-bandon-mtgcdnet-v0.1.1.zip
 ```
 
 It contains the checkpoint at `models/bandon/mtgcdnet_iter_40000.pth`, an
@@ -20,7 +20,7 @@ internal `SHA256SUMS.txt`, a model card, and a redistribution/provenance notice.
 From the source repository:
 
 ```bash
-./scripts/package-model-artifact.sh
+VERSION=v0.1.1 ./scripts/package-model-artifact.sh
 ```
 
 The script reads the local vendor checkpoint and creates the ZIP, its outer
@@ -35,13 +35,13 @@ license, and provenance. The package notice does not grant a license.
 From the `deploy/` directory:
 
 ```bash
-MODEL_ARTIFACT_FILE=/path/to/building-change-model-bandon-mtgcdnet-v0.1.0.zip ./scripts/fetch-model.sh
+MODEL_ARTIFACT_FILE=/path/to/building-change-model-bandon-mtgcdnet-v0.1.1.zip ./scripts/fetch-model.sh
 ```
 
 For a controlled download URL:
 
 ```bash
-MODEL_ARTIFACT_URL=https://github.com/taha328/building_change_app/releases/download/v0.1.0/building-change-model-bandon-mtgcdnet-v0.1.0.zip ./scripts/fetch-model.sh
+MODEL_ARTIFACT_URL=https://github.com/taha328/building_change_app/releases/download/v0.1.1/building-change-model-bandon-mtgcdnet-v0.1.1.zip ./scripts/fetch-model.sh
 ```
 
 Private GitHub release assets require their authenticated API asset URL rather
@@ -49,8 +49,8 @@ than the browser-style `releases/download/...` URL. Discover the API URL with an
 authorized GitHub client:
 
 ```bash
-gh api repos/taha328/building_change_app/releases/tags/v0.1.0 \
-  --jq '.assets[] | select(.name == "building-change-model-bandon-mtgcdnet-v0.1.0.zip") | .url'
+gh api repos/taha328/building_change_app/releases/tags/v0.1.1 \
+  --jq '.assets[] | select(.name == "building-change-model-bandon-mtgcdnet-v0.1.1.zip") | .url'
 ```
 
 Pass that URL through `MODEL_ARTIFACT_URL` and the authentication header through
@@ -72,14 +72,14 @@ Manual placement at that exact path is also supported.
 On Linux:
 
 ```bash
-sha256sum -c building-change-model-bandon-mtgcdnet-v0.1.0.sha256
+sha256sum -c building-change-model-bandon-mtgcdnet-v0.1.1.sha256
 ```
 
 On macOS:
 
 ```bash
-shasum -a 256 building-change-model-bandon-mtgcdnet-v0.1.0.zip
-cat building-change-model-bandon-mtgcdnet-v0.1.0.sha256
+shasum -a 256 building-change-model-bandon-mtgcdnet-v0.1.1.zip
+cat building-change-model-bandon-mtgcdnet-v0.1.1.sha256
 ```
 
 ## Runtime Compatibility
