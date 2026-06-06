@@ -2,7 +2,13 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ARTIFACT_NAME="building-change-model-bandon-mtgcdnet-v0.1.0"
+VERSION="${VERSION:-v0.1.0}"
+if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "VERSION must use semantic release format such as v0.1.1." >&2
+  exit 1
+fi
+
+ARTIFACT_NAME="building-change-model-bandon-mtgcdnet-$VERSION"
 CHECKPOINT_NAME="mtgcdnet_iter_40000.pth"
 SOURCE_CHECKPOINT="$REPO_ROOT/vendor/BANDON-mps/checkpoints/$CHECKPOINT_NAME"
 RELEASE_DIR="$REPO_ROOT/release"
@@ -53,7 +59,7 @@ cat > "$ARTIFACT_ROOT/MODEL_CARD.md" <<EOF
 # BANDON MTGCDNet Model Artifact
 
 - Model artifact: \`$ARTIFACT_NAME\`
-- Version: \`v0.1.0\`
+- Version: \`$VERSION\`
 - Checkpoint: \`$CHECKPOINT_NAME\`
 - Expected deploy path: \`deploy/models/bandon/$CHECKPOINT_NAME\`
 - Expected container path: \`/models/bandon/$CHECKPOINT_NAME\`
@@ -84,7 +90,7 @@ printf '%s  %s\n' "$ZIP_SHA" "$(basename "$ZIP_PATH")" > "$ZIP_SHA_PATH"
 
 {
   echo "artifact_name=$ARTIFACT_NAME"
-  echo "version=v0.1.0"
+  echo "version=$VERSION"
   echo "zip=$(basename "$ZIP_PATH")"
   echo "zip_sha256=$ZIP_SHA"
   echo "checkpoint=models/bandon/$CHECKPOINT_NAME"

@@ -3,7 +3,7 @@
 ## Release Preparation
 
 - Verify checkpoint redistribution rights, license, and provenance.
-- Generate the artifact with `./scripts/package-model-artifact.sh`.
+- Generate the artifact with `VERSION=v0.1.1 ./scripts/package-model-artifact.sh`.
 - Verify the generated outer ZIP SHA256 and inspect the manifest.
 - Deliver the ZIP and matching `.sha256` through an approved channel.
 - Confirm no `.pth`, model ZIP, token, or credential is tracked or staged.
@@ -15,7 +15,7 @@ git clone https://github.com/taha328/building_change_app.git
 cd building_change_app/deploy
 cp .env.example .env
 
-MODEL_ARTIFACT_FILE=/path/to/building-change-model-bandon-mtgcdnet-v0.1.0.zip ./scripts/fetch-model.sh
+MODEL_ARTIFACT_FILE=/path/to/building-change-model-bandon-mtgcdnet-v0.1.1.zip ./scripts/fetch-model.sh
 
 ./scripts/start.sh
 ./scripts/health.sh
