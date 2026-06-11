@@ -35,6 +35,8 @@ services:
       PYTHONPATH: /app/backend
       MODEL_DEVICE: ${MODEL_DEVICE:-auto}
       APP_INFERENCE_BACKEND: ${APP_INFERENCE_BACKEND:-bandon_mps}
+      APP_CHANGE_THRESHOLD: ${APP_CHANGE_THRESHOLD:-0.35}
+      APP_SEMANTIC_THRESHOLD: ${APP_SEMANTIC_THRESHOLD:-0.50}
       PERSISTENCE_BACKEND: ${PERSISTENCE_BACKEND:-postgres}
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:-building_change}:${POSTGRES_PASSWORD:-change_me_before_shared_deployment}@postgres:5432/${POSTGRES_DB:-building_change}}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
