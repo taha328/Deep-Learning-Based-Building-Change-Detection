@@ -112,7 +112,8 @@ class LocalInferenceBackend:
             "checkpoint_sha256": _sha256_file_or_none(checkpoint_path) or "",
             "device": runtime.device,
             "change_threshold": runtime.change_threshold,
-            "semantic_threshold": configured.default_semantic_threshold,
+            "semantic_threshold": configured.semantic_threshold,
+            "threshold_source": "backend_settings_env",
         }
 
     def create_inference_runner(self, settings: Settings):
@@ -125,7 +126,7 @@ def resolve_inference_runtime(settings: Settings) -> InferenceRuntimeConfig:
         return InferenceRuntimeConfig(
             backend="bandon_mps",
             checkpoint_path=settings.bandon_checkpoint_path,
-            change_threshold=settings.default_change_threshold,
+            change_threshold=settings.change_threshold,
             device=settings.bandon_device,
             repo_dir=settings.bandon_repo_dir,
             config_path=settings.bandon_config_path,
@@ -139,7 +140,7 @@ def resolve_inference_runtime(settings: Settings) -> InferenceRuntimeConfig:
         return InferenceRuntimeConfig(
             backend="mtgcdnet_s2looking_mps",
             checkpoint_path=settings.s2looking_checkpoint_path,
-            change_threshold=settings.s2looking_change_threshold,
+            change_threshold=settings.change_threshold,
             device=settings.bandon_device,
             repo_dir=settings.bandon_repo_dir,
             config_path=settings.bandon_config_path,

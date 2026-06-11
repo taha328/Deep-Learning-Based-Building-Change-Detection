@@ -14,7 +14,7 @@ def test_bandon_runtime_resolution_uses_bandon_checkpoint(tmp_path) -> None:
 
     assert runtime.backend == "bandon_mps"
     assert runtime.checkpoint_path == checkpoint
-    assert runtime.change_threshold == settings.default_change_threshold
+    assert runtime.change_threshold == settings.change_threshold
 
 
 def test_s2looking_runtime_resolution_uses_s2_checkpoint(tmp_path) -> None:
@@ -24,7 +24,7 @@ def test_s2looking_runtime_resolution_uses_s2_checkpoint(tmp_path) -> None:
         runtime_cache_dir=tmp_path / "runtime",
         inference_backend="mtgcdnet_s2looking_mps",
         s2looking_checkpoint_path=checkpoint,
-        s2looking_change_threshold=0.52,
+        change_threshold=0.52,
     )
 
     runtime = resolve_inference_runtime(settings)
@@ -72,14 +72,15 @@ def test_request_hash_context_separates_backend_checkpoint_and_threshold(tmp_pat
         runtime_cache_dir=tmp_path / "runtime-b",
         inference_backend="bandon_mps",
         bandon_checkpoint_path=bandon_checkpoint,
-        default_change_threshold=0.35,
+        change_threshold=0.35,
     )
     s2_settings = Settings(
         runtime_cache_dir=tmp_path / "runtime-c",
         inference_backend="mtgcdnet_s2looking_mps",
         bandon_checkpoint_path=bandon_checkpoint,
         s2looking_checkpoint_path=s2_checkpoint,
-        s2looking_change_threshold=0.50,
+        change_threshold=0.50,
+        semantic_threshold=0.61,
     )
 
     bandon_context = backend.request_hash_context(bandon_settings)
@@ -89,3 +90,32 @@ def test_request_hash_context_separates_backend_checkpoint_and_threshold(tmp_pat
     assert s2_context["inference_backend"] == "mtgcdnet_s2looking_mps"
     assert bandon_context["checkpoint_sha256"] != s2_context["checkpoint_sha256"]
     assert bandon_context["change_threshold"] != s2_context["change_threshold"]
+    assert bandon_context["threshold_source"] == "backend_settings_env"
+    assert s2_context["semantic_threshold"] == 0.61
+
+
+def test_request_hash_context_changes_with_canonical_thresholds(tmp_path) -> None:
+    checkpoint = tmp_path / "bandon.pth"
+    checkpoint.write_bytes(b"bandon")
+    backend = resolve_backend(PipelineExecutionConfig(inference_backend="bandon_mps"))
+
+    first = backend.request_hash_context(
+        Settings(
+            runtime_cache_dir=tmp_path / "runtime-a",
+            bandon_checkpoint_path=checkpoint,
+            change_threshold=0.37,
+            semantic_threshold=0.42,
+        )
+    )
+    second = backend.request_hash_context(
+        Settings(
+            runtime_cache_dir=tmp_path / "runtime-b",
+            bandon_checkpoint_path=checkpoint,
+            change_threshold=0.44,
+            semantic_threshold=0.61,
+        )
+    )
+
+    assert first["change_threshold"] == 0.37
+    assert first["semantic_threshold"] == 0.42
+    assert first != second

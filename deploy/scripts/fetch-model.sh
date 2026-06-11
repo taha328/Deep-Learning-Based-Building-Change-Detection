@@ -37,7 +37,7 @@ if [ -z "${MODEL_ARTIFACT_FILE:-}" ] && [ -z "${MODEL_ARTIFACT_URL:-}" ]; then
 No model artifact source was provided.
 
 Install from a local artifact:
-  MODEL_ARTIFACT_FILE=/path/to/building-change-model-bandon-mtgcdnet-v0.1.0.zip ./scripts/fetch-model.sh
+  MODEL_ARTIFACT_FILE=/path/to/building-change-model-bandon-mtgcdnet-v0.1.1.zip ./scripts/fetch-model.sh
 
 Or install from a controlled download URL:
   MODEL_ARTIFACT_URL=https://example/model-artifact.zip ./scripts/fetch-model.sh

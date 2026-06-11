@@ -41,11 +41,8 @@ def _find_release(releases: list[WaybackRelease], identifier: str) -> WaybackRel
 
 
 def _validate_thresholds(request: ValidationRequest, settings: Settings) -> tuple[float, float]:
-    if settings.inference_backend == "mtgcdnet_s2looking_mps":
-        change_threshold = settings.default_change_threshold
-    else:
-        change_threshold = request.change_threshold or settings.default_change_threshold
-    semantic_threshold = request.semantic_threshold or settings.default_semantic_threshold
+    change_threshold = settings.change_threshold
+    semantic_threshold = settings.semantic_threshold
     if not 0.0 <= change_threshold <= 1.0:
         raise ValueError("change_threshold must be between 0.0 and 1.0.")
     if not 0.0 <= semantic_threshold <= 1.0:
@@ -115,6 +112,11 @@ def validate_request(
     t1_release = _find_release(releases, request.t1_release)
     t2_release = _find_release(releases, request.t2_release)
     latest_release = max(releases, key=lambda item: item.release_date)
+    if request.change_threshold is not None or request.semantic_threshold is not None:
+        warnings.append(
+            "Request threshold overrides were ignored; APP_CHANGE_THRESHOLD and "
+            "APP_SEMANTIC_THRESHOLD from backend settings are authoritative."
+        )
     uses_mapbox_current = request.latest_source == "mapbox_current"
     if not uses_mapbox_current and t1_release.identifier == t2_release.identifier:
         blocking_errors.append("t1_release and t2_release must be different.")
@@ -234,6 +236,9 @@ def validate_request(
             "heavy_batch": heavy_batch,
             "heavy_batch_tile_threshold": settings.wayback_heavy_batch_tile_threshold,
             "recommended_tile_concurrency": settings.wayback_tile_max_concurrency,
+            "change_threshold": change_threshold,
+            "semantic_threshold": semantic_threshold,
+            "threshold_source": "backend_settings_env",
         },
     )
 
@@ -257,6 +262,7 @@ def validate_request(
         "mode": request.mode,
         "change_threshold": change_threshold,
         "semantic_threshold": semantic_threshold,
+        "threshold_source": "backend_settings_env",
         "min_new_building_pixels": request.min_new_building_pixels,
         "min_new_building_area_m2": request.min_new_building_area_m2,
         "old_building_mask_dilation_pixels": request.old_building_mask_dilation_pixels

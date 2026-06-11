@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import date
 
 import numpy as np
@@ -50,6 +51,9 @@ def test_run_detection_supports_bandon_backend(tmp_path, monkeypatch) -> None:
         runtime_cache_dir=tmp_path,
         wayback_tilemap_preflight_enabled=False,
         keep_intermediate_artifacts=True,
+        change_threshold=0.37,
+        semantic_threshold=0.42,
+        bandon_min_model_input_size_px=1,
     )
     releases = [
         WaybackRelease(
@@ -77,6 +81,8 @@ def test_run_detection_supports_bandon_backend(tmp_path, monkeypatch) -> None:
         t1_release="WB_2022_R03",
         t2_release="WB_2026_R03",
         mode="fast_preview",
+        change_threshold=0.91,
+        semantic_threshold=0.92,
     )
 
     rgb = np.zeros((4, 4, 3), dtype=np.uint8)
@@ -144,7 +150,13 @@ def test_run_detection_supports_bandon_backend(tmp_path, monkeypatch) -> None:
         ),
     )
     monkeypatch.setattr("src.services.processing.rasterize_aoi_mask_like", lambda *args, **kwargs: valid_mask.astype(bool))
-    monkeypatch.setattr("src.services.processing.run_bandon_inference", lambda **kwargs: _BandonResult())
+    inference_kwargs = {}
+
+    def _run_bandon_inference(**kwargs):
+        inference_kwargs.update(kwargs)
+        return _BandonResult()
+
+    monkeypatch.setattr("src.services.processing.run_bandon_inference", _run_bandon_inference)
     monkeypatch.setattr(
         "src.services.processing.vectorize_change_regions",
         lambda *args, **kwargs: (TabularMetrics().model_dump() if False else __import__("pandas").DataFrame({"area_m2": []}), {"type": "FeatureCollection", "features": []}),
@@ -163,3 +175,19 @@ def test_run_detection_supports_bandon_backend(tmp_path, monkeypatch) -> None:
     assert response.summary is not None
     assert response.summary.model_backend == "bandon_mps"
     assert response.summary.result_semantics == "building_change"
+    assert inference_kwargs["threshold"] == 0.37
+    assert response.diagnostics is not None
+    assert response.diagnostics.thresholds["change_threshold"] == 0.37
+    assert response.diagnostics.thresholds["semantic_threshold"] == 0.42
+    assert response.diagnostics.backend["threshold_source"] == "backend_settings_env"
+    assert any("threshold overrides were ignored" in warning for warning in response.diagnostics.warnings)
+
+    request_dir = settings.request_cache_dir / response.summary.request_hash
+    manifest = json.loads((request_dir / "manifest.json").read_text(encoding="utf-8"))
+    run_response = json.loads((request_dir / "run_response.json").read_text(encoding="utf-8"))
+    assert manifest["change_threshold"] == 0.37
+    assert manifest["semantic_threshold"] == 0.42
+    assert manifest["threshold_source"] == "backend_settings_env"
+    assert run_response["diagnostics"]["thresholds"]["change_threshold"] == 0.37
+    assert run_response["diagnostics"]["thresholds"]["semantic_threshold"] == 0.42
+    assert run_response["diagnostics"]["backend"]["threshold_source"] == "backend_settings_env"

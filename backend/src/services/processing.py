@@ -499,6 +499,7 @@ def _detection_run_identity(
     model_backend: str,
     request_hash: str,
     change_threshold: float,
+    semantic_threshold: float,
     request_hash_context: dict[str, object] | None,
 ) -> dict[str, object]:
     checkpoint_path: Path | None = None
@@ -513,6 +514,9 @@ def _detection_run_identity(
         "checkpoint_path": str(checkpoint_path) if checkpoint_path else None,
         "checkpoint_sha256": checkpoint_sha256,
         "threshold": change_threshold,
+        "change_threshold": change_threshold,
+        "semantic_threshold": semantic_threshold,
+        "threshold_source": "backend_settings_env",
         "config_path": str(config_path) if config_path else None,
         "request_hash": request_hash,
         "pair_hash": request_hash,
@@ -529,6 +533,12 @@ def _log_effective_detection_identity(identity: dict[str, object]) -> None:
     LOGGER.info("EFFECTIVE_CHECKPOINT_PATH value=%s", identity.get("checkpoint_path"))
     LOGGER.info("EFFECTIVE_CHECKPOINT_SHA256 value=%s", identity.get("checkpoint_sha256"))
     LOGGER.info("EFFECTIVE_THRESHOLD value=%s", identity.get("threshold"))
+    LOGGER.info(
+        "EFFECTIVE_THRESHOLDS source=%s semantic=%s change=%s",
+        identity.get("threshold_source"),
+        identity.get("semantic_threshold"),
+        identity.get("change_threshold"),
+    )
     LOGGER.info("EFFECTIVE_RUN_CACHE_KEY value=%s", identity.get("inference_cache_key"))
     LOGGER.info("EFFECTIVE_REQUEST_HASH value=%s", identity.get("request_hash"))
 
@@ -1279,6 +1289,7 @@ def run_detection(
     remote_patch_budget_enabled: bool = False,
     request_hash_context: dict[str, object] | None = None,
 ) -> RunResponse:
+    request_threshold_override_supplied = request.change_threshold is not None or request.semantic_threshold is not None
     request_hash_context = {
         **(request_hash_context or {}),
         "imagery_source_recipe": "canonical_cog_inference_v1",
@@ -1310,11 +1321,8 @@ def run_detection(
         duration_ms=validation_duration_ms,
         metadata={"valid": True, "estimated_tiles": prepared.tile_count_per_scene * 2},
     )
-    if settings.inference_backend == "mtgcdnet_s2looking_mps":
-        change_threshold = float(settings.default_change_threshold)
-    else:
-        change_threshold = float(request.change_threshold if request.change_threshold is not None else settings.default_change_threshold)
-    semantic_threshold = float(request.semantic_threshold if request.semantic_threshold is not None else settings.default_semantic_threshold)
+    change_threshold = float(settings.change_threshold)
+    semantic_threshold = float(settings.semantic_threshold)
     old_building_mask_dilation_pixels = max(
         int(
             request.old_building_mask_dilation_pixels
@@ -1336,6 +1344,7 @@ def run_detection(
         model_backend=model_backend,
         request_hash=prepared.request_hash,
         change_threshold=change_threshold,
+        semantic_threshold=semantic_threshold,
         request_hash_context=request_hash_context,
     )
     _log_effective_detection_identity(run_identity)
@@ -1367,9 +1376,17 @@ def run_detection(
         settings=settings,
     )
     run_warnings: list[str] = []
+    if request_threshold_override_supplied:
+        run_warnings.append(
+            "Request threshold overrides were ignored; APP_CHANGE_THRESHOLD and "
+            "APP_SEMANTIC_THRESHOLD from backend settings are authoritative."
+        )
     backend_diagnostics: dict[str, Any] = {
         "model_backend": model_backend,
         "effective_backend": settings.inference_backend,
+        "change_threshold": change_threshold,
+        "semantic_threshold": semantic_threshold,
+        "threshold_source": "backend_settings_env",
     }
     if model_backend == "bandon_mps":
         backend_diagnostics.update(
