@@ -88,25 +88,61 @@ def test_settings_accepts_s2looking_backend_with_checkpoint(tmp_path: Path) -> N
         runtime_cache_dir=tmp_path / "runtime",
         inference_backend="mtgcdnet_s2looking_mps",
         s2looking_checkpoint_path=checkpoint,
-        s2looking_change_threshold=0.5,
+        change_threshold=0.44,
+        semantic_threshold=0.61,
     )
 
     assert settings.inference_backend == "mtgcdnet_s2looking_mps"
     assert settings.s2looking_checkpoint_path == checkpoint.resolve()
-    assert settings.s2looking_change_threshold == 0.5
+    assert settings.change_threshold == 0.44
+    assert settings.semantic_threshold == 0.61
 
 
-def test_get_settings_reads_s2looking_backend_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_get_settings_reads_canonical_threshold_env_for_s2looking(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     get_settings.cache_clear()
     checkpoint = tmp_path / "mtgcdnet_s2looking_fp_finetuned_best.pth"
     checkpoint.write_bytes(b"checkpoint")
     monkeypatch.setenv("APP_RUNTIME_CACHE_DIR", str(tmp_path / "runtime"))
     monkeypatch.setenv("APP_INFERENCE_BACKEND", "mtgcdnet_s2looking_mps")
     monkeypatch.setenv("APP_S2LOOKING_CHECKPOINT_PATH", str(checkpoint))
-    monkeypatch.setenv("APP_S2LOOKING_CHANGE_THRESHOLD", "0.50")
+    monkeypatch.setenv("APP_CHANGE_THRESHOLD", "0.44")
+    monkeypatch.setenv("APP_SEMANTIC_THRESHOLD", "0.61")
 
     settings = get_settings()
 
     assert settings.inference_backend == "mtgcdnet_s2looking_mps"
     assert settings.s2looking_checkpoint_path == checkpoint.resolve()
-    assert settings.s2looking_change_threshold == 0.5
+    assert settings.change_threshold == 0.44
+    assert settings.semantic_threshold == 0.61
+
+
+def test_get_settings_reads_canonical_threshold_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    get_settings.cache_clear()
+    monkeypatch.setenv("APP_RUNTIME_CACHE_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setenv("APP_CHANGE_THRESHOLD", "0.37")
+    monkeypatch.setenv("APP_SEMANTIC_THRESHOLD", "0.42")
+
+    settings = get_settings()
+
+    assert settings.change_threshold == 0.37
+    assert settings.semantic_threshold == 0.42
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("change_threshold", 1.01, "APP_CHANGE_THRESHOLD"),
+        ("semantic_threshold", -0.01, "APP_SEMANTIC_THRESHOLD"),
+    ],
+)
+def test_settings_rejects_invalid_canonical_thresholds(
+    tmp_path: Path,
+    field: str,
+    value: float,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        Settings(runtime_cache_dir=tmp_path / "runtime", **{field: value})

@@ -174,8 +174,8 @@ class ValidationResponse(BaseModel):
 class RunRequest(ValidationRequest):
     model_config = ConfigDict(extra="forbid")
 
-    change_threshold: float = 0.60
-    semantic_threshold: float = 0.50
+    change_threshold: float | None = None
+    semantic_threshold: float | None = None
     old_building_mask_dilation_pixels: int = 2
     new_building_core_distance_pixels: int = 2
     merge_close_gap_m: float = 10.0

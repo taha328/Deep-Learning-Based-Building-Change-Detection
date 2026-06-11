@@ -21,7 +21,7 @@ if (-not (Test-Path $Checkpoint)) {
 Missing model checkpoint: $Checkpoint
 
 Install it with:
-  `$env:MODEL_ARTIFACT_FILE="C:\path\building-change-model-bandon-mtgcdnet-v0.1.0.zip"
+  `$env:MODEL_ARTIFACT_FILE="C:\path\building-change-model-bandon-mtgcdnet-v0.1.1.zip"
   .\scripts\windows\fetch-model.ps1
 
 or download the model artifact and place:

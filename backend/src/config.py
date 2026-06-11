@@ -103,8 +103,8 @@ class Settings(BaseModel):
     generate_full_mosaic_png_for_heavy_batch: bool = False
     mosaic_preview_max_dimension: int = 4096
     scene_segmentation_concurrency: int = 2
-    default_change_threshold: float = 0.65
-    default_semantic_threshold: float = 0.65
+    change_threshold: float = 0.35
+    semantic_threshold: float = 0.35
     default_min_new_building_pixels: int = 30
     addition_min_area_m2: float = 8.0
     addition_max_existing_overlap_ratio: float = 0.50
@@ -138,7 +138,6 @@ class Settings(BaseModel):
     # uses this guard without importing mmcv or launching the model.
     bandon_min_model_input_size_px: int = 513
     s2looking_checkpoint_path: Path | None = None
-    s2looking_change_threshold: float = 0.65
     database_url: str = "postgresql+psycopg://building_change:building_change@localhost:5432/building_change"
     database_echo: bool = False
     db_inline_json_max_bytes: int = 256 * 1024
@@ -278,8 +277,10 @@ class Settings(BaseModel):
             raise ValueError(
                 "APP_INFERENCE_BACKEND must be one of: bandon_mps, mtgcdnet_s2looking_mps."
             )
-        if self.s2looking_change_threshold < 0 or self.s2looking_change_threshold > 1:
-            raise ValueError("s2looking_change_threshold must be between 0 and 1.")
+        if self.change_threshold < 0 or self.change_threshold > 1:
+            raise ValueError("APP_CHANGE_THRESHOLD must be between 0 and 1.")
+        if self.semantic_threshold < 0 or self.semantic_threshold > 1:
+            raise ValueError("APP_SEMANTIC_THRESHOLD must be between 0 and 1.")
         if self.s2looking_checkpoint_path is not None:
             s2looking_checkpoint_path = self.s2looking_checkpoint_path.expanduser()
             if not s2looking_checkpoint_path.is_absolute():
@@ -745,8 +746,8 @@ def get_settings() -> Settings:
             "APP_SCENE_SEGMENTATION_CONCURRENCY",
             base.scene_segmentation_concurrency,
         ),
-        default_change_threshold=_float_env("APP_CHANGE_THRESHOLD", base.default_change_threshold),
-        default_semantic_threshold=_float_env("APP_SEMANTIC_THRESHOLD", base.default_semantic_threshold),
+        change_threshold=_float_env("APP_CHANGE_THRESHOLD", base.change_threshold),
+        semantic_threshold=_float_env("APP_SEMANTIC_THRESHOLD", base.semantic_threshold),
         default_min_new_building_pixels=_int_env(
             "APP_MIN_NEW_BUILDING_PIXELS",
             base.default_min_new_building_pixels,
@@ -826,10 +827,6 @@ def get_settings() -> Settings:
             Path(s2looking_checkpoint_env)
             if (s2looking_checkpoint_env := _optional_str_env("APP_S2LOOKING_CHECKPOINT_PATH"))
             else None
-        ),
-        s2looking_change_threshold=_float_env(
-            "APP_S2LOOKING_CHANGE_THRESHOLD",
-            base.s2looking_change_threshold,
         ),
         database_url=os.getenv("DATABASE_URL", base.database_url),
         database_echo=_bool_env("DATABASE_ECHO", base.database_echo),

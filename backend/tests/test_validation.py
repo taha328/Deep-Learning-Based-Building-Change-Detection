@@ -44,6 +44,62 @@ def test_validation_rejects_reversed_releases() -> None:
     assert any("chronologically earlier" in message for message in response.blocking_errors)
 
 
+def test_validation_ignores_request_threshold_overrides_and_hashes_settings() -> None:
+    settings = Settings(
+        change_threshold=0.37,
+        semantic_threshold=0.42,
+        bandon_min_model_input_size_px=1,
+    )
+    releases = _sample_releases(settings)
+    request = ValidationRequest(
+        aoi_geojson={
+            "type": "Polygon",
+            "coordinates": [[[-7.0, 33.0], [-7.0, 33.001], [-6.999, 33.001], [-6.999, 33.0], [-7.0, 33.0]]],
+        },
+        t1_release="WB_2022_R01",
+        t2_release="WB_2023_R01",
+        mode="fast_preview",
+        change_threshold=0.91,
+        semantic_threshold=0.92,
+    )
+
+    response, prepared = validate_request(request, releases=releases, settings=settings)
+
+    assert response.valid is True
+    assert prepared is not None
+    assert any("threshold overrides were ignored" in warning for warning in response.warnings)
+    assert response.details["change_threshold"] == 0.37
+    assert response.details["semantic_threshold"] == 0.42
+    assert response.details["threshold_source"] == "backend_settings_env"
+
+    changed_settings = settings.model_copy(
+        update={"change_threshold": 0.44, "semantic_threshold": 0.61}
+    )
+    _, changed_prepared = validate_request(request, releases=releases, settings=changed_settings)
+    assert changed_prepared is not None
+    assert changed_prepared.request_hash != prepared.request_hash
+
+
+def test_validation_does_not_warn_when_threshold_overrides_are_absent() -> None:
+    settings = Settings(bandon_min_model_input_size_px=1)
+    releases = _sample_releases(settings)
+    request = ValidationRequest(
+        aoi_geojson={
+            "type": "Polygon",
+            "coordinates": [[[-7.0, 33.0], [-7.0, 33.001], [-6.999, 33.001], [-6.999, 33.0], [-7.0, 33.0]]],
+        },
+        t1_release="WB_2022_R01",
+        t2_release="WB_2023_R01",
+        mode="fast_preview",
+    )
+
+    response, prepared = validate_request(request, releases=releases, settings=settings)
+
+    assert response.valid is True
+    assert prepared is not None
+    assert not any("threshold overrides were ignored" in warning for warning in response.warnings)
+
+
 def test_validation_warns_when_aoi_exceeds_inference_patch_guidance() -> None:
     settings = Settings(
         preview_limits={

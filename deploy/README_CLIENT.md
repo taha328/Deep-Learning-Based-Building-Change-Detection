@@ -27,7 +27,7 @@ The client does not need Python, Node, Conda, MPS setup, or the full source repo
 The deployment pulls application images from GitHub Container Registry:
 
 ```text
-ghcr.io/taha328/building-change-backend:cpu-v0.1.0
+ghcr.io/taha328/building-change-backend:cpu-v0.1.2
 ghcr.io/taha328/building-change-frontend:v0.1.0
 ```
 
