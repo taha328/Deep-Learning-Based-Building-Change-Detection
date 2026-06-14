@@ -30,7 +30,6 @@ payload = {
     "t1_release": "WB_2026_R04",
     "t2_release": "WB_2026_R05",
     "mode": "fast_preview",
-    "latest_source": "esri_wayback",
     "inference_backend": "bandon_mps",
 }
 
