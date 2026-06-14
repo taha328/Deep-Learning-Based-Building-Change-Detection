@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+import src.config as config_module
 from src.config import Settings, get_settings
 
 
@@ -106,6 +107,35 @@ def test_get_settings_ignores_removed_s2looking_checkpoint_env(
     assert settings.inference_backend == "bandon_mps"
     assert settings.bandon_checkpoint_path == checkpoint.resolve()
     assert not hasattr(settings, "s2looking_checkpoint_path")
+
+
+def test_get_settings_validates_environment_selected_checkpoint_during_bootstrap(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    get_settings.cache_clear()
+    checkpoint = tmp_path / "mounted-bandon.pth"
+    checkpoint.write_bytes(b"bandon")
+    monkeypatch.setattr(config_module, "DEFAULT_BANDON_CHECKPOINT_PATH", tmp_path / "missing-image-default.pth")
+    monkeypatch.setenv("APP_RUNTIME_CACHE_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setenv("APP_BANDON_CHECKPOINT_PATH", str(checkpoint))
+
+    settings = get_settings()
+
+    assert settings.bandon_checkpoint_path == checkpoint.resolve()
+
+
+def test_get_settings_rejects_missing_environment_selected_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    get_settings.cache_clear()
+    missing_checkpoint = tmp_path / "missing-mounted-bandon.pth"
+    monkeypatch.setenv("APP_RUNTIME_CACHE_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setenv("APP_BANDON_CHECKPOINT_PATH", str(missing_checkpoint))
+
+    with pytest.raises(ValueError, match=str(missing_checkpoint)):
+        get_settings()
 
 
 def test_get_settings_reads_canonical_threshold_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
