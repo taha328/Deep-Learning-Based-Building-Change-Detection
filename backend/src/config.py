@@ -17,6 +17,9 @@ ModelDeviceName = Literal["auto", "cpu", "cuda", "mps"]
 PersistenceBackendName = Literal["filesystem", "postgres"]
 PostCompletionRequestCleanupMode = Literal["off", "compact_heavy", "delete_full"]
 LOGGER = logging.getLogger(__name__)
+DEFAULT_BANDON_CHECKPOINT_PATH = (
+    Path(__file__).resolve().parents[2] / "vendor" / "BANDON-mps" / "checkpoints" / "mtgcdnet_iter_40000.pth"
+)
 
 
 class ModeLimits(BaseModel):
@@ -147,7 +150,7 @@ class Settings(BaseModel):
         default_factory=lambda: Path(__file__).resolve().parents[2] / "vendor" / "BANDON-mps" / "workdirs_bandon" / "MTGCDNet" / "config.py"
     )
     bandon_checkpoint_path: Path = Field(
-        default_factory=lambda: Path(__file__).resolve().parents[2] / "vendor" / "BANDON-mps" / "checkpoints" / "mtgcdnet_iter_40000.pth"
+        default_factory=lambda: DEFAULT_BANDON_CHECKPOINT_PATH
     )
     bandon_device: ModelDeviceName = "auto"
     bandon_allow_mps_fallback: bool = False
@@ -506,7 +509,10 @@ def _load_backend_env_files() -> None:
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     _load_backend_env_files()
-    base = Settings()
+    base = Settings(
+        inference_backend=os.getenv("APP_INFERENCE_BACKEND", "bandon_mps"),  # type: ignore[arg-type]
+        bandon_checkpoint_path=Path(os.getenv("APP_BANDON_CHECKPOINT_PATH", str(DEFAULT_BANDON_CHECKPOINT_PATH))),
+    )
     preferred_wayback_zoom = _int_env_any(
         ("APP_WAYBACK_PREFERRED_INFERENCE_ZOOM", "APP_WAYBACK_DEFAULT_ZOOM", "APP_TILE_ZOOM"),
         base.wayback_preferred_inference_zoom,
