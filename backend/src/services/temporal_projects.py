@@ -68,6 +68,7 @@ from src.schemas import (
     ValidationRequest,
     validate_stored_temporal_project,
 )
+from src.runtime_paths import temporal_project_dir
 from src.services.processing import ResolvedWaybackRelease, _cached_response_has_stale_fallback_imagery, _resolve_release_for_aoi
 from src.services.temporal_reference_imagery import TemporalReferenceSource, build_temporal_reference_imagery
 from src.services.wayback_mosaic_cleanup import cleanup_finalized_temporal_project_wayback_mosaics
@@ -434,28 +435,11 @@ def _normalize_project_dir(project_dir: str | None) -> Path | None:
 
 
 def _resolve_project_dir(settings: Settings, project_id: str, project_dir: str | None = None) -> Path:
-    normalized = _normalize_project_dir(project_dir)
-    if normalized is not None:
-        existing_project_path = normalized / "project.json"
-        if existing_project_path.exists():
-            try:
-                existing_payload = json.loads(existing_project_path.read_text())
-            except Exception:
-                existing_payload = None
-            existing_project_id = existing_payload.get("project_id") if isinstance(existing_payload, dict) else None
-            if isinstance(existing_project_id, str) and existing_project_id and existing_project_id != project_id:
-                normalized = normalized / _safe_project_id(project_id)
-        normalized.mkdir(parents=True, exist_ok=True)
-        return normalized
-
     registry = _load_project_registry(settings)
-    registered_dir = registry.get(project_id)
-    if registered_dir:
-        path = Path(registered_dir)
-        path.mkdir(parents=True, exist_ok=True)
-        return path
-
-    return _project_dir(settings, project_id)
+    configured_dir = project_dir or registry.get(project_id)
+    path = temporal_project_dir(settings, _safe_project_id(project_id), configured_dir)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def _project_json_path(settings: Settings, project_id: str) -> Path:
@@ -4183,6 +4167,7 @@ def _load_project(
             ",".join(stripped_fields),
         )
     project = validate_stored_temporal_project(payload)
+    project.project_dir = str(path.parent.resolve())
     for milestone in project.milestones:
         milestone.artifacts = _allowed_temporal_artifacts(milestone.artifacts)
     project.execution_config = resolve_temporal_project_execution_config(project, settings)

@@ -52,6 +52,7 @@ ENV MODEL_DEVICE=auto \
     APP_BANDON_CONFIG_PATH=/app/vendor/BANDON-mps/workdirs_bandon/MTGCDNet/config.py \
     APP_BANDON_CHECKPOINT_PATH=/models/bandon/mtgcdnet_iter_40000.pth \
     APP_RUNTIME_CACHE_DIR=/data/runtime_cache \
+    APP_PACKAGED_DEPLOYMENT=true \
     PERSISTENCE_BACKEND=postgres
 
 COPY backend/requirements.txt /tmp/backend-requirements.txt
@@ -90,6 +91,7 @@ ENV MODEL_DEVICE=auto \
     APP_BANDON_CONFIG_PATH=/app/vendor/BANDON-mps/workdirs_bandon/MTGCDNet/config.py \
     APP_BANDON_CHECKPOINT_PATH=/models/bandon/mtgcdnet_iter_40000.pth \
     APP_RUNTIME_CACHE_DIR=/data/runtime_cache \
+    APP_PACKAGED_DEPLOYMENT=true \
     PERSISTENCE_BACKEND=postgres
 
 COPY backend/requirements.txt /tmp/backend-requirements.txt

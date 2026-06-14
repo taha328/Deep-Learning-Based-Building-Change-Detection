@@ -61,12 +61,25 @@ def _reference_log_context(table: str | None, column: str | None) -> tuple[str, 
     return table or "unknown", column or "unknown"
 
 
-def resolve_payload_reference(raw_value: Any, *, table: str | None = None, column: str | None = None) -> Any:
+def resolve_payload_reference(
+    raw_value: Any,
+    *,
+    settings: Settings | None = None,
+    table: str | None = None,
+    column: str | None = None,
+) -> Any:
     if not is_payload_reference(raw_value):
         return raw_value
 
     log_table, log_column = _reference_log_context(table, column)
-    path = Path(raw_value["path"])
+    path = Path(raw_value["path"]).expanduser()
+    if not path.is_absolute() and settings is not None:
+        parts = path.parts
+        if "runtime_cache" in parts:
+            path = settings.runtime_cache_dir.joinpath(*parts[parts.index("runtime_cache") + 1 :])
+        else:
+            path = settings.runtime_cache_dir / path
+    path = path.resolve()
     if not path.exists():
         logger.error(
             "DB_PAYLOAD_REFERENCE_FAILED table=%s column=%s reason=%s path=%s",

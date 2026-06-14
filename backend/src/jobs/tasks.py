@@ -22,6 +22,7 @@ from src.repositories.job_repository import (
 )
 from src.repositories.run_repository import get_latest_detection_run_id, get_latest_temporal_run_id
 from src.schemas import RunRequest, RunResponse, TemporalProjectRunRequest, TemporalProjectRunResponse
+from src.runtime_paths import temporal_project_file_candidates
 
 
 LOGGER = logging.getLogger(__name__)
@@ -203,6 +204,16 @@ def run_temporal_project_job(
     run_request_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     settings = _resolve_settings(settings_payload)
+    LOGGER.info(
+        "TEMPORAL_PROJECT_LOAD_PREFLIGHT jobId=%s projectId=%s runtimeCacheDir=%s persistenceBackend=%s "
+        "databaseUrl=%s projectFileCandidates=%s",
+        job_id,
+        project_id,
+        settings.runtime_cache_dir.resolve(),
+        settings.persistence_backend,
+        settings.database_url.split("@", 1)[-1],
+        ",".join(str(path) for path in temporal_project_file_candidates(settings, project_id)),
+    )
     LOGGER.info(
         "TEMPORAL_RUN_REQUEST_THRESHOLD projectId=%s changeThreshold=%s source=%s",
         project_id,

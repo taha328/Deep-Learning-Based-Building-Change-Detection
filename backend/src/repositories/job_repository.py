@@ -155,7 +155,7 @@ def update_job_progress(
     record.stage = stage
     record.message = message or record.message or "The backend is advancing through the pipeline."
     if progress_details is not None:
-        payload = dict(get_job_full_result(record.raw_result) or {})
+        payload = dict(get_job_full_result(record.raw_result, settings=settings) or {})
         payload["progress_details"] = progress_details
         record.raw_result = payload
     if record.started_at is None:
@@ -408,5 +408,5 @@ def get_project_for_job(session: Session, project_id: str) -> ProjectRecord | No
     return session.query(ProjectRecord).filter(ProjectRecord.project_id == project_id).one_or_none()
 
 
-def get_job_full_result(raw_result: dict | None) -> dict | None:
-    return resolve_payload_reference(raw_result, table="jobs", column="raw_result")
+def get_job_full_result(raw_result: dict | None, *, settings: Settings | None = None) -> dict | None:
+    return resolve_payload_reference(raw_result, settings=settings, table="jobs", column="raw_result")

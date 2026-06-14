@@ -28,6 +28,7 @@ from src.schemas import (
     TemporalProjectSummary,
     validate_stored_temporal_project,
 )
+from src.runtime_paths import temporal_project_dir
 from src.utils.geometry import geodesic_area_m2
 
 
@@ -271,8 +272,9 @@ def save_project(
             return save_project(project, settings=settings, session=scoped_session)
 
     resolved_settings = settings or Settings()
+    project_dir = temporal_project_dir(resolved_settings, project.project_id, project.project_dir)
+    project.project_dir = str(project_dir)
     payload = project.model_dump(mode="json")
-    project_dir = Path(project.project_dir) if project.project_dir else resolved_settings.temporal_projects_dir / project.project_id
     project_json_path = project_dir / "project.json"
     write_json_payload_to_file(payload, project_json_path)
     project_payload_reference = {
@@ -401,7 +403,7 @@ def get_project(project_id: str, *, settings: Settings | None = None, session: S
     )
     if record is None or not record.raw_payload:
         raise FileNotFoundError(f"Unknown temporal project: {project_id}")
-    payload = resolve_payload_reference(record.raw_payload, table="projects", column="raw_payload")
+    payload = resolve_payload_reference(record.raw_payload, settings=settings, table="projects", column="raw_payload")
     return validate_stored_temporal_project(payload)
 
 

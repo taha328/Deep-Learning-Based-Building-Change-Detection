@@ -163,4 +163,4 @@ def save_temporal_run(
 
 
 def get_run_full_response(raw_response: dict | None) -> dict | None:
-    return resolve_payload_reference(raw_response, table="runs", column="raw_response")
+    return resolve_payload_reference(raw_response, settings=settings, table="runs", column="raw_response")
