@@ -28,6 +28,7 @@ SECRET_PATTERN = re.compile(
     r"AKIA[0-9A-Z]{16}|-----BEGIN (?:RSA|OPENSSH|EC) PRIVATE KEY-----)"
 )
 MAPBOX_TOKEN_PATTERN = re.compile(r"^MAPBOX_API_KEY=(.*)$", re.MULTILINE)
+SMOKE_TEST_PATHS = ("scripts/smoke-test.sh", "scripts/windows/smoke-test.ps1")
 
 
 def normalized_names(names: list[str]) -> set[str]:
@@ -96,6 +97,18 @@ def main() -> int:
         checkpoint_info = archive.getinfo(checkpoint_names[0])
         if checkpoint_info.file_size == 0:
             raise SystemExit("Packaged checkpoint is empty.")
+
+        for smoke_test_path in SMOKE_TEST_PATHS:
+            matches = [
+                name
+                for name in file_names
+                if name == smoke_test_path or name.endswith(f"/{smoke_test_path}")
+            ]
+            if len(matches) != 1:
+                raise SystemExit(f"Release smoke test must occur exactly once: {smoke_test_path} ({len(matches)})")
+            payload = archive.read(matches[0]).decode("utf-8", errors="ignore")
+            if "latest_source" in payload:
+                raise SystemExit(f"Removed latest_source field found in release smoke test: {smoke_test_path}")
 
     print(f"release bundle verification: OK ({zip_path})")
     return 0
