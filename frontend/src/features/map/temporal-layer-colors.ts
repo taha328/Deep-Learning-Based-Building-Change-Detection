@@ -70,7 +70,14 @@ export type TemporalTimelineLabel = {
 export type TemporalReleaseMode = "selected" | "cumulative";
 
 export type TemporalLayerContract = {
-  artifactKey: "additions" | "building_change_buffer_10m" | "building_change_buffer_15m" | "building_change_buffer_20m";
+  artifactKey:
+    | "additions"
+    | "building_change_buffer_10m"
+    | "building_change_buffer_15m"
+    | "building_change_buffer_20m"
+    | "cumulative_building_change_buffer_10m"
+    | "cumulative_building_change_buffer_15m"
+    | "cumulative_building_change_buffer_20m";
   mode: TemporalReleaseMode;
 };
 
@@ -94,9 +101,9 @@ export const TEMPORAL_LAYER_CONTRACTS: Record<TemporalLayerPlanningKey, Temporal
   buffer10m: { artifactKey: "building_change_buffer_10m", mode: "selected" },
   buffer15m: { artifactKey: "building_change_buffer_15m", mode: "selected" },
   buffer20m: { artifactKey: "building_change_buffer_20m", mode: "selected" },
-  temporalCumulativeBuffer10m: { artifactKey: "building_change_buffer_10m", mode: "cumulative" },
-  temporalCumulativeBuffer15m: { artifactKey: "building_change_buffer_15m", mode: "cumulative" },
-  temporalCumulativeBuffer20m: { artifactKey: "building_change_buffer_20m", mode: "cumulative" },
+  temporalCumulativeBuffer10m: { artifactKey: "cumulative_building_change_buffer_10m", mode: "cumulative" },
+  temporalCumulativeBuffer15m: { artifactKey: "cumulative_building_change_buffer_15m", mode: "cumulative" },
+  temporalCumulativeBuffer20m: { artifactKey: "cumulative_building_change_buffer_20m", mode: "cumulative" },
   convexHull: { artifactKey: "additions", mode: "selected" },
   cumulativeUnion: { artifactKey: "additions", mode: "selected" },
   concavePolygon: { artifactKey: "additions", mode: "selected" },

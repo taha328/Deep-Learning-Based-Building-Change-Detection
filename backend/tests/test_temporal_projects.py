@@ -4,13 +4,15 @@ from datetime import date
 import json
 
 import geopandas as gpd
+import pytest
+from pydantic import ValidationError
 from shapely.geometry import LineString, MultiPolygon, Polygon, shape
 from shapely.ops import unary_union
 
 from src.config import Settings
 from src.domain.cache import save_cached_response
 from src.execution_profiles import PipelineExecutionConfig, resolve_backend
-from src.schemas import PreviewImages, RunRequest, RunResponse, SummaryStats, TemporalMilestone, TemporalOverrideRequest, TemporalProject
+from src.schemas import PreviewImages, RunRequest, RunResponse, SummaryStats, TemporalMilestone, TemporalOverrideRequest, TemporalProject, TemporalProjectRunRequest
 from src.domain.vectorize import build_temporal_growth_blocks, build_temporal_growth_envelope
 from src.services.releases import list_releases
 from src.services.temporal_projects import (
@@ -18,6 +20,7 @@ from src.services.temporal_projects import (
     audit_temporal_project_metadata_bloat,
     audit_temporal_project_metrics,
     get_temporal_project,
+    load_temporal_project_response_payload,
     list_temporal_projects,
     import_temporal_override,
     resolve_temporal_project_execution_config,
@@ -81,6 +84,14 @@ def _sample_project(project_id: str = "temporal-demo") -> TemporalProject:
         created_at="2026-04-17T00:00:00Z",
         updated_at="2026-04-17T00:00:00Z",
     )
+
+
+def test_temporal_run_request_validates_change_threshold_range() -> None:
+    assert TemporalProjectRunRequest(change_threshold=0.35).change_threshold == 0.35
+    with pytest.raises(ValidationError):
+        TemporalProjectRunRequest(change_threshold=0.0)
+    with pytest.raises(ValidationError):
+        TemporalProjectRunRequest(change_threshold=1.0)
 
 
 def _bandon_config() -> PipelineExecutionConfig:
@@ -208,6 +219,27 @@ def test_validate_temporal_project_rejects_out_of_order_milestones(monkeypatch, 
     assert any("chronological order" in message for message in response.blocking_errors)
 
 
+def test_run_temporal_project_validates_before_pair_runner(monkeypatch, tmp_path) -> None:
+    settings = Settings(runtime_cache_dir=tmp_path)
+    project = _sample_project("invalid-run")
+    project.aoi_geojson = None
+    save_temporal_project(project, settings)
+    monkeypatch.setattr("src.services.temporal_projects.list_releases", lambda _: _sample_releases(settings))
+    pair_runner_called = False
+
+    def _pair_runner(request):
+        nonlocal pair_runner_called
+        pair_runner_called = True
+        raise AssertionError(f"Pair runner must not receive invalid request: {request}")
+
+    response = run_temporal_project(project.project_id, settings=settings, pair_runner=_pair_runner)
+
+    assert response.success is False
+    assert pair_runner_called is False
+    assert response.project.validation_blocking_errors == ["AOI is required before validating a temporal project."]
+    assert response.error_message == "AOI is required before validating a temporal project."
+
+
 def test_run_temporal_project_builds_monotonic_cumulative_union(monkeypatch, tmp_path) -> None:
     settings = Settings(runtime_cache_dir=tmp_path)
     monkeypatch.setattr("src.services.temporal_projects.list_releases", lambda _: _sample_releases(settings))
@@ -249,20 +281,18 @@ def test_run_temporal_project_builds_monotonic_cumulative_union(monkeypatch, tmp
     assert response.project.milestones[0].metrics.total_area_m2 == 0.0
     assert response.project.milestones[1].metrics.total_area_m2 > response.project.milestones[0].metrics.total_area_m2
     assert response.project.milestones[2].metrics.total_area_m2 > response.project.milestones[1].metrics.total_area_m2
-    cumulative_2025_geojson = _published_milestone_geojson(settings, project.project_id, "WB_2025_R01", "cumulative_union.geojson")
-    cumulative_2026_geojson = _published_milestone_geojson(settings, project.project_id, "WB_2026_R01", "cumulative_union.geojson")
+    cumulative_2025_geojson = response.project.milestones[1].cumulative_union_geojson
+    cumulative_2026_geojson = response.project.milestones[2].cumulative_union_geojson
     assert _geometry(cumulative_2025_geojson).within(_geometry(cumulative_2026_geojson))
     final_cumulative = _geometry(cumulative_2026_geojson)
-    final_envelope_geojson = _published_milestone_geojson(
-        settings,
-        project.project_id,
-        "WB_2026_R01",
-        "cumulative_growth_envelope.geojson",
-    )
+    final_envelope_geojson = response.project.milestones[2].cumulative_growth_envelope_geojson
     assert len(final_envelope_geojson["features"]) == 1
     final_envelope = _geometry(final_envelope_geojson)
     assert not _has_holes(final_envelope)
     assert final_cumulative.difference(final_envelope).area <= 1e-14
+    milestone_dir = settings.temporal_projects_dir / project.project_id / "milestones" / "WB_2026_R01"
+    assert not (milestone_dir / "cumulative_union.geojson").exists()
+    assert not (milestone_dir / "cumulative_growth_envelope.geojson").exists()
 
 
 def test_publish_completed_tiled_request_uses_temporal_project_artifact_schema(monkeypatch, tmp_path) -> None:
@@ -372,6 +402,55 @@ def test_temporal_project_metric_audit_reads_published_artifacts(monkeypatch, tm
     assert result["layers"]["additions"]["feature_count"] == 1
     assert result["layers"]["additions"]["geometry_area_m2"] > 0
     assert result["ui_added_area_m2"] >= 0
+
+
+def test_published_additions_restore_stale_scalar_metrics_without_exposing_internal_artifacts(monkeypatch, tmp_path) -> None:
+    settings = Settings(runtime_cache_dir=tmp_path)
+    monkeypatch.setattr("src.services.temporal_projects.list_releases", lambda _: _sample_releases(settings))
+    project = _sample_project("metric-repair")
+    project.milestones = [
+        TemporalMilestone(release_identifier="WB_2024_R01"),
+        TemporalMilestone(release_identifier="WB_2025_R01"),
+    ]
+    additions_geojson = _feature_collection(
+        [[(-6.9998, 33.0002), (-6.9992, 33.0002), (-6.9992, 33.0008), (-6.9998, 33.0008)]]
+    )
+    project.milestones[1].additions_geojson = additions_geojson
+    project.milestones[1].cumulative_union_geojson = additions_geojson
+
+    saved = save_temporal_project(project, settings)
+    project_json = settings.temporal_projects_dir / saved.project_id / "project.json"
+    stored_payload = json.loads(project_json.read_text(encoding="utf-8"))
+    target_payload = stored_payload["milestones"][1]
+    assert target_payload["additions_geojson"] is None
+    assert target_payload["metrics"]["added_area_m2"] > 0
+    resaved = save_temporal_project(get_temporal_project(saved.project_id, settings), settings)
+    resaved_target = resaved.milestones[1]
+    assert resaved_target.metrics is not None
+    assert resaved_target.metrics.added_area_m2 > 0
+    assert resaved_target.metrics.additions_feature_count == 1
+    stored_payload = json.loads(project_json.read_text(encoding="utf-8"))
+    target_payload = stored_payload["milestones"][1]
+    target_payload["metrics"]["added_area_m2"] = 0.0
+    target_payload["metrics"]["additions_feature_count"] = 0
+    project_json.write_text(json.dumps(stored_payload), encoding="utf-8")
+
+    response_payload = load_temporal_project_response_payload(saved.project_id, settings)
+    repaired_target = response_payload["milestones"][1]
+
+    assert repaired_target["metrics"]["added_area_m2"] > 0
+    assert repaired_target["metrics"]["additions_feature_count"] == 1
+    assert repaired_target["additions_geojson"] is None
+    assert {artifact["key"] for artifact in repaired_target["artifacts"]} <= {
+        "automated_building_blocks",
+        "additions",
+        "building_change_buffer_10m",
+        "building_change_buffer_15m",
+        "building_change_buffer_20m",
+        "cumulative_building_change_buffer_10m",
+        "cumulative_building_change_buffer_15m",
+        "cumulative_building_change_buffer_20m",
+    }
 
 
 def test_temporal_project_metadata_bloat_audit_externalizes_feature_collections(monkeypatch, tmp_path) -> None:
@@ -505,24 +584,27 @@ def test_run_temporal_project_only_executes_appended_milestone(monkeypatch, tmp_
     assert second_run.project.milestones[2].pair_request_hash is not None
 
 
-def test_mapbox_latest_source_adds_synthetic_latest_milestone(monkeypatch, tmp_path) -> None:
-    settings = Settings(
-        runtime_cache_dir=tmp_path,
-        mapbox_current_imagery_enabled=True,
-        mapbox_access_token="test-token",
-    )
+def test_temporal_project_rejects_removed_latest_source() -> None:
+    payload = _sample_project().model_dump(mode="json")
+    payload["latest_source"] = "mapbox_current"
+
+    with pytest.raises(ValidationError, match="latest_source"):
+        TemporalProject.model_validate(payload)
+
+
+def test_temporal_project_keeps_only_selected_wayback_milestones(monkeypatch, tmp_path) -> None:
+    settings = Settings(runtime_cache_dir=tmp_path)
     releases = _sample_releases(settings)
     monkeypatch.setattr("src.services.temporal_projects.list_releases", lambda _: releases)
     project = save_temporal_project(
         TemporalProject(
-            project_id="mapbox-latest",
-            name="Mapbox Latest",
+            project_id="selected-wayback-only",
+            name="Selected Wayback Only",
             aoi_geojson=_sample_project().aoi_geojson,
             milestones=[
                 {"release_identifier": "WB_2025_R01"},
                 {"release_identifier": "WB_2026_R01"},
             ],
-            latest_source="mapbox_current",
             created_at="2026-04-20T00:00:00Z",
             updated_at="2026-04-20T00:00:00Z",
         ),
@@ -532,9 +614,8 @@ def test_mapbox_latest_source_adds_synthetic_latest_milestone(monkeypatch, tmp_p
     assert [milestone.release_identifier for milestone in project.milestones] == [
         "WB_2025_R01",
         "WB_2026_R01",
-        "mapbox.satellite",
     ]
-    assert project.milestones[-1].release_date == "current_basemap"
+    assert project.milestones[-1].release_date == "2026-01-01"
 
     validation = validate_temporal_project(
         project,
@@ -545,39 +626,31 @@ def test_mapbox_latest_source_adds_synthetic_latest_milestone(monkeypatch, tmp_p
     )
 
     assert validation.valid is True
-    assert [estimate.to_release_identifier for estimate in validation.pair_estimates] == [
-        "WB_2026_R01",
-        "mapbox.satellite",
-    ]
+    assert [estimate.to_release_identifier for estimate in validation.pair_estimates] == ["WB_2026_R01"]
 
 
-def test_mapbox_latest_source_runs_after_latest_wayback_milestone(monkeypatch, tmp_path) -> None:
-    settings = Settings(
-        runtime_cache_dir=tmp_path,
-        mapbox_current_imagery_enabled=True,
-        mapbox_access_token="test-token",
-    )
+def test_temporal_project_runs_selected_wayback_pairs_only(monkeypatch, tmp_path) -> None:
+    settings = Settings(runtime_cache_dir=tmp_path)
     releases = _sample_releases(settings)
     monkeypatch.setattr("src.services.temporal_projects.list_releases", lambda _: releases)
     project = save_temporal_project(
         TemporalProject(
-            project_id="mapbox-run",
-            name="Mapbox Run",
+            project_id="selected-wayback-run",
+            name="Selected Wayback Run",
             aoi_geojson=_sample_project().aoi_geojson,
             milestones=[
                 {"release_identifier": "WB_2025_R01"},
                 {"release_identifier": "WB_2026_R01"},
             ],
-            latest_source="mapbox_current",
             created_at="2026-04-20T00:00:00Z",
             updated_at="2026-04-20T00:00:00Z",
         ),
         settings,
     )
-    executed_pairs: list[tuple[str, str, str]] = []
+    executed_pairs: list[tuple[str, str]] = []
 
     def _pair_runner(request):
-        executed_pairs.append((request.t1_release, request.t2_release, request.latest_source))
+        executed_pairs.append((request.t1_release, request.t2_release))
         response = _bandon_pair_response(
             settings,
             request,
@@ -597,13 +670,113 @@ def test_mapbox_latest_source_runs_after_latest_wayback_milestone(monkeypatch, t
     )
 
     assert response.success is True
-    assert executed_pairs == [
-        ("WB_2025_R01", "WB_2026_R01", "esri_wayback"),
-        ("WB_2026_R01", "WB_2026_R01", "mapbox_current"),
-    ]
-    assert response.project.milestones[-1].release_identifier == "mapbox.satellite"
+    assert executed_pairs == [("WB_2025_R01", "WB_2026_R01")]
+    assert response.project.milestones[-1].release_identifier == "WB_2026_R01"
     assert response.project.milestones[-1].status == "complete"
     assert response.project.milestones[-1].pair_request_hash is not None
+
+
+def test_temporal_rerun_reuses_semantic_only_change_but_reruns_change_threshold(monkeypatch, tmp_path) -> None:
+    settings = Settings(runtime_cache_dir=tmp_path, change_threshold=0.35, semantic_threshold=0.05)
+    releases = _sample_releases(settings)
+    monkeypatch.setattr("src.services.temporal_projects.list_releases", lambda _: releases)
+    project = save_temporal_project(
+        TemporalProject(
+            project_id="threshold-rerun",
+            name="Threshold Rerun",
+            aoi_geojson=_sample_project().aoi_geojson,
+            milestones=[
+                {"release_identifier": "WB_2025_R01"},
+                {"release_identifier": "WB_2026_R01"},
+            ],
+            created_at="2026-04-20T00:00:00Z",
+            updated_at="2026-04-20T00:00:00Z",
+        ),
+        settings,
+    )
+    active_settings = settings
+    executed_hashes: list[str] = []
+
+    def _pair_runner(request):
+        response = _bandon_pair_response(
+            active_settings,
+            request,
+            releases=releases,
+            geojson=_feature_collection(
+                [[(-6.9998, 33.0002), (-6.9994, 33.0002), (-6.9994, 33.0006), (-6.9998, 33.0006)]]
+            ),
+        )
+        assert response.summary is not None
+        executed_hashes.append(response.summary.request_hash)
+        save_cached_response(active_settings, response.summary.request_hash, response)
+        return response
+
+    first = run_temporal_project(
+        project.project_id,
+        settings=settings,
+        pair_runner=_pair_runner,
+        execution_config=_bandon_config(),
+    )
+    assert first.success is True
+    first_hash = executed_hashes[-1]
+
+    active_settings = settings.model_copy(update={"semantic_threshold": 0.95})
+    executed_hashes.clear()
+    semantic_only = run_temporal_project(project.project_id, settings=active_settings, pair_runner=_pair_runner)
+    assert semantic_only.success is True
+    assert executed_hashes == []
+
+    active_settings = settings.model_copy(update={"change_threshold": 0.95, "semantic_threshold": 0.95})
+    change_threshold = run_temporal_project(project.project_id, settings=active_settings, pair_runner=_pair_runner)
+    assert change_threshold.success is True
+    assert executed_hashes
+    assert executed_hashes[-1] != first_hash
+    assert change_threshold.project.milestones[-1].pair_request_hash == executed_hashes[-1]
+
+
+def test_temporal_run_request_threshold_reaches_pair_runner_and_changes_cache_key(monkeypatch, tmp_path) -> None:
+    settings = Settings(runtime_cache_dir=tmp_path, change_threshold=0.35)
+    releases = _sample_releases(settings)
+    monkeypatch.setattr("src.services.temporal_projects.list_releases", lambda _: releases)
+    project = save_temporal_project(
+        TemporalProject(
+            project_id="request-threshold-rerun",
+            name="Request Threshold Rerun",
+            aoi_geojson=_sample_project().aoi_geojson,
+            milestones=[
+                {"release_identifier": "WB_2025_R01"},
+                {"release_identifier": "WB_2026_R01"},
+            ],
+            created_at="2026-04-20T00:00:00Z",
+            updated_at="2026-04-20T00:00:00Z",
+        ),
+        settings,
+    )
+    seen_thresholds: list[float | None] = []
+    planned_hashes: list[str] = []
+
+    def _pair_runner(request):
+        response = _bandon_pair_response(settings, request, releases=releases, geojson=_feature_collection([]))
+        assert response.summary is not None
+        seen_thresholds.append(request.change_threshold)
+        return response
+
+    for threshold in (0.35, 0.6):
+        context = resolve_backend(_bandon_config(), settings=settings).request_hash_context(settings)
+        context.update(change_threshold=threshold, threshold_source="request_override")
+        response = run_temporal_project(
+            project.project_id,
+            settings=settings.model_copy(update={"change_threshold": threshold}),
+            pair_runner=_pair_runner,
+            request_hash_context=context,
+            execution_config=_bandon_config(),
+        )
+        assert response.success is True
+        assert response.project.milestones[-1].pair_request_hash is not None
+        planned_hashes.append(response.project.milestones[-1].pair_request_hash)
+
+    assert seen_thresholds == [0.35, 0.6]
+    assert planned_hashes[0] != planned_hashes[1]
 
 
 def test_run_temporal_project_reruns_only_dirty_prefix_boundary(monkeypatch, tmp_path) -> None:
@@ -1007,13 +1180,16 @@ def test_four_milestone_run_keeps_a_single_saved_temporal_project_entry(monkeypa
     response = run_temporal_project(project.project_id, settings=settings, pair_runner=_pair_runner)
 
     assert response.success is True
-    final_cumulative_geojson = _published_milestone_geojson(settings, project.project_id, "WB_2026_R01", "cumulative_union.geojson")
-    final_convex_hull_geojson = _published_milestone_geojson(settings, project.project_id, "WB_2026_R01", "cumulative_convex_hull.geojson")
+    final_cumulative_geojson = response.project.milestones[-1].cumulative_union_geojson
+    final_convex_hull_geojson = response.project.milestones[-1].cumulative_convex_hull_geojson
     final_cumulative = _geometry(final_cumulative_geojson)
     final_convex_hull = _geometry(final_convex_hull_geojson)
     assert final_convex_hull.geom_type == "Polygon"
     assert not _has_holes(final_convex_hull)
     assert final_cumulative.difference(final_convex_hull).area <= 1e-14
+    milestone_dir = settings.temporal_projects_dir / project.project_id / "milestones" / "WB_2026_R01"
+    assert not (milestone_dir / "cumulative_union.geojson").exists()
+    assert not (milestone_dir / "cumulative_convex_hull.geojson").exists()
     summaries = list_temporal_projects(settings)
     assert [summary.project_id for summary in summaries] == ["temporal-hay-hassani"]
     assert summaries[0].display_name == "Temporal mosaic · Hay Hassani"
@@ -1059,12 +1235,7 @@ def test_import_temporal_override_recomputes_downstream_milestones(monkeypatch, 
     assert first_run.success is True
     before_override_total = first_run.project.milestones[2].metrics.total_area_m2
     before_override_block_count = first_run.project.milestones[2].metrics.cumulative_block_count
-    before_override_blocks = _published_milestone_geojson(
-        settings,
-        project.project_id,
-        "WB_2026_R01",
-        "cumulative_growth_blocks.geojson",
-    )
+    before_override_blocks = first_run.project.milestones[2].cumulative_growth_blocks_geojson
 
     override_response = import_temporal_override(
         TemporalOverrideRequest(
@@ -1082,18 +1253,12 @@ def test_import_temporal_override_recomputes_downstream_milestones(monkeypatch, 
     assert override_response.project.milestones[2].metrics is not None
     assert override_response.project.milestones[2].metrics.total_area_m2 > before_override_total
     assert override_response.project.milestones[2].metrics.cumulative_block_count < before_override_block_count
-    after_override_blocks = _published_milestone_geojson(
-        settings,
-        project.project_id,
-        "WB_2026_R01",
-        "cumulative_growth_blocks.geojson",
-    )
+    after_override_blocks = override_response.project.milestones[2].cumulative_growth_blocks_geojson
     assert after_override_blocks != before_override_blocks
 
     reloaded = get_temporal_project(project.project_id, settings)
-    reloaded_override = next(
-        artifact for artifact in reloaded.milestones[1].artifacts if artifact.key == "manual_override"
-    )
-    assert reloaded_override.path is not None
-    override_payload = _published_milestone_geojson(settings, project.project_id, "WB_2025_R01", "manual_override.geojson")
+    assert all(artifact.key != "manual_override" for artifact in reloaded.milestones[1].artifacts)
+    override_payload = reloaded.milestones[1].manual_override_geojson
     assert len(override_payload["features"]) == 1
+    milestone_dir = settings.temporal_projects_dir / project.project_id / "milestones" / "WB_2026_R01"
+    assert not (milestone_dir / "cumulative_growth_blocks.geojson").exists()

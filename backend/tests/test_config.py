@@ -12,6 +12,8 @@ def test_settings_exposes_mapbox_max_tiles_per_request_default(tmp_path: Path) -
 
     assert settings.mapbox_max_tiles_per_request == 1024
     assert settings.mapbox_current_imagery_max_tiles == 1024
+    assert settings.mapbox_current_imagery_default_zoom == 18
+    assert settings.mapbox_current_imagery_max_zoom == 18
 
 
 def test_settings_rejects_non_positive_mapbox_max_tiles_per_request(tmp_path: Path) -> None:
@@ -63,50 +65,73 @@ def test_get_settings_falls_back_to_legacy_mapbox_tile_limit_env(monkeypatch: py
     assert settings.mapbox_current_imagery_max_tiles == 256
 
 
-def test_settings_accepts_bandon_inference_backend_without_s2looking_checkpoint(tmp_path: Path) -> None:
+def test_settings_accepts_bandon_as_the_only_inference_backend(tmp_path: Path) -> None:
     settings = Settings(runtime_cache_dir=tmp_path / "runtime", inference_backend="bandon_mps")
 
     assert settings.inference_backend == "bandon_mps"
-    assert settings.s2looking_checkpoint_path is None
+
+
+def test_settings_rejects_bandon_backend_with_missing_selected_checkpoint(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="APP_BANDON_CHECKPOINT_PATH.*APP_INFERENCE_BACKEND=bandon_mps"):
+        Settings(
+            runtime_cache_dir=tmp_path / "runtime",
+            inference_backend="bandon_mps",
+            bandon_checkpoint_path=tmp_path / "missing-bandon.pth",
+        )
 
 
 def test_settings_rejects_invalid_inference_backend(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="APP_INFERENCE_BACKEND"):
+    with pytest.raises(ValueError, match="Unsupported inference backend: unsupported. Supported backends: bandon_mps"):
         Settings(runtime_cache_dir=tmp_path / "runtime", inference_backend="unsupported")
 
 
-def test_settings_rejects_s2looking_backend_without_checkpoint(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="APP_S2LOOKING_CHECKPOINT_PATH is required"):
+def test_settings_rejects_removed_legacy_inference_backend(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="Unsupported inference backend: mtgcdnet_s2looking_mps. Supported backends: bandon_mps"):
         Settings(runtime_cache_dir=tmp_path / "runtime", inference_backend="mtgcdnet_s2looking_mps")
 
 
-def test_settings_accepts_s2looking_backend_with_checkpoint(tmp_path: Path) -> None:
-    checkpoint = tmp_path / "mtgcdnet_s2looking_fp_finetuned_best.pth"
-    checkpoint.write_bytes(b"checkpoint")
-
-    settings = Settings(
-        runtime_cache_dir=tmp_path / "runtime",
-        inference_backend="mtgcdnet_s2looking_mps",
-        s2looking_checkpoint_path=checkpoint,
-        s2looking_change_threshold=0.5,
-    )
-
-    assert settings.inference_backend == "mtgcdnet_s2looking_mps"
-    assert settings.s2looking_checkpoint_path == checkpoint.resolve()
-    assert settings.s2looking_change_threshold == 0.5
-
-
-def test_get_settings_reads_s2looking_backend_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_get_settings_ignores_removed_s2looking_checkpoint_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     get_settings.cache_clear()
-    checkpoint = tmp_path / "mtgcdnet_s2looking_fp_finetuned_best.pth"
-    checkpoint.write_bytes(b"checkpoint")
+    checkpoint = tmp_path / "bandon.pth"
+    checkpoint.write_bytes(b"bandon")
     monkeypatch.setenv("APP_RUNTIME_CACHE_DIR", str(tmp_path / "runtime"))
-    monkeypatch.setenv("APP_INFERENCE_BACKEND", "mtgcdnet_s2looking_mps")
-    monkeypatch.setenv("APP_S2LOOKING_CHECKPOINT_PATH", str(checkpoint))
-    monkeypatch.setenv("APP_S2LOOKING_CHANGE_THRESHOLD", "0.50")
+    monkeypatch.setenv("APP_BANDON_CHECKPOINT_PATH", str(checkpoint))
+    monkeypatch.setenv("APP_S2LOOKING_CHECKPOINT_PATH", str(tmp_path / "removed.pth"))
 
     settings = get_settings()
 
-    assert settings.inference_backend == "mtgcdnet_s2looking_mps"
-    assert settings.s2looking_checkpoint_path == checkpoint.resolve()
-    assert settings.s2looking_change_threshold == 0.5
+    assert settings.inference_backend == "bandon_mps"
+    assert settings.bandon_checkpoint_path == checkpoint.resolve()
+    assert not hasattr(settings, "s2looking_checkpoint_path")
+
+
+def test_get_settings_reads_canonical_threshold_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    get_settings.cache_clear()
+    monkeypatch.setenv("APP_RUNTIME_CACHE_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setenv("APP_CHANGE_THRESHOLD", "0.37")
+    monkeypatch.setenv("APP_SEMANTIC_THRESHOLD", "0.42")
+
+    settings = get_settings()
+
+    assert settings.change_threshold == 0.37
+    assert settings.semantic_threshold == 0.42
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("change_threshold", 1.01, "APP_CHANGE_THRESHOLD"),
+        ("semantic_threshold", -0.01, "APP_SEMANTIC_THRESHOLD"),
+    ],
+)
+def test_settings_rejects_invalid_canonical_thresholds(
+    tmp_path: Path,
+    field: str,
+    value: float,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        Settings(runtime_cache_dir=tmp_path / "runtime", **{field: value})

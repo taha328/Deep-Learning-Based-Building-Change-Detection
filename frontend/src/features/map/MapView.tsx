@@ -35,6 +35,20 @@ import {
   shouldSkipReferenceRegistration,
   stableHash,
 } from "@/features/map/temporal-map-performance";
+import {
+  AOI_DRAW_CLOSE_TARGET_RADIUS,
+  AOI_DRAW_PREVIEW_FILL_OPACITY,
+  AOI_DRAW_STROKE_COLOR,
+  AOI_DRAW_STROKE_WIDTH,
+  AOI_DRAW_VERTEX_FILL,
+  AOI_DRAW_VERTEX_RADIUS,
+  drawingHelperMessage,
+  drawingKeyboardAction,
+  drawingPreviewFeatureCollection,
+  isNearFirstVertex,
+  resolveDrawingClick,
+  shouldShowProjectAoiOverlay,
+} from "@/features/map/map-drawing";
 import type {
   TemporalAddedOverlayPresentation,
   TemporalLayerControlsPresentation,
@@ -388,25 +402,6 @@ function polygonFeatureCollection(polygon: Polygon | null): FeatureCollection {
       },
     ],
   };
-}
-
-function draftFeatureCollection(vertices: [number, number][]): FeatureCollection {
-  if (vertices.length < 2) {
-    return EMPTY_FEATURE_COLLECTION;
-  }
-  return {
-    type: "FeatureCollection",
-    features: [
-      {
-        type: "Feature",
-        geometry: {
-          type: vertices.length >= 3 ? "Polygon" : "LineString",
-          coordinates: vertices.length >= 3 ? [[...vertices, vertices[0]]] : vertices,
-        },
-        properties: {},
-      },
-    ],
-  } as FeatureCollection;
 }
 
 function mergeBuffers(layers: Record<string, Record<string, unknown>>): FeatureCollection {
@@ -817,52 +812,10 @@ const TEMPORAL_ADDED_LAYER_DEFINITIONS: TemporalAddedLayerDefinition[] = [
     data: (overlay) => ensureFeatureCollection(overlay.cumulativeBuffer20m),
   },
   {
-    kind: "automated",
-    toggleKey: "temporalAutomated",
-    paint: { "fill-color": "#1d4ed8", "fill-opacity": 0.9 },
-    data: (overlay) => ensureFeatureCollection(overlay.automatedCandidate),
-  },
-  {
     kind: "automatedBuildingBlocks",
     toggleKey: "temporalAutomatedBuildingBlocks",
     paint: { "fill-color": "#2563eb", "fill-opacity": 0.9 },
     data: (overlay) => ensureFeatureCollection(overlay.automatedBuildingBlocks),
-  },
-  {
-    kind: "effectiveBuildingBlocks",
-    toggleKey: "temporalEffectiveBuildingBlocks",
-    paint: { "fill-color": "#eab308", "fill-opacity": 0.9 },
-    data: (overlay) => ensureFeatureCollection(overlay.effectiveBuildingBlocks),
-  },
-  {
-    kind: "convexHull",
-    toggleKey: "temporalConvexHull",
-    paint: { "fill-color": "#f59e0b", "fill-opacity": 0.45, "fill-outline-color": "#b45309" },
-    data: (overlay) => ensureFeatureCollection(overlay.cumulativeConvexHull),
-  },
-  {
-    kind: "cumulative",
-    toggleKey: "temporalCumulative",
-    paint: { "fill-color": "#dc2626", "fill-opacity": 0.9 },
-    data: (overlay) => ensureFeatureCollection(overlay.cumulativeUnion),
-  },
-  {
-    kind: "cumulativeGrowthBlocks",
-    toggleKey: "temporalCumulativeGrowthBlocks",
-    paint: { "fill-color": "#2563eb", "fill-opacity": 0.9 },
-    data: (overlay) => ensureFeatureCollection(overlay.cumulativeGrowthBlocks),
-  },
-  {
-    kind: "cumulativeGrowthEnvelope",
-    toggleKey: "temporalCumulativeGrowthEnvelope",
-    paint: { "fill-color": "#1d4ed8", "fill-opacity": 0.9 },
-    data: (overlay) => ensureFeatureCollection(overlay.cumulativeGrowthEnvelope),
-  },
-  {
-    kind: "manualOverride",
-    toggleKey: "temporalManualOverride",
-    paint: { "fill-color": "#dc2626", "fill-opacity": 0.9 },
-    data: (overlay) => ensureFeatureCollection(overlay.manualOverride),
   },
 ];
 
@@ -886,25 +839,25 @@ function temporalAddedArtifactKey(kind: TemporalAddedLayerKind): string {
     case "buffer20m":
       return "building_change_buffer_20m";
     case "cumulativeBuffer10m":
-      return "building_change_buffer_10m";
+      return "cumulative_building_change_buffer_10m";
     case "cumulativeBuffer15m":
-      return "building_change_buffer_15m";
+      return "cumulative_building_change_buffer_15m";
     case "cumulativeBuffer20m":
-      return "building_change_buffer_20m";
+      return "cumulative_building_change_buffer_20m";
     case "automated":
-      return "automated_candidate_footprint";
+      return "additions";
     case "automatedBuildingBlocks":
       return "automated_building_blocks";
     case "effectiveBuildingBlocks":
-      return "effective_building_blocks";
+      return "additions";
     case "convexHull":
-      return "cumulative_convex_hull";
+      return "additions";
     case "cumulative":
-      return "cumulative_union";
+      return "additions";
     case "cumulativeGrowthBlocks":
-      return "cumulative_growth_blocks";
+      return "additions";
     case "cumulativeGrowthEnvelope":
-      return "cumulative_growth_envelope";
+      return "additions";
     case "manualOverride":
       return "manual_override";
   }
@@ -3017,6 +2970,21 @@ function moveLayerBeforeIfNeeded(map: MapLibreMap, layerId: string, beforeLayerI
   return true;
 }
 
+function moveDrawingLayersToTop(map: MapLibreMap) {
+  [
+    "aoi-fill",
+    "aoi-line",
+    "export-perimeter-fill",
+    "export-perimeter-line",
+    "aoi-draft-fill",
+    "aoi-draft-line",
+    "rectangle-preview-fill",
+    "rectangle-preview-line",
+    "drawing-vertices-circle",
+    "rectangle-vertices-line",
+  ].forEach((layerId) => moveLayerToTopIfNeeded(map, layerId));
+}
+
 function setLayerVisibility(map: MapLibreMap, layerId: string, visible: boolean): boolean {
   if (!map.getLayer(layerId)) {
     return false;
@@ -3237,9 +3205,28 @@ function ensureFillLayer(
   });
 }
 
+function ensureCircleLayer(
+  map: MapLibreMap,
+  layerId: string,
+  sourceId: string,
+  paint: maplibregl.CircleLayerSpecification["paint"],
+) {
+  if (map.getLayer(layerId)) {
+    return;
+  }
+  map.addLayer({
+    id: layerId,
+    type: "circle",
+    source: sourceId,
+    paint,
+  });
+}
+
 function ensureOperationalLayers(map: MapLibreMap) {
   ensureGeoJsonSource(map, "aoi");
+  ensureGeoJsonSource(map, "export-perimeter");
   ensureGeoJsonSource(map, "aoi-draft");
+  ensureGeoJsonSource(map, "drawing-vertices");
   ensureGeoJsonSource(map, "rectangle-preview");
   ensureGeoJsonSource(map, "rectangle-vertices");
   ensureGeoJsonSource(map, "detected-polygons");
@@ -3261,12 +3248,23 @@ function ensureOperationalLayers(map: MapLibreMap) {
   ensureGeoJsonSource(map, "temporal-cumulative-growth-envelope");
   ensureGeoJsonSource(map, "temporal-manual-override");
 
-  ensureFillLayer(map, "aoi-fill", "aoi", { "fill-color": "#fbbf24", "fill-opacity": 0.15 });
-  ensureLineLayer(map, "aoi-line", "aoi", { "line-color": "#fbbf24", "line-width": 2.5 });
+  ensureFillLayer(map, "aoi-fill", "aoi", { "fill-color": AOI_DRAW_STROKE_COLOR, "fill-opacity": 0.22 });
+  ensureLineLayer(map, "aoi-line", "aoi", { "line-color": AOI_DRAW_STROKE_COLOR, "line-width": AOI_DRAW_STROKE_WIDTH });
+  ensureFillLayer(map, "export-perimeter-fill", "export-perimeter", { "fill-color": AOI_DRAW_STROKE_COLOR, "fill-opacity": 0.22 });
+  ensureLineLayer(map, "export-perimeter-line", "export-perimeter", { "line-color": AOI_DRAW_STROKE_COLOR, "line-width": AOI_DRAW_STROKE_WIDTH });
+  ensureFillLayer(map, "aoi-draft-fill", "aoi-draft", {
+    "fill-color": AOI_DRAW_STROKE_COLOR,
+    "fill-opacity": AOI_DRAW_PREVIEW_FILL_OPACITY,
+  });
   ensureLineLayer(map, "aoi-draft-line", "aoi-draft", {
-    "line-color": "#fbbf24",
-    "line-width": 2.25,
-    "line-dasharray": [3, 2],
+    "line-color": AOI_DRAW_STROKE_COLOR,
+    "line-width": AOI_DRAW_STROKE_WIDTH,
+  });
+  ensureCircleLayer(map, "drawing-vertices-circle", "drawing-vertices", {
+    "circle-color": ["case", ["boolean", ["get", "closeTarget"], false], AOI_DRAW_STROKE_COLOR, AOI_DRAW_VERTEX_FILL],
+    "circle-radius": ["case", ["boolean", ["get", "closeTarget"], false], AOI_DRAW_CLOSE_TARGET_RADIUS, AOI_DRAW_VERTEX_RADIUS],
+    "circle-stroke-color": AOI_DRAW_STROKE_COLOR,
+    "circle-stroke-width": 2,
   });
   ensureFillLayer(map, "rectangle-preview-fill", "rectangle-preview", {
     "fill-color": "#fbbf24",
@@ -3400,6 +3398,7 @@ function syncMapPresentation(
   map: MapLibreMap,
   params: {
     aoi: Polygon | null;
+    exportGeometry: Polygon | null;
     draftVertices: [number, number][];
     detectedPolygons: FeatureCollection;
     buildingBlocks: FeatureCollection;
@@ -3421,9 +3420,7 @@ function syncMapPresentation(
   ensureOperationalLayers(map);
 
   sourceData(map, "aoi", polygonFeatureCollection(params.aoi));
-  sourceData(map, "aoi-draft", draftFeatureCollection(params.draftVertices));
-  sourceData(map, "rectangle-preview", EMPTY_FEATURE_COLLECTION);
-  sourceData(map, "rectangle-vertices", EMPTY_FEATURE_COLLECTION);
+  sourceData(map, "export-perimeter", polygonFeatureCollection(params.exportGeometry));
   sourceData(map, "detected-polygons", params.detectedPolygons);
   sourceData(map, "building-blocks", params.buildingBlocks);
   sourceData(map, "buffer-layers", params.bufferLayers);
@@ -3512,6 +3509,7 @@ function syncMapPresentation(
   setLayerVisibility(map, "temporal-cumulative-growth-blocks-fill", false);
   setLayerVisibility(map, "temporal-cumulative-growth-envelope-fill", false);
   setLayerVisibility(map, "temporal-manual-override-fill", false);
+  moveDrawingLayersToTop(map);
 }
 
 function applyLayerVisibilityState(map: MapLibreMap, layerState: LayerToggleState, workflowMode: WorkflowMode = "pairwise") {
@@ -3751,6 +3749,9 @@ export function MapView({
   const [highlightedResultIndex, setHighlightedResultIndex] = useState(-1);
   const [drawingInstruction, setDrawingInstruction] = useState<string | null>(null);
   const [liveRectanglePreview, setLiveRectanglePreview] = useState<[number, number] | null>(null);
+  const [drawingPointer, setDrawingPointer] = useState<[number, number] | null>(null);
+  const [drawingCursorCoordinate, setDrawingCursorCoordinate] = useState<[number, number] | null>(null);
+  const [firstVertexCloseTarget, setFirstVertexCloseTarget] = useState(false);
   const [temporalReferenceLoading, setTemporalReferenceLoading] = useState(false);
   const [referenceLayerData, setReferenceLayerData] = useState<ReferenceLayerGeoJsonData>({});
   const temporalReferenceLayerIdsRef = useRef<Set<string>>(new Set());
@@ -3789,6 +3790,7 @@ export function MapView({
   const pendingTemporalReferenceReadyCleanupRef = useRef<(() => void) | null>(null);
   const latestPresentationRef = useRef<{
     aoi: Polygon | null;
+    exportGeometry: Polygon | null;
     draftVertices: [number, number][];
     detectedPolygons: FeatureCollection;
     buildingBlocks: FeatureCollection;
@@ -3804,13 +3806,16 @@ export function MapView({
   } | null>(null);
 
   const aoi = useAppStore((state) => state.aoi);
+  const exportGeometry = useAppStore((state) => state.exportGeometry);
   const draftVertices = useAppStore((state) => state.draftVertices);
   const mapFocusRequestId = useAppStore((state) => state.mapFocusRequestId);
   const referenceLayerFocus = useAppStore((state) => state.referenceLayerFocus);
   const drawingMode = useAppStore((state) => state.drawingMode);
-  const appendDraftVertex = useAppStore((state) => state.appendDraftVertex);
+  const drawingSubMode = useAppStore((state) => state.drawingSubMode);
+  const isRunning = useAppStore((state) => state.isRunning);
   const setDraftVertices = useAppStore((state) => state.setDraftVertices);
   const finishDrawing = useAppStore((state) => state.finishDrawing);
+  const completeDrawing = useAppStore((state) => state.completeDrawing);
   const stopDrawing = useAppStore((state) => state.stopDrawing);
   const updateDraftVertex = useAppStore((state) => state.updateDraftVertex);
   const result = useAppStore((state) => state.result);
@@ -3849,6 +3854,13 @@ export function MapView({
   const hasPairwiseLayerContext = workflowMode === "pairwise" && Boolean(result?.success);
   const hasTemporalMosaicLayerContext =
     workflowMode === "temporal" && Boolean(temporalPresentation) && (temporalPresentation?.milestoneCount ?? 0) >= 2;
+  const projectAoiOverlayVisible = shouldShowProjectAoiOverlay({
+    drawingMode,
+    isRunning,
+    workflowMode,
+    pairwiseResultComplete: Boolean(result?.success),
+    temporalOverlayVisible: temporalPresentation?.projectAoiOverlayVisible ?? true,
+  });
 
   const detectedPolygons = useMemo(
     () =>
@@ -5865,47 +5877,24 @@ export function MapView({
       return;
     }
 
-    const drawingSubMode = useAppStore.getState().drawingSubMode;
-
     const onClick = (event: maplibregl.MapMouseEvent) => {
       if (drawingMode !== "drawing") {
         return;
       }
 
       const vertex: [number, number] = [event.lngLat.lng, event.lngLat.lat];
-
-      if (drawingSubMode === "rectangle") {
-        if (draftVertices.length === 0) {
-          // First corner placed
-          appendDraftVertex(vertex);
-          setDrawingInstruction(t("draw.click_to_finish"));
-        } else if (draftVertices.length === 1) {
-          // Second corner placed - complete rectangle
-          const [lng1, lat1] = draftVertices[0];
-          const [lng2, lat2] = vertex;
-
-          const minLng = Math.min(lng1, lng2);
-          const maxLng = Math.max(lng1, lng2);
-          const minLat = Math.min(lat1, lat2);
-          const maxLat = Math.max(lat1, lat2);
-
-          const rectangleVertices: [number, number][] = [
-            [minLng, minLat],
-            [maxLng, minLat],
-            [maxLng, maxLat],
-            [minLng, maxLat],
-          ];
-
-          setDraftVertices(rectangleVertices);
-          setDrawingInstruction(null);
-          // Automatically finish rectangle drawing
-          setTimeout(() => {
-            finishDrawing();
-          }, 0);
-        }
+      const firstPoint = draftVertices[0] ? map.project(draftVertices[0]) : null;
+      const nearFirst =
+        drawingSubMode === "polygon" &&
+        draftVertices.length >= 3 &&
+        firstPoint !== null &&
+        isNearFirstVertex([event.point.x, event.point.y], [firstPoint.x, firstPoint.y]);
+      const result = resolveDrawingClick(drawingSubMode, draftVertices, vertex, nearFirst);
+      if (result.complete) {
+        setDrawingInstruction("Zone enregistrée");
+        completeDrawing(result.vertices);
       } else {
-        // Polygon mode: add vertex on click
-        appendDraftVertex(vertex);
+        setDraftVertices(result.vertices);
       }
     };
 
@@ -5921,11 +5910,17 @@ export function MapView({
     const onMouseMove = (event: maplibregl.MapMouseEvent) => {
       if (drawingMode !== "drawing") {
         map.getCanvas().style.cursor = "";
+        setDrawingPointer(null);
+        setDrawingCursorCoordinate(null);
+        setFirstVertexCloseTarget(false);
         return;
       }
 
       const state = useAppStore.getState();
       const subMode = state.drawingSubMode;
+      setDrawingPointer([event.point.x, event.point.y]);
+      setDrawingCursorCoordinate([event.lngLat.lng, event.lngLat.lat]);
+      let closeTarget = false;
 
       if (subMode === "rectangle") {
         // Show crosshair cursor for drawing
@@ -5933,7 +5928,6 @@ export function MapView({
 
         if (state.draftVertices.length === 0) {
           // Before first click
-          setDrawingInstruction(t("draw.click_first_vertex"));
           setLiveRectanglePreview(null);
         } else if (state.draftVertices.length === 1) {
           // After first click - show live preview
@@ -5943,27 +5937,70 @@ export function MapView({
           setLiveRectanglePreview([lng2, lat2]);
         }
       } else {
-        // Polygon mode cursor
         map.getCanvas().style.cursor = "crosshair";
+        const firstPoint = state.draftVertices[0] ? map.project(state.draftVertices[0]) : null;
+        closeTarget =
+          state.draftVertices.length >= 3 &&
+          firstPoint !== null &&
+          isNearFirstVertex([event.point.x, event.point.y], [firstPoint.x, firstPoint.y]);
+        setFirstVertexCloseTarget(closeTarget);
       }
+      setDrawingInstruction(drawingHelperMessage(subMode, state.draftVertices.length, closeTarget));
+    };
+
+    const onMouseLeave = () => {
+      setDrawingPointer(null);
+      setDrawingCursorCoordinate(null);
+      setFirstVertexCloseTarget(false);
+      map.getCanvas().style.cursor = drawingMode === "drawing" ? "crosshair" : "";
     };
 
     map.on("click", onClick);
     map.on("contextmenu", onContextMenu);
     map.on("mousemove", onMouseMove);
-    map.on("mouseleave", () => {
-      if (drawingMode === "drawing") {
-        map.getCanvas().style.cursor = "crosshair";
-      }
-    });
+    map.on("mouseleave", onMouseLeave);
 
     return () => {
       map.off("click", onClick);
       map.off("contextmenu", onContextMenu);
       map.off("mousemove", onMouseMove);
-      map.off("mouseleave", () => {});
+      map.off("mouseleave", onMouseLeave);
+      map.getCanvas().style.cursor = "";
     };
-  }, [appendDraftVertex, draftVertices, drawingMode, finishDrawing, mapError, setDraftVertices]);
+  }, [completeDrawing, draftVertices, drawingMode, drawingSubMode, finishDrawing, mapError, setDraftVertices]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !map.isStyleLoaded()) {
+      return;
+    }
+    sourceData(
+      map,
+      "aoi-draft",
+      drawingMode === "drawing"
+        ? drawingPreviewFeatureCollection(drawingSubMode, draftVertices, drawingCursorCoordinate)
+        : EMPTY_FEATURE_COLLECTION,
+    );
+    moveDrawingLayersToTop(map);
+  }, [drawingCursorCoordinate, drawingMode, drawingSubMode, draftVertices]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !map.isStyleLoaded()) {
+      return;
+    }
+    const source = map.getSource("drawing-vertices") as GeoJSONSource | undefined;
+    source?.setData({
+      type: "FeatureCollection",
+      features: drawingMode === "drawing"
+        ? draftVertices.map((vertex, index) => ({
+            type: "Feature" as const,
+            geometry: { type: "Point" as const, coordinates: vertex },
+            properties: { closeTarget: index === 0 && firstVertexCloseTarget },
+          }))
+        : [],
+    });
+  }, [draftVertices, drawingMode, firstVertexCloseTarget]);
 
   // Update rectangle preview layers in real-time
   useEffect(() => {
@@ -6063,12 +6100,13 @@ export function MapView({
         return;
       }
 
-      if (event.key === "Enter" && draftVertices.length >= 3) {
+      const action = drawingKeyboardAction(event.key, draftVertices.length);
+      if (action === "complete") {
         event.preventDefault();
         finishDrawing();
       }
 
-      if (event.key === "Escape") {
+      if (action === "cancel") {
         event.preventDefault();
         stopDrawing();
       }
@@ -6084,15 +6122,9 @@ export function MapView({
       return;
     }
 
-    const hideTemporalAoiOverlay =
-      workflowMode === "temporal" &&
-      selectedTemporalMilestoneReady &&
-      drawingMode !== "drawing" &&
-      drawingMode !== "editing";
-    const displayedAoi = hideTemporalAoiOverlay ? null : aoi;
-
     latestPresentationRef.current = {
-      aoi: displayedAoi,
+      aoi: projectAoiOverlayVisible ? aoi : null,
+      exportGeometry,
       draftVertices,
       detectedPolygons,
       buildingBlocks,
@@ -6110,6 +6142,8 @@ export function MapView({
     syncMapPresentation(map, latestPresentationRef.current);
   }, [
     aoi,
+    projectAoiOverlayVisible,
+    exportGeometry,
     draftVertices,
     detectedPolygons,
     buildingBlocks,
@@ -6770,17 +6804,9 @@ export function MapView({
 
       {draftModeActive ? (
         <>
-          <div className="pointer-events-none absolute left-1/2 top-4 z-10 -translate-x-1/2">
+          {drawingMode === "editing" ? (
+            <div className="pointer-events-none absolute left-1/2 top-4 z-10 -translate-x-1/2">
               <div className="rounded-sm bg-card px-4 py-2 text-caption text-foreground shadow-panel backdrop-blur-sm border border-border">
-              {drawingMode === "drawing" ? (
-                <>
-                  {drawingInstruction || t("draw.click_to_add_points")}
-                  <span className="mx-2 text-muted-foreground">|</span>
-                  {t("draw.press_enter_to_finish")}
-                  <span className="mx-2 text-muted-foreground">|</span>
-                  {t("draw.press_esc_to_cancel")}
-                </>
-              ) : (
                 <>
                   {t("draw.drag_vertices_to_edit")}
                   <span className="mx-2 text-muted-foreground">|</span>
@@ -6788,17 +6814,16 @@ export function MapView({
                   <span className="mx-2 text-muted-foreground">|</span>
                   {t("draw.press_esc_to_cancel_edit")}
                 </>
-              )}
-            </div>
-          </div>
-
-          {drawingMode === "drawing" ? (
-            <div className="pointer-events-none absolute left-1/2 top-1/2 z-10 -translate-x-1/2 -translate-y-1/2">
-              <div className="relative">
-                <div className="absolute left-1/2 top-1/2 h-12 w-px -translate-x-1/2 -translate-y-1/2 bg-primary/70" />
-                <div className="absolute left-1/2 top-1/2 h-px w-12 -translate-x-1/2 -translate-y-1/2 bg-primary/70" />
-                <div className="h-2.5 w-2.5 rounded-full border-2 border-primary bg-surface" />
               </div>
+            </div>
+          ) : null}
+
+          {drawingMode === "drawing" && drawingPointer ? (
+            <div
+              className="pointer-events-none absolute z-20 max-w-80 rounded-md border border-[#d6a800] bg-[#ffd84d] px-3 py-2 text-[13px] font-semibold text-[#1f2937] shadow-panel"
+              style={{ left: drawingPointer[0] + 16, top: drawingPointer[1] + 16 }}
+            >
+              {drawingInstruction || drawingHelperMessage(drawingSubMode, draftVertices.length, firstVertexCloseTarget)}
             </div>
           ) : null}
         </>

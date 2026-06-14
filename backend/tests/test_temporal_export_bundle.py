@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 from datetime import UTC, datetime
 import json
+import logging
 from pathlib import Path
 import zipfile
 
@@ -10,7 +11,10 @@ import numpy as np
 from osgeo import ogr
 import rasterio
 from rasterio.transform import from_origin
+from fastapi.testclient import TestClient
 
+from src.api.deps import get_app_settings
+from src.api.main import app
 from src.config import Settings
 from src.schemas import TemporalMilestone, TemporalMilestoneMetrics, TemporalProject, TemporalReferenceImagery
 from src.services.temporal_projects import create_temporal_project_bundle, save_temporal_project
@@ -99,26 +103,48 @@ def _read_qgs_from_qgz(path: Path) -> str:
         return archive.read(qgs_members[0]).decode("utf-8")
 
 
-def test_temporal_export_bundle_uses_qgz_and_one_gpkg_without_csv_geojson_or_readme(tmp_path: Path) -> None:
+def test_temporal_export_bundle_route_returns_controlled_error(monkeypatch, tmp_path: Path) -> None:
+    settings = Settings(runtime_cache_dir=tmp_path)
+
+    def _fail_bundle(*args, **kwargs):
+        raise ValueError("GeoPackage validation failed")
+
+    monkeypatch.setattr("src.api.routes.temporal_projects.create_temporal_project_bundle", _fail_bundle)
+    app.dependency_overrides[get_app_settings] = lambda: settings
+    try:
+        response = TestClient(app, raise_server_exceptions=False).post("/api/temporal-projects/temporal-demo/export-bundle")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 500
+    assert response.json()["detail"]["code"] == "temporal_qgis_export_failed"
+    assert "GeoPackage validation failed" in response.json()["detail"]["message"]
+
+
+def test_temporal_export_bundle_uses_qgz_and_one_gpkg_without_csv_geojson_or_readme(
+    tmp_path: Path,
+    caplog,
+) -> None:
+    caplog.set_level(logging.INFO)
     settings = Settings(runtime_cache_dir=tmp_path)
     pair_hash_2024 = "hash-2024"
-    pair_hash_mapbox = "hash-mapbox"
+    pair_hash_2026 = "hash-2026"
     pair_2024_dir = settings.request_cache_dir / pair_hash_2024
-    pair_mapbox_dir = settings.request_cache_dir / pair_hash_mapbox
+    pair_2026_dir = settings.request_cache_dir / pair_hash_2026
     pair_2024_dir.mkdir(parents=True, exist_ok=True)
-    pair_mapbox_dir.mkdir(parents=True, exist_ok=True)
+    pair_2026_dir.mkdir(parents=True, exist_ok=True)
 
     _write_pair_summary(pair_2024_dir / "wayback_pair_summary.csv", "WB_2022_R03", "WB_2024_R03", "2023-02-09")
-    _write_pair_summary(pair_mapbox_dir / "wayback_pair_summary.csv", "WB_2024_R03", "mapbox.satellite", "2024-02-01")
+    _write_pair_summary(pair_2026_dir / "wayback_pair_summary.csv", "WB_2024_R03", "WB_2026_R03", "2025-02-01")
     (pair_2024_dir / "export_bundle.zip").write_bytes(b"nested")
-    (pair_mapbox_dir / "export_bundle.zip").write_bytes(b"nested")
+    (pair_2026_dir / "export_bundle.zip").write_bytes(b"nested")
 
     tif_2022 = pair_2024_dir / "t1_wayback_rgb.tif"
     tif_2024 = pair_2024_dir / "t2_wayback_rgb.tif"
-    tif_mapbox = pair_mapbox_dir / "t2_wayback_rgb.tif"
+    tif_2026 = pair_2026_dir / "t2_wayback_rgb.tif"
     _write_fake_tif(tif_2022)
     _write_fake_tif(tif_2024)
-    _write_fake_tif(tif_mapbox)
+    _write_fake_tif(tif_2026)
 
     project = TemporalProject(
         project_id="temporal-export-test",
@@ -146,36 +172,38 @@ def test_temporal_export_bundle_uses_qgz_and_one_gpkg_without_csv_geojson_or_rea
                 reference_imagery=TemporalReferenceImagery(cog_path=str(tif_2024)),
             ),
             TemporalMilestone(
-                release_identifier="mapbox.satellite",
-                release_date="current_basemap",
+                release_identifier="WB_2026_R03",
+                release_date="2026-03-25",
                 status="complete",
-                pair_request_hash=pair_hash_mapbox,
+                pair_request_hash=pair_hash_2026,
                 additions_geojson=_feature_collection(),
                 buffer_layers_geojson={"10m": _feature_collection(), "15m": _feature_collection(), "20m": _feature_collection()},
                 cumulative_union_geojson=_feature_collection(),
                 cumulative_convex_hull_geojson=_feature_collection(),
                 cumulative_growth_envelope_geojson=_feature_collection(),
                 metrics=TemporalMilestoneMetrics(added_area_m2=8.0, additions_feature_count=1, added_block_count=1),
-                reference_imagery=TemporalReferenceImagery(cog_path=str(tif_mapbox)),
+                reference_imagery=TemporalReferenceImagery(cog_path=str(tif_2026)),
             ),
         ],
         created_at="2026-05-07T00:00:00Z",
         updated_at="2026-05-07T00:00:00Z",
-        latest_source="mapbox_current",
     )
     save_temporal_project(project, settings)
 
     bundle_path = create_temporal_project_bundle(project.project_id, settings=settings, force=True)
-    current_ym = datetime.now(UTC).strftime("%Y-%m")
-    assert bundle_path.name == f"Marrakech_2022-03_{current_ym}_export_QGIS.zip"
+    assert "QGIS_GPKG_VALIDATE_INPUT" in caplog.text
+    assert "QGIS_GPKG_LAYER_WRITE" in caplog.text
+    assert "QGIS_GPKG_LAYER_SKIPPED_EMPTY" in caplog.text
+    end_ym = "2025-02"
+    assert bundle_path.name == f"Marrakech_2022-03_{end_ym}_export_QGIS.zip"
 
     with zipfile.ZipFile(bundle_path, "r") as archive:
         names = archive.namelist()
-        assert any(name.endswith(f"/qgis/Marrakech_2022-03_{current_ym}.qgz") for name in names)
-        assert any(name.endswith(f"/donnees/vecteurs/Marrakech_2022-03_{current_ym}.gpkg") for name in names)
+        assert any(name.endswith(f"/qgis/Marrakech_2022-03_{end_ym}.qgz") for name in names)
+        assert any(name.endswith(f"/donnees/vecteurs/Marrakech_2022-03_{end_ym}.gpkg") for name in names)
         assert any(name.endswith("/manifeste_projet.json") for name in names)
         assert any("2023_02_WB_2024_R03_imagerie_de_reference.tif" in name for name in names)
-        assert any(f"{current_ym.replace('-', '_')}_mapbox_actuel_imagerie_de_reference.tif" in name for name in names)
+        assert any("2025_02_WB_2026_R03_imagerie_de_reference.tif" in name for name in names)
 
         assert not any(name.endswith(".csv") for name in names)
         assert not any(name.endswith(".geojson") for name in names)
@@ -205,7 +233,7 @@ def test_temporal_export_bundle_uses_qgz_and_one_gpkg_without_csv_geojson_or_rea
         assert ".csv" not in qgs
         assert "LISEZ_MOI" not in qgs
         assert "Tampon changement bâtiment 10 m" in qgs
-        assert "Imagerie de référence - actuel" in qgs
+        assert "Imagerie de référence - février 2025" in qgs
 
         datasource = ogr.Open(str(gpkg_path), 0)
         assert datasource is not None
@@ -213,16 +241,16 @@ def test_temporal_export_bundle_uses_qgz_and_one_gpkg_without_csv_geojson_or_rea
         datasource = None
         assert "ajouts_2023_02" in layer_names
         assert "tampon_changement_batiment_10m_2023_02" in layer_names
-        assert "union_cumulative_2023_02" in layer_names
-        assert "polygone_convexe_2023_02" in layer_names
-        assert f"ajouts_{current_ym.replace('-', '_')}" in layer_names
+        assert "union_cumulative_2023_02" not in layer_names
+        assert "polygone_convexe_2023_02" not in layer_names
+        assert "ajouts_2025_02" in layer_names
 
         manifest = json.loads(archive.read(manifest_member).decode("utf-8"))
         assert manifest["export_filename"] == bundle_path.name
         assert manifest["date_range"]["start"] == "2022-03"
-        assert manifest["date_range"]["end"] == current_ym
-        assert manifest["qgz_path"] == f"qgis/Marrakech_2022-03_{current_ym}.qgz"
-        assert manifest["gpkg_path"] == f"donnees/vecteurs/Marrakech_2022-03_{current_ym}.gpkg"
+        assert manifest["date_range"]["end"] == end_ym
+        assert manifest["qgz_path"] == f"qgis/Marrakech_2022-03_{end_ym}.qgz"
+        assert manifest["gpkg_path"] == f"donnees/vecteurs/Marrakech_2022-03_{end_ym}.gpkg"
         assert "ajouts_2023_02" in manifest["gpkg_layer_names"]
 
         raster_members = [name for name in names if "/donnees/rasters/" in name and name.endswith(".tif")]

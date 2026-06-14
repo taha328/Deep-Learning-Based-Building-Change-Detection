@@ -1,4 +1,4 @@
-name: Publish client images
+name: Publish deployment images
 
 on:
   workflow_dispatch:

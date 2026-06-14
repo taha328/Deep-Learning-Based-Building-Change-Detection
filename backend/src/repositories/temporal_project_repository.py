@@ -21,7 +21,13 @@ from src.repositories.payload_storage import (
     resolve_payload_reference,
     write_json_payload_to_file,
 )
-from src.schemas import TemporalMilestone, TemporalMilestoneMetrics, TemporalProject, TemporalProjectSummary
+from src.schemas import (
+    TemporalMilestone,
+    TemporalMilestoneMetrics,
+    TemporalProject,
+    TemporalProjectSummary,
+    validate_stored_temporal_project,
+)
 from src.utils.geometry import geodesic_area_m2
 
 
@@ -396,7 +402,7 @@ def get_project(project_id: str, *, settings: Settings | None = None, session: S
     if record is None or not record.raw_payload:
         raise FileNotFoundError(f"Unknown temporal project: {project_id}")
     payload = resolve_payload_reference(record.raw_payload, table="projects", column="raw_payload")
-    return TemporalProject.model_validate(payload)
+    return validate_stored_temporal_project(payload)
 
 
 def get_project_full_payload(project_id: str, *, settings: Settings | None = None, session: Session | None = None) -> TemporalProject:

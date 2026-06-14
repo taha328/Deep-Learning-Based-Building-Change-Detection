@@ -90,7 +90,7 @@ test("temporal layer contracts explicitly separate selected and cumulative buffe
     mode: "selected",
   });
   assert.deepEqual(TEMPORAL_LAYER_CONTRACTS.temporalCumulativeBuffer15m, {
-    artifactKey: "building_change_buffer_15m",
+    artifactKey: "cumulative_building_change_buffer_15m",
     mode: "cumulative",
   });
 });

@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from datetime import date
 
+import pytest
+from pydantic import ValidationError
+
 from src.config import Settings
 from src.domain.wayback import WaybackRelease
-from src.schemas import ValidationRequest
+from src.schemas import TemporalProject, ValidationRequest, validate_stored_temporal_project
 from src.services.validation import validate_request
 
 
@@ -22,108 +25,55 @@ def _release(identifier: str, release_date: date, release_num: int) -> WaybackRe
 def _aoi() -> dict:
     return {
         "type": "Polygon",
-        "coordinates": [
-            [
-                [-7.60, 33.40],
-                [-7.59, 33.40],
-                [-7.59, 33.41],
-                [-7.60, 33.41],
-                [-7.60, 33.40],
-            ]
-        ],
+        "coordinates": [[[-7.60, 33.40], [-7.59, 33.40], [-7.59, 33.41], [-7.60, 33.41], [-7.60, 33.40]]],
     }
 
 
-def test_mapbox_current_warns_for_latest_milestone(tmp_path) -> None:
-    settings = Settings(
-        runtime_cache_dir=tmp_path / "runtime",
-        mapbox_current_imagery_enabled=True,
-        mapbox_access_token="pk.test",
-    )
-    releases = [
-        _release("WB_2024_R02", date(2024, 3, 7), 1),
-        _release("WB_2026_R03", date(2026, 3, 25), 2),
-    ]
-
-    response, prepared = validate_request(
+def test_validation_request_rejects_removed_latest_source() -> None:
+    with pytest.raises(ValidationError, match="latest_source"):
         ValidationRequest(
             aoi_geojson=_aoi(),
             t1_release="WB_2024_R02",
             t2_release="WB_2026_R03",
             mode="full_run",
             latest_source="mapbox_current",
-        ),
-        releases=releases,
-        settings=settings,
-        remote_patch_budget_enabled=False,
-    )
-
-    assert response.valid is True
-    assert prepared is not None
-    assert prepared.latest_source == "mapbox_current"
-    assert any("Exact capture date is not guaranteed" in warning for warning in response.warnings)
+        )
 
 
-def test_mapbox_current_requires_token_when_enabled(tmp_path) -> None:
-    settings = Settings(
-        runtime_cache_dir=tmp_path / "runtime",
-        mapbox_current_imagery_enabled=True,
-        mapbox_access_token=None,
-    )
-    releases = [
-        _release("WB_2024_R02", date(2024, 3, 7), 1),
-        _release("WB_2026_R03", date(2026, 3, 25), 2),
-    ]
-
-    response, prepared = validate_request(
-        ValidationRequest(
+def test_temporal_project_rejects_removed_latest_source() -> None:
+    with pytest.raises(ValidationError, match="latest_source"):
+        TemporalProject(
+            project_id="removed-latest-source",
+            name="Removed latest source",
             aoi_geojson=_aoi(),
-            t1_release="WB_2024_R02",
-            t2_release="WB_2026_R03",
-            mode="full_run",
-            latest_source="mapbox_current",
-        ),
-        releases=releases,
-        settings=settings,
-        remote_patch_budget_enabled=False,
+            milestones=[],
+            latest_source="esri_wayback",
+            created_at="2026-06-12T00:00:00Z",
+            updated_at="2026-06-12T00:00:00Z",
+        )
+
+
+def test_stored_project_migration_drops_removed_field_and_synthetic_milestone() -> None:
+    project = validate_stored_temporal_project(
+        {
+            "project_id": "legacy-latest-source",
+            "name": "Legacy latest source",
+            "aoi_geojson": _aoi(),
+            "milestones": [
+                {"release_identifier": "WB_2024_R02"},
+                {"release_identifier": "WB_2026_R03"},
+                {"release_identifier": "mapbox.satellite", "release_date": "current_basemap"},
+            ],
+            "latest_source": "mapbox_current",
+            "created_at": "2026-06-12T00:00:00Z",
+            "updated_at": "2026-06-12T00:00:00Z",
+        }
     )
 
-    assert response.valid is False
-    assert prepared is None
-    assert any("MAPBOX_ACCESS_TOKEN" in message for message in response.blocking_errors)
+    assert [milestone.release_identifier for milestone in project.milestones] == ["WB_2024_R02", "WB_2026_R03"]
 
 
-def test_mapbox_current_rejected_for_non_latest_milestone(tmp_path) -> None:
-    settings = Settings(
-        runtime_cache_dir=tmp_path / "runtime",
-        mapbox_current_imagery_enabled=True,
-        mapbox_access_token="pk.test",
-    )
-    releases = [
-        _release("WB_2024_R02", date(2024, 3, 7), 1),
-        _release("WB_2025_R03", date(2025, 3, 27), 2),
-        _release("WB_2026_R03", date(2026, 3, 25), 3),
-    ]
-
-    response, prepared = validate_request(
-        ValidationRequest(
-            aoi_geojson=_aoi(),
-            t1_release="WB_2024_R02",
-            t2_release="WB_2025_R03",
-            mode="full_run",
-            latest_source="mapbox_current",
-        ),
-        releases=releases,
-        settings=settings,
-        remote_patch_budget_enabled=False,
-    )
-
-    assert response.valid is False
-    assert prepared is None
-    assert any("newest/latest milestone" in message for message in response.blocking_errors)
-
-
-def test_existing_esri_only_workflow_still_validates(tmp_path) -> None:
+def test_wayback_only_workflow_still_validates(tmp_path) -> None:
     settings = Settings(runtime_cache_dir=tmp_path / "runtime")
     releases = [
         _release("WB_2024_R02", date(2024, 3, 7), 1),
@@ -144,154 +94,4 @@ def test_existing_esri_only_workflow_still_validates(tmp_path) -> None:
 
     assert response.valid is True
     assert prepared is not None
-    assert prepared.latest_source == "esri_wayback"
-
-
-def test_mapbox_546_tiles_allowed_with_configured_limit(monkeypatch, tmp_path) -> None:
-    settings = Settings(
-        runtime_cache_dir=tmp_path / "runtime",
-        mapbox_current_imagery_enabled=True,
-        mapbox_access_token="pk.test",
-        mapbox_max_tiles_per_request=1024,
-    )
-    releases = [
-        _release("WB_2024_R02", date(2024, 3, 7), 1),
-        _release("WB_2026_R03", date(2026, 3, 25), 2),
-    ]
-    monkeypatch.setattr("src.services.validation.scene_tile_count", lambda bbox, zoom: 546)
-    monkeypatch.setattr(
-        "src.services.validation.intersecting_tiles_for_aoi",
-        lambda aoi, *, bbox, zoom: (frozenset((index, 0) for index in range(546)), 546),
-    )
-
-    response, prepared = validate_request(
-        ValidationRequest(
-            aoi_geojson=_aoi(),
-            t1_release="WB_2024_R02",
-            t2_release="WB_2026_R03",
-            mode="full_run",
-            latest_source="mapbox_current",
-        ),
-        releases=releases,
-        settings=settings,
-        remote_patch_budget_enabled=False,
-    )
-
-    assert response.valid is True
-    assert prepared is not None
-    assert any("AOI will download 546 Mapbox tiles at z=19" in warning for warning in response.warnings)
-
-
-def test_mapbox_430_tiles_allowed_with_1024_limit_and_blocked_with_256(monkeypatch, tmp_path) -> None:
-    releases = [
-        _release("WB_2024_R02", date(2024, 3, 7), 1),
-        _release("WB_2026_R03", date(2026, 3, 25), 2),
-    ]
-    monkeypatch.setattr("src.services.validation.scene_tile_count", lambda bbox, zoom: 430)
-    monkeypatch.setattr(
-        "src.services.validation.intersecting_tiles_for_aoi",
-        lambda aoi, *, bbox, zoom: (frozenset((index, 0) for index in range(430)), 430),
-    )
-    request = ValidationRequest(
-        aoi_geojson=_aoi(),
-        t1_release="WB_2024_R02",
-        t2_release="WB_2026_R03",
-        mode="full_run",
-        latest_source="mapbox_current",
-    )
-
-    allowed_response, allowed_prepared = validate_request(
-        request,
-        releases=releases,
-        settings=Settings(
-            runtime_cache_dir=tmp_path / "runtime_allowed",
-            mapbox_current_imagery_enabled=True,
-            mapbox_access_token="pk.test",
-            mapbox_max_tiles_per_request=1024,
-        ),
-        remote_patch_budget_enabled=False,
-    )
-
-    assert allowed_response.valid is True
-    assert allowed_prepared is not None
-    assert not allowed_response.blocking_errors
-
-    blocked_response, blocked_prepared = validate_request(
-        request,
-        releases=releases,
-        settings=Settings(
-            runtime_cache_dir=tmp_path / "runtime_blocked",
-            mapbox_current_imagery_enabled=True,
-            mapbox_access_token="pk.test",
-            mapbox_max_tiles_per_request=256,
-        ),
-        remote_patch_budget_enabled=False,
-    )
-
-    assert blocked_response.valid is False
-    assert blocked_prepared is None
-    assert any(
-        "AOI would download 430 Mapbox tiles at z=19, exceeding the limit of 256." in message
-        for message in blocked_response.blocking_errors
-    )
-
-
-def test_mapbox_546_tiles_blocked_with_limit_256(monkeypatch, tmp_path) -> None:
-    settings = Settings(
-        runtime_cache_dir=tmp_path / "runtime",
-        mapbox_current_imagery_enabled=True,
-        mapbox_access_token="pk.test",
-        mapbox_max_tiles_per_request=256,
-    )
-    releases = [
-        _release("WB_2024_R02", date(2024, 3, 7), 1),
-        _release("WB_2026_R03", date(2026, 3, 25), 2),
-    ]
-    monkeypatch.setattr("src.services.validation.scene_tile_count", lambda bbox, zoom: 546)
-    monkeypatch.setattr(
-        "src.services.validation.intersecting_tiles_for_aoi",
-        lambda aoi, *, bbox, zoom: (frozenset((index, 0) for index in range(546)), 546),
-    )
-
-    response, prepared = validate_request(
-        ValidationRequest(
-            aoi_geojson=_aoi(),
-            t1_release="WB_2024_R02",
-            t2_release="WB_2026_R03",
-            mode="full_run",
-            latest_source="mapbox_current",
-        ),
-        releases=releases,
-        settings=settings,
-        remote_patch_budget_enabled=False,
-    )
-
-    assert response.valid is False
-    assert prepared is None
-    assert any("AOI would download 546 Mapbox tiles at z=19, exceeding the limit of 256." in message for message in response.blocking_errors)
-
-
-def test_wayback_validation_unchanged_even_with_large_tile_count(monkeypatch, tmp_path) -> None:
-    settings = Settings(runtime_cache_dir=tmp_path / "runtime", mapbox_max_tiles_per_request=256)
-    releases = [
-        _release("WB_2024_R02", date(2024, 3, 7), 1),
-        _release("WB_2026_R03", date(2026, 3, 25), 2),
-    ]
-    monkeypatch.setattr("src.services.validation.scene_tile_count", lambda bbox, zoom: 546)
-
-    response, prepared = validate_request(
-        ValidationRequest(
-            aoi_geojson=_aoi(),
-            t1_release="WB_2024_R02",
-            t2_release="WB_2026_R03",
-            mode="full_run",
-            latest_source="esri_wayback",
-        ),
-        releases=releases,
-        settings=settings,
-        remote_patch_budget_enabled=False,
-    )
-
-    assert response.valid is True
-    assert prepared is not None
-    assert all("Mapbox tiles" not in message for message in response.blocking_errors)
+    assert all("Mapbox" not in message for message in [*response.warnings, *response.blocking_errors])

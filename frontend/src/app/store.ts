@@ -10,10 +10,14 @@ import type {
 } from "@/api/contracts";
 import { getFrontendRuntimeConfig } from "@/lib/env";
 import { createIdleRunProgress, type RunProgressState } from "@/lib/run-progress";
+import { drawingGeometryCommit, toGeoJsonPolygon } from "@/features/map/map-drawing";
 
 export type LngLatTuple = [number, number];
 export type DrawingMode = "idle" | "drawing" | "editing";
 export type DrawingSubMode = "polygon" | "rectangle";
+export type DrawingPurpose = "aoi" | "export";
+export type ExportDrawingPhase = "idle" | "drawing_polygon" | "drawing_rectangle" | "completed" | "cancelled";
+export type ExportGeometrySource = "drawn" | "imported";
 type TemporalProjectUpdate =
   | TemporalProject
   | null
@@ -35,6 +39,11 @@ interface AppState {
   draftVertices: LngLatTuple[];
   drawingMode: DrawingMode;
   drawingSubMode: DrawingSubMode;
+  drawingPurpose: DrawingPurpose;
+  exportGeometry: GeoJSON.Polygon | null;
+  exportDrawnGeometry: GeoJSON.Polygon | null;
+  exportImportedGeometry: GeoJSON.Polygon | null;
+  exportDrawingPhase: ExportDrawingPhase;
   mapFocusRequestId: number;
   referenceLayerFocus: { requestId: number; bounds: [number, number, number, number] | null };
   temporalProject: TemporalProject | null;
@@ -50,6 +59,11 @@ interface AppState {
   setSetting: <K extends keyof DetectionSettings>(key: K, value: DetectionSettings[K]) => void;
   startDrawing: () => void;
   startRectangleDrawing: () => void;
+  startExportDrawing: (mode: DrawingSubMode) => void;
+  setExportImportedGeometry: (geometry: GeoJSON.Polygon) => void;
+  selectExportGeometry: (source: ExportGeometrySource | null) => void;
+  acknowledgeExportDrawing: () => void;
+  clearExportGeometry: () => void;
   startEditing: () => void;
   stopDrawing: () => void;
   setDrawingSubMode: (mode: DrawingSubMode) => void;
@@ -57,6 +71,7 @@ interface AppState {
   appendDraftVertex: (vertex: LngLatTuple) => void;
   updateDraftVertex: (index: number, vertex: LngLatTuple) => void;
   finishDrawing: () => void;
+  completeDrawing: (vertices: LngLatTuple[]) => void;
   setAoiFromImport: (polygon: GeoJSON.Polygon) => void;
   requestMapFocusToAoi: () => void;
   requestMapFocusToReferenceLayer: (bounds: [number, number, number, number]) => void;
@@ -69,16 +84,6 @@ interface AppState {
   setRunStatus: (message: string) => void;
   setRunProgress: (progress: RunProgressState) => void;
   setIsRunning: (value: boolean) => void;
-}
-
-function buildPolygon(vertices: LngLatTuple[]): GeoJSON.Polygon | null {
-  if (vertices.length < 3) {
-    return null;
-  }
-  return {
-    type: "Polygon",
-    coordinates: [[...vertices, vertices[0]]],
-  };
 }
 
 function toVertices(positions: Position[]): LngLatTuple[] {
@@ -107,6 +112,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   draftVertices: [],
   drawingMode: "idle",
   drawingSubMode: "polygon",
+  drawingPurpose: "aoi",
+  exportGeometry: null,
+  exportDrawnGeometry: null,
+  exportImportedGeometry: null,
+  exportDrawingPhase: "idle",
   mapFocusRequestId: 0,
   referenceLayerFocus: { requestId: 0, bounds: null },
   temporalProject: null,
@@ -128,6 +138,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   startDrawing: () =>
     set({
       drawingMode: "drawing",
+      drawingPurpose: "aoi",
       draftVertices: [],
       validation: null,
       validationRequestKey: null,
@@ -139,12 +150,40 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({
       drawingMode: "drawing",
       drawingSubMode: "rectangle",
+      drawingPurpose: "aoi",
       draftVertices: [],
       validation: null,
       validationRequestKey: null,
       result: null,
       runStatus: "Drawing rectangle. Click and drag to create, or click twice for opposite corners.",
       runProgress: createIdleRunProgress(),
+    }),
+  startExportDrawing: (mode) =>
+    set((state) => ({
+      drawingMode: "drawing",
+      drawingSubMode: mode,
+      drawingPurpose: "export",
+      draftVertices: [],
+      exportGeometry: state.exportDrawnGeometry,
+      exportDrawingPhase: mode === "rectangle" ? "drawing_rectangle" : "drawing_polygon",
+      runStatus: mode === "rectangle" ? "Dessinez le rectangle d’export sur la carte." : "Dessinez la zone d’export sur la carte.",
+    })),
+  setExportImportedGeometry: (geometry) =>
+    set({
+      exportImportedGeometry: geometry,
+      exportGeometry: geometry,
+    }),
+  selectExportGeometry: (source) =>
+    set((state) => ({
+      exportGeometry: source === "drawn" ? state.exportDrawnGeometry : source === "imported" ? state.exportImportedGeometry : null,
+    })),
+  acknowledgeExportDrawing: () => set({ exportDrawingPhase: "idle" }),
+  clearExportGeometry: () =>
+    set({
+      exportGeometry: null,
+      exportDrawnGeometry: null,
+      exportImportedGeometry: null,
+      exportDrawingPhase: "idle",
     }),
   startEditing: () =>
     set((state) => ({
@@ -157,7 +196,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   stopDrawing: () =>
     set((state) => ({
       drawingMode: "idle",
-      draftVertices: state.aoi ? toVertices(state.aoi.coordinates[0].slice(0, -1)) : [],
+      drawingPurpose: "aoi",
+      exportDrawingPhase: state.drawingPurpose === "export" ? "cancelled" : state.exportDrawingPhase,
+      exportGeometry: state.drawingPurpose === "export" ? null : state.exportGeometry,
+      draftVertices: state.drawingPurpose === "export" ? [] : state.aoi ? toVertices(state.aoi.coordinates[0].slice(0, -1)) : [],
     })),
   setDrawingSubMode: (mode) => set({ drawingSubMode: mode }),
   setDraftVertices: (vertices) => set({ draftVertices: vertices }),
@@ -168,16 +210,20 @@ export const useAppStore = create<AppState>((set, get) => ({
       validation: null,
       validationRequestKey: null,
     })),
-  finishDrawing: () =>
+  finishDrawing: () => get().completeDrawing(get().draftVertices),
+  completeDrawing: (vertices) =>
     set((state) => {
-      const polygon = buildPolygon(state.draftVertices);
+      const polygon = toGeoJsonPolygon(vertices);
       if (!polygon) {
         return state;
       }
       return {
-        aoi: polygon,
+        ...drawingGeometryCommit(state.drawingPurpose, polygon),
+        ...(state.drawingPurpose === "export" ? { exportDrawingPhase: "completed" as const } : {}),
         drawingMode: "idle",
         drawingSubMode: "polygon",
+        drawingPurpose: "aoi",
+        draftVertices: [],
         validation: null,
         validationRequestKey: null,
         runStatus: "AOI ready. Review releases and validate the request before running detection.",

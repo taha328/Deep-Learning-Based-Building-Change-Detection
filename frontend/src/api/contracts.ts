@@ -2,8 +2,7 @@ import { z } from "zod";
 
 export const modeSchema = z.enum(["fast_preview", "full_run"]);
 export const modelBackendSchema = z.enum(["bandon_mps"]);
-export const inferenceBackendSchema = z.enum(["bandon_mps", "mtgcdnet_s2looking_mps"]);
-export const latestImagerySourceSchema = z.enum(["esri_wayback", "mapbox_current"]);
+export const inferenceBackendSchema = z.enum(["bandon_mps"]);
 
 export const releaseSchema = z.object({
   identifier: z.string(),
@@ -110,7 +109,6 @@ export const validationRequestSchema = z.object({
   buffer_distances_m: z.array(z.number()).optional(),
   keep_disjoint_buffer_parts_separate: z.boolean().optional(),
   road_constraint_layer_path: z.string().nullable().optional(),
-  latest_source: latestImagerySourceSchema.optional(),
 });
 
 export const validationResponseSchema = z.object({
@@ -331,7 +329,6 @@ export const temporalProjectSchema = z.object({
   warnings: z.array(z.string()).default([]),
   validation_blocking_errors: z.array(z.string()).default([]),
   download_bundle_path: z.string().nullable().optional(),
-  latest_source: latestImagerySourceSchema.default("esri_wayback"),
   has_reference_layers: z.boolean().default(false),
   reference_layer_count: z.number().int().default(0),
 });
@@ -381,6 +378,10 @@ export const temporalProjectRunResponseSchema = z.object({
   project: temporalProjectSchema,
 });
 
+export const temporalProjectRunRequestSchema = z.object({
+  change_threshold: z.number().min(0.01).max(0.99).optional(),
+});
+
 export const temporalProjectExportBundleSchema = z.object({
   path: z.string(),
   filename: z.string(),
@@ -389,7 +390,6 @@ export const temporalProjectExportBundleSchema = z.object({
 
 export type ModeName = z.infer<typeof modeSchema>;
 export type ModelBackendName = z.infer<typeof modelBackendSchema>;
-export type LatestImagerySource = z.infer<typeof latestImagerySourceSchema>;
 export type ReleaseMetadata = z.infer<typeof releaseSchema>;
 export type BackendAvailability = z.infer<typeof backendAvailabilitySchema>;
 export type PipelineExecutionConfig = z.infer<typeof pipelineExecutionConfigSchema>;
@@ -412,4 +412,5 @@ export type TemporalProjectSaveResponse = z.infer<typeof temporalProjectSaveResp
 export type TemporalPairEstimate = z.infer<typeof temporalPairEstimateSchema>;
 export type TemporalProjectValidationResponse = z.infer<typeof temporalProjectValidationResponseSchema>;
 export type TemporalProjectRunResponse = z.infer<typeof temporalProjectRunResponseSchema>;
+export type TemporalProjectRunRequest = z.infer<typeof temporalProjectRunRequestSchema>;
 export type TemporalProjectExportBundle = z.infer<typeof temporalProjectExportBundleSchema>;

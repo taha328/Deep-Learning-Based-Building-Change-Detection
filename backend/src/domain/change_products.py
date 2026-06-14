@@ -13,6 +13,18 @@ def derive_change_probability(t1_building_prob: np.ndarray, t2_building_prob: np
     return np.clip(t2_building_prob - t1_building_prob, 0.0, 1.0).astype(np.float32)
 
 
+def threshold_change_probability(
+    change_probability: np.ndarray,
+    *,
+    change_threshold: float,
+    valid_comparison_mask: np.ndarray | None = None,
+) -> np.ndarray:
+    mask = change_probability >= change_threshold
+    if valid_comparison_mask is not None:
+        mask &= valid_comparison_mask.astype(bool)
+    return mask
+
+
 def derive_new_building_products(
     change_prob: np.ndarray,
     t1_building_prob: np.ndarray,
@@ -30,7 +42,11 @@ def derive_new_building_products(
         if valid_comparison_mask is None
         else valid_comparison_mask.astype(bool)
     )
-    change_mask = (change_prob >= change_threshold) & valid_mask
+    change_mask = threshold_change_probability(
+        change_prob,
+        change_threshold=change_threshold,
+        valid_comparison_mask=valid_mask,
+    )
     t1_building_mask = (t1_building_prob >= semantic_threshold) & valid_mask
     t2_building_mask = (t2_building_prob >= semantic_threshold) & valid_mask
     t1_building_mask_dilated = dilate_mask(t1_building_mask, old_building_mask_dilation_pixels) & valid_mask

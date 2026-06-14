@@ -5,7 +5,6 @@ import {
   AlertTriangle,
   Check,
   ChevronDown,
-  Clock3,
   Download,
   FolderOpen,
   Layers3,
@@ -13,14 +12,12 @@ import {
   Pentagon,
   Plus,
   Save,
-  Sparkles,
   Trash2,
   Upload,
 } from "lucide-react";
 
 import type {
   BackendAvailability,
-  LatestImagerySource,
   ReferenceLayer,
   ReferenceLayerScope,
   ReferenceLayerStrategy,
@@ -28,7 +25,6 @@ import type {
   PipelineExecutionConfig,
   TemporalMilestone,
   TemporalProject,
-  TemporalProjectValidationResponse,
 } from "@/api/contracts";
 import {
   createTemporalProjectExportBundle,
@@ -44,7 +40,6 @@ import {
   runTemporalProject,
   saveTemporalProject,
   updateReferenceLayer,
-  validateTemporalProject,
 } from "@/api/client";
 import { useAppStore } from "@/app/store";
 import { ApiClientError } from "@/api/http";
@@ -64,7 +59,7 @@ import { Select } from "@/components/ui/select";
 import type { FrontendRuntimeConfig } from "@/lib/env";
 import { buildBackendFileUrl, resolveBackendUrl } from "@/lib/backend-files";
 import { cn, formatNumber } from "@/lib/utils";
-import { downloadFileFromUrl } from "@/lib/download";
+import { downloadFileFromRequest, downloadFileFromUrl } from "@/lib/download";
 import { useI18n } from "@/lib/i18n";
 import { getProjectDisplayName } from "@/lib/project-summary";
 import { createActiveRunProgress, createCompletedRunProgress, createErrorRunProgress, shouldShowExecutionProgressPanel } from "@/lib/run-progress";
@@ -72,6 +67,22 @@ import { relayClientLog } from "@/lib/client-log-relay";
 import { AOIImportModal } from "@/features/aoi/AOIImportModal";
 import { RunProgressPanel } from "@/features/results/RunProgressPanel";
 import { GeometryImportModal } from "@/features/temporal/GeometryImportModal";
+import {
+  buildResultsExportPerimeter,
+  canDownloadExport,
+  shouldRestoreExportModal,
+  type ExportPerimeterMode,
+} from "@/features/temporal/export-workflow";
+import {
+  buildTemporalRunRequest,
+  DEFAULT_CHANGE_THRESHOLD,
+  parseChangeThresholdInput,
+} from "@/features/temporal/run-detection-threshold";
+import {
+  buildArtifactFetchKey,
+  fetchArtifactOnce,
+  isFeatureCollection,
+} from "@/features/temporal/artifact-fetch-state";
 import { MilestoneMetricCards } from "@/features/temporal/MilestoneMetricCards";
 import { ReferenceLayerImportModal } from "@/features/temporal/ReferenceLayerImportModal";
 import type {
@@ -86,8 +97,7 @@ import { WorkflowSectionCard } from "@/features/workspace/WorkflowSectionCard";
 import { WorkspaceShell } from "@/features/workspace/WorkspaceShell";
 import type { WorkflowSectionId } from "@/features/workspace/workflowSections";
 
-const DEFAULT_PROJECT_DIRECTORY = "/Users/tahaelouali/Developer/Building_change_app/backend/runtime_cache";
-const MAPBOX_CURRENT_MILESTONE_ID = "mapbox.satellite";
+const DEFAULT_PROJECT_DIRECTORY = "backend/runtime_cache";
 
 function resolveProjectDirectory(projectId: string, directory: string): string {
   const trimmedDirectory = directory.trim();
@@ -104,6 +114,7 @@ const EMPTY_FEATURE_COLLECTION: FeatureCollection = {
 };
 
 type ResultsExportFormat = "xlsx" | "kml" | "geojson" | "topojson" | "shapefile" | "tsv" | "json";
+type ResultsExportPerimeterMode = ExportPerimeterMode;
 
 const RESULTS_EXPORT_OPTIONS: Array<{ format: ResultsExportFormat; label: string; pathSuffix: string; filenameSuffix: string }> = [
   { format: "xlsx", label: "Excel (.xlsx)", pathSuffix: "results.xlsx", filenameSuffix: "xlsx" },
@@ -116,9 +127,6 @@ const RESULTS_EXPORT_OPTIONS: Array<{ format: ResultsExportFormat; label: string
 ];
 
 function formatReleaseDate(value: string | undefined | null, locale: string, fallback: string): string {
-  if (value === "current_basemap") {
-    return "Current basemap";
-  }
   if (!value) {
     return fallback;
   }
@@ -381,7 +389,7 @@ function formatErrorMessage(error: unknown, fallback: string): string {
 }
 
 const UNRELATED_BANDON_WARNING =
-  "BANDON MTGCDNet applied an MPS slide-window compatibility patch to the configured crop/stride.";
+  "BANDON applied an MPS slide-window compatibility patch to the configured crop/stride.";
 
 function filterProgressWarnings(messages: string[]) {
   return messages.filter((message) => message !== UNRELATED_BANDON_WARNING);
@@ -450,7 +458,6 @@ function emptyProject(aoi: Polygon | null, projectName: string, executionConfig:
     warnings: [],
     validation_blocking_errors: [],
     download_bundle_path: null,
-    latest_source: "esri_wayback",
     has_reference_layers: false,
     reference_layer_count: 0,
   };
@@ -482,12 +489,8 @@ function createMilestone(release: ReleaseMetadata): TemporalMilestone {
   };
 }
 
-function isMapboxCurrentMilestone(milestone: TemporalMilestone): boolean {
-  return milestone.release_identifier === MAPBOX_CURRENT_MILESTONE_ID;
-}
-
 function formatMilestoneIdentifier(milestone: TemporalMilestone, t: (key: string) => string): string {
-  return isMapboxCurrentMilestone(milestone) ? t("temporal.latest_source_mapbox") : milestone.release_identifier;
+  return milestone.release_identifier;
 }
 
 function ensureFeatureCollection(value: Record<string, unknown> | null | undefined): FeatureCollection {
@@ -517,17 +520,8 @@ function hasMilestoneBufferFeatures(milestone: TemporalMilestone): boolean {
 }
 
 const TEMPORAL_LAZY_ARTIFACT_FIELDS = [
-  ["automated_additions", "automated_additions_geojson"],
-  ["automated_candidate_footprint", "automated_candidate_footprint_geojson"],
   ["automated_building_blocks", "automated_building_blocks_geojson"],
-  ["manual_override", "manual_override_geojson"],
   ["additions", "additions_geojson"],
-  ["effective_building_blocks", "effective_building_blocks_geojson"],
-  ["effective_footprint", "effective_footprint_geojson"],
-  ["cumulative_union", "cumulative_union_geojson"],
-  ["cumulative_convex_hull", "cumulative_convex_hull_geojson"],
-  ["cumulative_growth_blocks", "cumulative_growth_blocks_geojson"],
-  ["cumulative_growth_envelope", "cumulative_growth_envelope_geojson"],
 ] as const;
 
 const TEMPORAL_LAZY_BUFFER_ARTIFACT_FIELDS = [
@@ -535,6 +529,17 @@ const TEMPORAL_LAZY_BUFFER_ARTIFACT_FIELDS = [
   ["building_change_buffer_15m", "15m"],
   ["building_change_buffer_20m", "20m"],
 ] as const;
+
+const TEMPORAL_ALLOWED_ARTIFACT_KEYS = new Set([
+  "automated_building_blocks",
+  "additions",
+  "building_change_buffer_10m",
+  "building_change_buffer_15m",
+  "building_change_buffer_20m",
+  "cumulative_building_change_buffer_10m",
+  "cumulative_building_change_buffer_15m",
+  "cumulative_building_change_buffer_20m",
+]);
 
 function milestoneHasArtifact(milestone: TemporalMilestone, key: string): boolean {
   return milestone.artifacts.some(
@@ -577,7 +582,7 @@ function temporalArtifactPresentation(
 ): Record<string, TemporalOutputArtifactPresentation> {
   return Object.fromEntries(
     milestone.artifacts
-      .filter((artifact) => artifact.key)
+      .filter((artifact) => artifact.key && TEMPORAL_ALLOWED_ARTIFACT_KEYS.has(artifact.key))
       .map((artifact) => [
         artifact.key as string,
         {
@@ -684,7 +689,6 @@ export function TemporalMosaicPanel({
 }: TemporalMosaicPanelProps) {
   const queryClient = useQueryClient();
   const hydratingAoiRef = useRef(false);
-  const [validation, setValidation] = useState<TemporalProjectValidationResponse | null>(null);
   const [selectedMilestoneId, setSelectedMilestoneId] = useState<string | null>(null);
   const [releaseFilter, setReleaseFilter] = useState("");
   const [expandedYears, setExpandedYears] = useState<Set<number>>(new Set());
@@ -699,9 +703,14 @@ export function TemporalMosaicPanel({
   const [createProjectBusy, setCreateProjectBusy] = useState(false);
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [progressMetricsVisible, setProgressMetricsVisible] = useState(false);
-  const [resultsExportMenuOpen, setResultsExportMenuOpen] = useState(false);
+  const [resultsExportModalOpen, setResultsExportModalOpen] = useState(false);
+  const [resultsExportFormat, setResultsExportFormat] = useState<ResultsExportFormat>("shapefile");
+  const [resultsExportPerimeterMode, setResultsExportPerimeterMode] = useState<ResultsExportPerimeterMode>("project_aoi");
+  const [resultsExportImportOpen, setResultsExportImportOpen] = useState(false);
   const [resultsExportBusy, setResultsExportBusy] = useState<ResultsExportFormat | null>(null);
   const [resultsExportError, setResultsExportError] = useState<string | null>(null);
+  const [runChangeThreshold, setRunChangeThreshold] = useState(String(DEFAULT_CHANGE_THRESHOLD));
+  const [runChangeThresholdError, setRunChangeThresholdError] = useState<string | null>(null);
   const [staleReferenceLayerProjectIds, setStaleReferenceLayerProjectIds] = useState<Set<string>>(new Set());
 
   const aoi = useAppStore((state) => state.aoi);
@@ -716,6 +725,16 @@ export function TemporalMosaicPanel({
   const clearAoi = useAppStore((state) => state.clearAoi);
   const requestMapFocusToAoi = useAppStore((state) => state.requestMapFocusToAoi);
   const requestMapFocusToReferenceLayer = useAppStore((state) => state.requestMapFocusToReferenceLayer);
+  const exportGeometry = useAppStore((state) => state.exportGeometry);
+  const exportDrawnGeometry = useAppStore((state) => state.exportDrawnGeometry);
+  const exportImportedGeometry = useAppStore((state) => state.exportImportedGeometry);
+  const exportDrawingPhase = useAppStore((state) => state.exportDrawingPhase);
+  const startExportDrawing = useAppStore((state) => state.startExportDrawing);
+  const setExportImportedGeometry = useAppStore((state) => state.setExportImportedGeometry);
+  const selectExportGeometry = useAppStore((state) => state.selectExportGeometry);
+  const acknowledgeExportDrawing = useAppStore((state) => state.acknowledgeExportDrawing);
+  const clearExportGeometry = useAppStore((state) => state.clearExportGeometry);
+  const stopDrawing = useAppStore((state) => state.stopDrawing);
   const project = useAppStore((state) => state.temporalProject);
   const setProject = useAppStore((state) => state.setTemporalProject);
   const settings = useAppStore((state) => state.settings);
@@ -728,6 +747,19 @@ export function TemporalMosaicPanel({
   const previousAoiRef = useRef<Polygon | null>(aoi);
   const latestProjectLoadRef = useRef<string | null>(null);
   const cumulativeAdditionsFetchesRef = useRef<Set<string>>(new Set());
+  const exportDownloadEnabled = canDownloadExport(
+    resultsExportPerimeterMode,
+    Boolean(exportDrawnGeometry),
+    Boolean(exportImportedGeometry),
+  );
+
+  useEffect(() => {
+    if (!shouldRestoreExportModal(exportDrawingPhase)) {
+      return;
+    }
+    setResultsExportModalOpen(true);
+    acknowledgeExportDrawing();
+  }, [acknowledgeExportDrawing, exportDrawingPhase]);
 
   const { t, language } = useI18n();
   const locale = language === "fr" ? "fr-FR" : "en-GB";
@@ -810,10 +842,9 @@ export function TemporalMosaicPanel({
       };
       hydratingAoiRef.current = true;
       setProject(hydratedProject);
-      setValidation(null);
       setSelectedProjectId(hydratedProject.project_id);
       setSelectedMilestoneId(preferredMilestoneId(hydratedProject));
-      setSelectedReleaseIds(hydratedProject.milestones.filter((item) => !isMapboxCurrentMilestone(item)).map((item) => item.release_identifier));
+      setSelectedReleaseIds(hydratedProject.milestones.map((item) => item.release_identifier));
       setProgressMetricsVisible(true);
       onWorkflowModeChange("temporal");
       if (hydratedProject.aoi_geojson && hydratedProject.aoi_geojson.type === "Polygon") {
@@ -860,16 +891,8 @@ export function TemporalMosaicPanel({
     },
   });
 
-  const validateProjectMutation = useMutation({
-    mutationFn: validateTemporalProject,
-    onSuccess: (response) => {
-      setValidation(response);
-      setProject(response.project);
-    },
-  });
-
   const runProjectMutation = useMutation({
-    mutationFn: async (projectId: string) => {
+    mutationFn: async ({ projectId, changeThreshold }: { projectId: string; changeThreshold: number }) => {
       setIsRunning(true);
       setRunProgress({
         ...createActiveRunProgress(),
@@ -878,14 +901,19 @@ export function TemporalMosaicPanel({
         stageLabel: "Metadata",
         detail: "Temporal mosaic timeline run started.",
       });
-      return runTemporalProject(projectId, undefined, setRunProgress);
+      return runTemporalProject(
+        projectId,
+        buildTemporalRunRequest(changeThreshold),
+        undefined,
+        setRunProgress,
+        () => setActivePanel("progress"),
+      );
     },
     onSuccess: (response) => {
       setIsRunning(false);
       setRunProgress(createCompletedRunProgress());
       setProgressMetricsVisible(true);
       setProject(response.project);
-      setValidation(null);
       void queryClient.invalidateQueries({ queryKey: ["reference-layers", response.project.project_id] });
       void queryClient.invalidateQueries({ queryKey: ["temporal-projects"] });
     },
@@ -907,7 +935,6 @@ export function TemporalMosaicPanel({
     }) => importTemporalOverride(projectId, releaseIdentifier, overrideGeojson),
     onSuccess: (response) => {
       setProject(response.project);
-      setValidation(null);
       void queryClient.invalidateQueries({ queryKey: ["temporal-projects"] });
     },
   });
@@ -1001,10 +1028,9 @@ export function TemporalMosaicPanel({
 
     hydratingAoiRef.current = true;
     setProject(temporalProjectBootstrap);
-    setValidation(null);
     setSelectedProjectId(temporalProjectBootstrap.project_id);
     setSelectedMilestoneId(preferredMilestoneId(temporalProjectBootstrap));
-    setSelectedReleaseIds(temporalProjectBootstrap.milestones.filter((item) => !isMapboxCurrentMilestone(item)).map((item) => item.release_identifier));
+    setSelectedReleaseIds(temporalProjectBootstrap.milestones.map((item) => item.release_identifier));
     setProgressMetricsVisible(true);
 
     if (temporalProjectBootstrap.aoi_geojson && temporalProjectBootstrap.aoi_geojson.type === "Polygon") {
@@ -1052,13 +1078,14 @@ export function TemporalMosaicPanel({
     if (!project?.project_id || !selectedMilestone) {
       return;
     }
-    const controller = new AbortController();
     const releaseIdentifier = selectedMilestone.release_identifier;
-    const artifactFetches: Promise<[string, Record<string, unknown>]>[] = [];
+    const projectVersion = project.updated_at ?? "unknown";
+    const artifactFetches: Promise<[string, Record<string, unknown>] | null>[] = [];
+    let cancelled = false;
 
     for (const [artifactKey, fieldName] of TEMPORAL_LAZY_ARTIFACT_FIELDS) {
       const currentValue = selectedMilestone[fieldName];
-      if (!hasFeatureCollectionFeatures(currentValue) && milestoneHasArtifact(selectedMilestone, artifactKey)) {
+      if (!isFeatureCollection(currentValue) && milestoneHasArtifact(selectedMilestone, artifactKey)) {
         if (isHugeTemporalArtifact(selectedMilestone, artifactKey)) {
           relayClientLog("TEMPORAL_GEOJSON_FETCH_SKIPPED_HUGE_ARTIFACT", {
             projectId: project.project_id,
@@ -1074,17 +1101,17 @@ export function TemporalMosaicPanel({
           });
           continue;
         }
+        const cacheKey = buildArtifactFetchKey(project.project_id, releaseIdentifier, artifactKey, projectVersion);
         artifactFetches.push(
-          getTemporalMilestoneArtifact(project.project_id, releaseIdentifier, artifactKey, { signal: controller.signal }).then((payload: Record<string, unknown>) => [
-            fieldName,
-            payload,
-          ]),
+          fetchArtifactOnce(cacheKey, () =>
+            getTemporalMilestoneArtifact(project.project_id, releaseIdentifier, artifactKey),
+          ).then((payload) => (payload ? [fieldName, payload] : null)),
         );
       }
     }
     for (const [artifactKey, bufferKey] of TEMPORAL_LAZY_BUFFER_ARTIFACT_FIELDS) {
       const currentValue = selectedMilestone.buffer_layers_geojson?.[bufferKey];
-      if (!hasFeatureCollectionFeatures(currentValue) && milestoneHasArtifact(selectedMilestone, artifactKey)) {
+      if (!isFeatureCollection(currentValue) && milestoneHasArtifact(selectedMilestone, artifactKey)) {
         if (isHugeTemporalArtifact(selectedMilestone, artifactKey)) {
           relayClientLog("TEMPORAL_GEOJSON_FETCH_SKIPPED_HUGE_ARTIFACT", {
             projectId: project.project_id,
@@ -1100,18 +1127,16 @@ export function TemporalMosaicPanel({
           });
           continue;
         }
+        const cacheKey = buildArtifactFetchKey(project.project_id, releaseIdentifier, artifactKey, projectVersion);
         artifactFetches.push(
-          getTemporalMilestoneArtifact(project.project_id, releaseIdentifier, artifactKey, { signal: controller.signal }).then((payload: Record<string, unknown>) => [
-            `buffer_layers_geojson.${bufferKey}`,
-            payload,
-          ]),
+          fetchArtifactOnce(cacheKey, () =>
+            getTemporalMilestoneArtifact(project.project_id, releaseIdentifier, artifactKey),
+          ).then((payload) => (payload ? [`buffer_layers_geojson.${bufferKey}`, payload] : null)),
         );
       }
     }
     if (!artifactFetches.length) {
-      return () => {
-        controller.abort();
-      };
+      return;
     }
 
     relayClientLog("PROJECT_LAYER_ARTIFACT_LAZY_FETCH", {
@@ -1121,7 +1146,11 @@ export function TemporalMosaicPanel({
     });
     Promise.all(artifactFetches)
       .then((entries) => {
-        if (controller.signal.aborted) {
+        if (cancelled) {
+          return;
+        }
+        const loadedEntries = entries.filter((entry): entry is [string, Record<string, unknown>] => entry !== null);
+        if (!loadedEntries.length) {
           return;
         }
         setProject((current) => {
@@ -1138,7 +1167,7 @@ export function TemporalMosaicPanel({
                 ...milestone,
                 buffer_layers_geojson: { ...milestone.buffer_layers_geojson },
               };
-              for (const [fieldName, payload] of entries) {
+              for (const [fieldName, payload] of loadedEntries) {
                 if (fieldName.startsWith("buffer_layers_geojson.")) {
                   const bufferKey = fieldName.split(".", 2)[1];
                   nextMilestone.buffer_layers_geojson = {
@@ -1155,7 +1184,7 @@ export function TemporalMosaicPanel({
         });
       })
       .catch((error) => {
-        if (!controller.signal.aborted) {
+        if (!cancelled) {
           relayClientLog("PROJECT_LAYER_ARTIFACT_LAZY_FETCH", {
             projectId: project.project_id,
             releaseIdentifier,
@@ -1164,9 +1193,9 @@ export function TemporalMosaicPanel({
         }
       });
     return () => {
-      controller.abort();
+      cancelled = true;
     };
-  }, [project?.project_id, selectedMilestone, setProject]);
+  }, [project?.project_id, project?.updated_at, selectedMilestone?.release_identifier, setProject]);
 
   useEffect(() => {
     if (!project?.project_id || !selectedMilestone) {
@@ -1487,6 +1516,10 @@ export function TemporalMosaicPanel({
       projectId: project.project_id,
       projectUpdatedAt: project.updated_at,
       isHydratingProject: Boolean(temporalProjectBootstrap || loadProjectMutation.isPending || hydratingAoiRef.current),
+      projectAoiOverlayVisible:
+        activePanel === "aoi" ||
+        runProjectMutation.isPending ||
+        !project.milestones.some((milestone) => milestone.status === "complete" && milestone.metrics),
       availableMilestoneIds: project.milestones.map((milestone) => milestone.release_identifier),
       availableMilestones: project.milestones.map((milestone) => ({
         releaseIdentifier: milestone.release_identifier,
@@ -1522,7 +1555,7 @@ export function TemporalMosaicPanel({
       manualOverride: ensureFeatureCollection(selectedMilestone.manual_override_geojson),
       referenceLayers: referenceLayerPresentation,
     });
-  }, [addedOverlayTimeline, backendUrl, project, selectedMilestone, onMapPresentationChange, referenceLayerPresentation]);
+  }, [activePanel, addedOverlayTimeline, backendUrl, project, selectedMilestone, onMapPresentationChange, referenceLayerPresentation, runProjectMutation.isPending]);
 
   const releasesById = useMemo(
     () => new Map(releases.map((release) => [release.identifier, release])),
@@ -1532,9 +1565,7 @@ export function TemporalMosaicPanel({
   const selectedReleaseIds = useMemo(
     () =>
       new Set(
-        project?.milestones
-          .filter((item) => !isMapboxCurrentMilestone(item))
-          .map((item) => item.release_identifier) ?? [],
+        project?.milestones.map((item) => item.release_identifier) ?? [],
       ),
     [project?.milestones],
   );
@@ -1545,21 +1576,8 @@ export function TemporalMosaicPanel({
     ...current,
     aoi_geojson: aoi,
     execution_config: buildExecutionConfig(),
-    latest_source: current.latest_source ?? "esri_wayback",
     updated_at: nowIso(),
   });
-
-  const handleLatestSourceChange = (latestSource: LatestImagerySource) => {
-    if (!project) {
-      return;
-    }
-    setProject({
-      ...project,
-      latest_source: latestSource,
-      updated_at: nowIso(),
-    });
-    setValidation(null);
-  };
 
   const persistProject = async (currentProject: TemporalProject) => {
     const normalizedProject = syncProjectWithCurrentAoi(currentProject);
@@ -1603,7 +1621,6 @@ export function TemporalMosaicPanel({
         download_bundle_path: savedProject.download_bundle_path ?? nextProject.download_bundle_path,
       });
       setSelectedProjectId(savedProject.project_id);
-      setValidation(null);
       setSelectedMilestoneId(null);
       setReleaseFilter("");
       setProgressMetricsVisible(false);
@@ -1629,12 +1646,8 @@ export function TemporalMosaicPanel({
     }
     const nextMilestones = [...project.milestones, createMilestone(release)]
       .sort((left, right) => {
-        const leftDate = isMapboxCurrentMilestone(left)
-          ? "9999-12-31"
-          : releasesById.get(left.release_identifier)?.release_date ?? left.release_date ?? "";
-        const rightDate = isMapboxCurrentMilestone(right)
-          ? "9999-12-31"
-          : releasesById.get(right.release_identifier)?.release_date ?? right.release_date ?? "";
+        const leftDate = releasesById.get(left.release_identifier)?.release_date ?? left.release_date ?? "";
+        const rightDate = releasesById.get(right.release_identifier)?.release_date ?? right.release_date ?? "";
         return Date.parse(leftDate) - Date.parse(rightDate);
       });
     setProject({
@@ -1642,9 +1655,8 @@ export function TemporalMosaicPanel({
       milestones: nextMilestones,
       updated_at: nowIso(),
     });
-    setSelectedReleaseIds(nextMilestones.filter((item) => !isMapboxCurrentMilestone(item)).map((item) => item.release_identifier));
+    setSelectedReleaseIds(nextMilestones.map((item) => item.release_identifier));
     setSelectedMilestoneId(release.identifier);
-    setValidation(null);
   };
 
   const handleRemoveMilestone = (releaseIdentifier: string) => {
@@ -1657,11 +1669,10 @@ export function TemporalMosaicPanel({
       milestones: nextMilestones,
       updated_at: nowIso(),
     });
-    setSelectedReleaseIds(nextMilestones.filter((item) => !isMapboxCurrentMilestone(item)).map((item) => item.release_identifier));
+    setSelectedReleaseIds(nextMilestones.map((item) => item.release_identifier));
     if (selectedMilestoneId === releaseIdentifier) {
       setSelectedMilestoneId(nextMilestones.at(-1)?.release_identifier ?? null);
     }
-    setValidation(null);
   };
 
   const handleToggleRelease = (release: ReleaseMetadata) => {
@@ -1679,21 +1690,22 @@ export function TemporalMosaicPanel({
     await persistProject(project);
   };
 
-  const handleValidate = async () => {
-    if (!project) {
-      return;
-    }
-    const savedProject = await persistProject(project);
-    const response = await validateProjectMutation.mutateAsync(savedProject);
-    setProject(response.project);
-  };
-
   const handleRun = async () => {
     if (!project) {
       return;
     }
+    const changeThreshold = parseChangeThresholdInput(runChangeThreshold);
+    if (changeThreshold === null) {
+      setRunChangeThresholdError(t("temporal.change_threshold_error"));
+      return;
+    }
+    setRunChangeThresholdError(null);
+    setRunChangeThreshold(String(changeThreshold));
     const savedProject = await persistProject(project);
-    const response = await runProjectMutation.mutateAsync(savedProject.project_id);
+    const response = await runProjectMutation.mutateAsync({
+      projectId: savedProject.project_id,
+      changeThreshold,
+    });
     if (response.project.milestones.length > 0) {
       setSelectedMilestoneId(response.project.milestones.at(-1)?.release_identifier ?? null);
     }
@@ -1710,23 +1722,33 @@ export function TemporalMosaicPanel({
     await downloadFileFromUrl(buildBackendFileUrl(backendUrl, bundlePath), fileName);
   };
 
-  const handleDownloadResults = async (format: ResultsExportFormat) => {
+  const handleDownloadResults = async () => {
     if (!project?.project_id) {
       return;
     }
-    const option = RESULTS_EXPORT_OPTIONS.find((item) => item.format === format);
+    const option = RESULTS_EXPORT_OPTIONS.find((item) => item.format === resultsExportFormat);
     if (!option) {
       return;
     }
     setResultsExportError(null);
-    setResultsExportBusy(format);
+    setResultsExportBusy(resultsExportFormat);
     try {
-      const path = `/api/temporal-projects/${encodeURIComponent(project.project_id)}/exports/${option.pathSuffix}`;
+      const path = `/api/temporal-projects/${encodeURIComponent(project.project_id)}/exports/results`;
       const filename = `resultats_${project.project_id}.${option.filenameSuffix}`;
-      await downloadFileFromUrl(resolveBackendUrl(backendUrl, path) ?? path, filename);
-      setResultsExportMenuOpen(false);
-    } catch {
-      setResultsExportError("Export impossible pour ce projet.");
+      const perimeter = buildResultsExportPerimeter(
+        resultsExportPerimeterMode,
+        exportDrawnGeometry,
+        exportImportedGeometry,
+      );
+      await downloadFileFromRequest(resolveBackendUrl(backendUrl, path) ?? path, filename, {
+        format: resultsExportFormat,
+        perimeter,
+      });
+      clearExportGeometry();
+      setResultsExportModalOpen(false);
+    } catch (error) {
+      selectExportGeometry(null);
+      setResultsExportError(error instanceof Error ? error.message : "Export impossible pour ce projet.");
     } finally {
       setResultsExportBusy(null);
     }
@@ -1747,7 +1769,6 @@ export function TemporalMosaicPanel({
 
   const runBusy =
     saveProjectMutation.isPending ||
-    validateProjectMutation.isPending ||
     runProjectMutation.isPending ||
     importOverrideMutation.isPending ||
     loadProjectMutation.isPending;
@@ -1761,7 +1782,6 @@ export function TemporalMosaicPanel({
   ] as const;
 
   const activeTitle = navItems.find((item) => item.id === activePanel)?.label ?? t("temporal.progress");
-  const visibleValidationWarnings = validation ? filterProgressWarnings(validation.warnings) : [];
   const visibleMilestoneWarnings = selectedMilestone ? filterProgressWarnings(selectedMilestone.warnings) : [];
   const aoiVertices = draftVertices.length || (aoi ? aoi.coordinates[0].length - 1 : 0);
   const showRunProgress = runProjectMutation.isPending || shouldShowExecutionProgressPanel(runProgress);
@@ -1805,7 +1825,7 @@ export function TemporalMosaicPanel({
                 id="create-project-directory"
                 value={createProjectDirectory}
                 onChange={(event) => setCreateProjectDirectory(event.target.value)}
-                placeholder="/Users/tahaelouali/Developer/Building_change_app/backend/runtime_cache/custom-projects/zone-industrial"
+                placeholder="backend/runtime_cache/custom-projects/zone-industrial"
                 className="border-sidebar-border bg-card text-card-foreground"
               />
               <p className="text-caption text-muted-foreground">
@@ -1950,7 +1970,6 @@ export function TemporalMosaicPanel({
                     <div className="space-y-2">
                       {project.milestones.map((milestone) => {
                         const isSelected = selectedMilestoneId === milestone.release_identifier;
-                        const isMapboxLatest = isMapboxCurrentMilestone(milestone);
                         return (
                           <div
                             key={milestone.release_identifier}
@@ -1975,16 +1994,14 @@ export function TemporalMosaicPanel({
                                 {t(`temporal.milestone_status.${milestone.status}`)}
                               </span>
                             </button>
-                            {isMapboxLatest ? null : (
-                              <button
-                                type="button"
-                                onClick={() => handleRemoveMilestone(milestone.release_identifier)}
-                                className="border-l border-sidebar-border px-3 text-foreground transition hover:bg-surface hover:text-foreground"
-                                aria-label={`${t("button.remove")} ${milestone.release_identifier}`}
-                              >
-                                <Trash2 className="h-4 w-4" />
-                              </button>
-                            )}
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveMilestone(milestone.release_identifier)}
+                              className="border-l border-sidebar-border px-3 text-foreground transition hover:bg-surface hover:text-foreground"
+                              aria-label={`${t("button.remove")} ${milestone.release_identifier}`}
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </button>
                           </div>
                         );
                       })}
@@ -1994,25 +2011,6 @@ export function TemporalMosaicPanel({
                       {t("temporal.no_milestones")}
                     </div>
                   )}
-                </div>
-
-                <div className="space-y-2 rounded-lg border border-sidebar-border bg-sidebar px-4 py-3">
-                  <label className="label-xs" htmlFor="temporal-latest-source">
-                    {t("temporal.latest_source_label")}
-                  </label>
-                  <Select
-                    id="temporal-latest-source"
-                    value={project?.latest_source ?? "esri_wayback"}
-                    onChange={(event) => handleLatestSourceChange(event.target.value as LatestImagerySource)}
-                    disabled={!project || runBusy}
-                    className="border-sidebar-border bg-card text-card-foreground"
-                  >
-                    <option value="esri_wayback">{t("temporal.latest_source_esri")}</option>
-                    <option value="mapbox_current">{t("temporal.latest_source_mapbox")}</option>
-                  </Select>
-                  {project?.latest_source === "mapbox_current" ? (
-                    <p className="text-caption text-muted-foreground">{t("temporal.latest_source_mapbox_warning")}</p>
-                  ) : null}
                 </div>
 
                 <div className="flex min-h-[18rem] flex-1 flex-col gap-2">
@@ -2071,22 +2069,44 @@ export function TemporalMosaicPanel({
 
                 <div className="space-y-3 rounded-lg border border-sidebar-border bg-sidebar px-4 py-4">
                   <div className="space-y-1">
-                    <p className="text-sm font-medium text-foreground">{t("temporal.extend_and_rerun")}</p>
-                    <p className="text-sm text-muted-foreground">{t("temporal.extend_and_rerun_description")}</p>
+                    <p className="text-sm font-medium text-foreground">{t("temporal.run_detection_title")}</p>
+                    <p className="text-sm text-muted-foreground">{t("temporal.run_detection_description")}</p>
                   </div>
-                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                    <Button
-                      variant="outline"
-                      className="border-sidebar-border bg-sidebar"
-                      onClick={() => void handleValidate()}
-                      disabled={!project || runBusy}
-                    >
-                      {validateProjectMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Clock3 className="mr-2 h-4 w-4" />}
-                      {t("temporal.validate_timeline")}
-                    </Button>
-                    <Button onClick={() => void handleRun()} disabled={!project || runBusy || project.milestones.length === 0}>
-                      {runProjectMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Sparkles className="mr-2 h-4 w-4" />}
-                      {t("temporal.run_timeline")}
+                  <div className="space-y-2">
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                      <label className="text-sm font-medium text-foreground" htmlFor="temporal-change-threshold">
+                        {t("temporal.change_threshold")}
+                      </label>
+                      <Input
+                        id="temporal-change-threshold"
+                        type="number"
+                        min="0.01"
+                        max="0.99"
+                        step="0.01"
+                        value={runChangeThreshold}
+                        onChange={(event) => {
+                          setRunChangeThreshold(event.target.value);
+                          setRunChangeThresholdError(null);
+                        }}
+                        onBlur={() => {
+                          const normalized = parseChangeThresholdInput(runChangeThreshold);
+                          if (normalized !== null) {
+                            setRunChangeThreshold(String(normalized));
+                          }
+                        }}
+                        aria-invalid={Boolean(runChangeThresholdError)}
+                        aria-describedby="temporal-change-threshold-help"
+                        className="h-9 w-full sm:w-28"
+                      />
+                    </div>
+                    <p id="temporal-change-threshold-help" className="text-xs text-muted-foreground">
+                      {t("temporal.change_threshold_help")}
+                    </p>
+                    {runChangeThresholdError ? <p className="text-xs text-destructive">{runChangeThresholdError}</p> : null}
+                  </div>
+                  <div>
+                    <Button className="w-full sm:w-auto" onClick={() => void handleRun()} disabled={!project || runBusy || project.milestones.length === 0}>
+                      {t("temporal.run_detection_button")}
                     </Button>
                   </div>
                 </div>
@@ -2125,33 +2145,6 @@ export function TemporalMosaicPanel({
               title={t("temporal.progress_title")}
               contentClassName="space-y-3"
             >
-                {validation ? (
-                  <div className="space-y-3 rounded-lg border border-sidebar-border bg-sidebar px-4 py-4">
-                    <div className="flex items-center justify-between">
-                      <span className="text-sm font-medium text-foreground">
-                        {validation.valid ? t("status.validation_passed") : t("status.validation_needs_attention")}
-                      </span>
-                      <span className="text-xs uppercase tracking-[0.12em] text-foreground">
-                        {formatNumber(validation.estimated_total_tiles)} {t("temporal.total_tiles")}
-                      </span>
-                    </div>
-                    {validation.blocking_errors.length ? (
-                      <div className="space-y-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-3 text-sm text-destructive-foreground">
-                        {validation.blocking_errors.map((message) => (
-                          <p key={message}>{message}</p>
-                        ))}
-                      </div>
-                    ) : null}
-                    {visibleValidationWarnings.length ? (
-                      <div className="space-y-2 rounded-lg border border-warning/30 bg-warning/10 px-3 py-3 text-sm text-warning-foreground">
-                        {visibleValidationWarnings.map((message) => (
-                          <p key={message}>{message}</p>
-                        ))}
-                      </div>
-                    ) : null}
-                  </div>
-                ) : null}
-
                 {showRunProgress ? <RunProgressPanel progress={runProgress} /> : null}
 
                 {progressMetricsVisible && !selectedMilestone ? (
@@ -2187,7 +2180,7 @@ export function TemporalMosaicPanel({
                               className="h-10 w-full justify-between border-sidebar-border bg-card px-3"
                               onClick={() => {
                                 setResultsExportError(null);
-                                setResultsExportMenuOpen((open) => !open);
+                                setResultsExportModalOpen(true);
                               }}
                               disabled={!hasCompletedTemporalResult || Boolean(resultsExportBusy)}
                             >
@@ -2197,20 +2190,6 @@ export function TemporalMosaicPanel({
                               </span>
                               <ChevronDown className="h-4 w-4" />
                             </Button>
-                            {resultsExportMenuOpen ? (
-                              <div className="absolute left-0 right-0 z-20 mt-2 rounded-lg border border-sidebar-border bg-card p-1.5 shadow-panel">
-                                {RESULTS_EXPORT_OPTIONS.map((option) => (
-                                  <button
-                                    key={option.format}
-                                    type="button"
-                                    className="flex w-full items-center rounded-md px-3 py-2 text-left text-sm text-foreground transition hover:bg-surface"
-                                    onClick={() => void handleDownloadResults(option.format)}
-                                  >
-                                    {t("temporal.download_format")} {option.label}
-                                  </button>
-                                ))}
-                              </div>
-                            ) : null}
                           </div>
                         </div>
                         {resultsExportError ? (
@@ -2358,17 +2337,16 @@ export function TemporalMosaicPanel({
           </div>
         ) : null}
 
-        {(projectsQuery.error || loadProjectMutation.error || saveProjectMutation.error || validateProjectMutation.error || runProjectMutation.error || importOverrideMutation.error || importReferenceLayerMutation.error || updateReferenceLayerMutation.error || deleteReferenceLayerMutation.error) ? (
+        {(projectsQuery.error || loadProjectMutation.error || saveProjectMutation.error || runProjectMutation.error || importOverrideMutation.error || importReferenceLayerMutation.error || updateReferenceLayerMutation.error || deleteReferenceLayerMutation.error) ? (
           <div className="p-5 pt-0">
             <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive-foreground">
               <div className="flex items-start gap-2">
                 <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
                 <div>
                   {formatErrorMessage(
-                    projectsQuery.error ??
+                      projectsQuery.error ??
                       loadProjectMutation.error ??
                       saveProjectMutation.error ??
-                      validateProjectMutation.error ??
                       runProjectMutation.error ??
                       importOverrideMutation.error ??
                       importReferenceLayerMutation.error ??
@@ -2390,6 +2368,103 @@ export function TemporalMosaicPanel({
         description={t("temporal.import_manual_override_description")}
         onImport={handleImportOverride}
       />
+      <GeometryImportModal
+        open={resultsExportImportOpen}
+        onOpenChange={setResultsExportImportOpen}
+        title="Importer une zone"
+        description="Importer une zone GeoJSON, WKT, KML, KMZ, GPX ou Shapefile ZIP."
+        onImport={(geometry) => {
+          setExportImportedGeometry(geometry);
+          setResultsExportPerimeterMode("imported");
+        }}
+      />
+      <Dialog
+        open={resultsExportModalOpen}
+        onOpenChange={(open) => {
+          setResultsExportModalOpen(open);
+          if (!open) {
+            clearExportGeometry();
+          }
+        }}
+      >
+        <DialogContent className="max-w-xl">
+          <DialogHeader>
+            <DialogTitle>Télécharger les résultats</DialogTitle>
+            <DialogDescription>Sélectionnez le périmètre temporaire et le format d’export.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-5">
+            <fieldset className="space-y-2">
+              <legend className="mb-2 text-sm font-semibold text-foreground">Périmètre d’export</legend>
+              {([
+                ["project_aoi", "Tout le projet", "Exporter tous les résultats dans l’AOI complète du projet."],
+                ["drawn", "Zone spécifique dans le projet", "Dessiner une zone à l’intérieur de l’AOI du projet."],
+                ["imported", "Importer une zone", "Importer une zone GeoJSON, WKT, KML, KMZ, GPX ou Shapefile ZIP."],
+              ] as const).map(([mode, label, description]) => (
+                <label key={mode} className="flex cursor-pointer gap-3 rounded border border-sidebar-border p-3">
+                  <input
+                    type="radio"
+                    name="export-perimeter"
+                    checked={resultsExportPerimeterMode === mode}
+                    onChange={() => {
+                      setResultsExportPerimeterMode(mode);
+                      selectExportGeometry(mode === "project_aoi" ? null : mode);
+                    }}
+                  />
+                  <span><span className="block text-sm font-medium">{label}</span><span className="block text-xs text-muted-foreground">{description}</span></span>
+                </label>
+              ))}
+            </fieldset>
+            <label className="block space-y-2 text-sm font-medium">Format
+              <Select value={resultsExportFormat} onChange={(event) => setResultsExportFormat(event.target.value as ResultsExportFormat)}>
+                {RESULTS_EXPORT_OPTIONS.map((option) => <option key={option.format} value={option.format}>{option.label}</option>)}
+              </Select>
+            </label>
+            {resultsExportPerimeterMode === "drawn" ? (
+              <div className="space-y-2">
+                <p className="text-sm font-medium text-foreground">Zone spécifique</p>
+                <div className="flex gap-2">
+                  <Button type="button" variant="outline" onClick={() => { startExportDrawing("polygon"); setResultsExportModalOpen(false); }}>Dessiner un polygone</Button>
+                  <Button type="button" variant="outline" onClick={() => { startExportDrawing("rectangle"); setResultsExportModalOpen(false); }}>Dessiner un rectangle</Button>
+                </div>
+              </div>
+            ) : null}
+            {resultsExportPerimeterMode === "imported" ? (
+              <Button type="button" variant="outline" onClick={() => setResultsExportImportOpen(true)}><Upload className="mr-2 h-4 w-4" />Importer une zone</Button>
+            ) : null}
+            {resultsExportPerimeterMode === "drawn" && !exportDrawnGeometry ? <p className="text-sm text-muted-foreground">Aucune zone dessinée.</p> : null}
+            {resultsExportPerimeterMode === "imported" && !exportImportedGeometry ? <p className="text-sm text-muted-foreground">Aucune zone importée.</p> : null}
+            {resultsExportPerimeterMode !== "project_aoi" && exportGeometry ? <p className="text-sm text-green-600">Zone d’export valide.</p> : null}
+            {resultsExportError ? <p className="text-sm text-destructive">{resultsExportError}</p> : null}
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => {
+                clearExportGeometry();
+                setResultsExportModalOpen(false);
+              }}
+            >
+              Annuler
+            </Button>
+            <Button type="button" onClick={() => void handleDownloadResults()} disabled={Boolean(resultsExportBusy) || !exportDownloadEnabled}>
+              {resultsExportBusy ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Download className="mr-2 h-4 w-4" />}Télécharger
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      {exportDrawingPhase === "drawing_polygon" || exportDrawingPhase === "drawing_rectangle" ? (
+        <div className="fixed bottom-6 left-1/2 z-50 w-[min(92vw,560px)] -translate-x-1/2 rounded border border-primary/40 bg-card px-4 py-3 shadow-panel">
+          <div className="flex items-center justify-between gap-4">
+            <p className="text-sm text-foreground">
+              Dessinez la zone d’export sur la carte. Fermez le polygone sur son premier point ou cliquez sur le coin opposé.
+            </p>
+            <Button type="button" variant="outline" onClick={stopDrawing} aria-label="Annuler le dessin de la zone d’export">
+              Annuler
+            </Button>
+          </div>
+        </div>
+      ) : null}
       <ReferenceLayerImportModal
         open={referenceLayerModalOpen}
         projectId={project?.project_id ?? null}

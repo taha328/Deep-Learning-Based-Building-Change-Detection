@@ -9,13 +9,16 @@ import rasterio
 from rasterio.transform import from_origin
 
 from src.domain.tiled_inference import (
+    InferenceTile,
     TiledInferenceConfig,
     iter_inference_tiles,
+    make_bandon_patch_predictor,
     make_difference_patch_predictor,
     make_synthetic_square_patch_predictor,
     run_tiled_inference,
     select_inference_mode,
 )
+from src.config import Settings
 
 
 def _settings(tmp_path: Path, **overrides):
@@ -65,6 +68,35 @@ def _write_mask(path: Path, shape: tuple[int, int]) -> None:
     }
     with rasterio.open(path, "w", **profile) as dst:
         dst.write(np.ones(shape, dtype=np.uint8), 1)
+
+
+def test_bandon_patch_predictor_uses_configured_threshold_not_runner_argmax(monkeypatch, tmp_path: Path) -> None:
+    probability = np.array([[0.35, 0.49], [0.50, 0.90]], dtype=np.float32)
+    monkeypatch.setattr(
+        "src.domain.bandon_runner.run_bandon_inference",
+        lambda **kwargs: SimpleNamespace(
+            change_probability=probability,
+            change_mask=np.array([[False, False], [True, True]], dtype=bool),
+            metadata={},
+        ),
+    )
+    predictor = make_bandon_patch_predictor(
+        settings=Settings(runtime_cache_dir=tmp_path / "runtime"),
+        effective_backend="bandon_mps",
+        threshold=0.35,
+    )
+
+    prediction = predictor(
+        tile=InferenceTile(index=0, window=rasterio.windows.Window(0, 0, 2, 2)),
+        t1_rgb=np.zeros((2, 2, 3), dtype=np.uint8),
+        t2_rgb=np.zeros((2, 2, 3), dtype=np.uint8),
+        t1_valid_mask=None,
+        t2_valid_mask=None,
+        aoi_mask=None,
+        work_dir=tmp_path / "work",
+    )
+
+    assert np.array_equal(prediction.mask, np.ones((2, 2), dtype=bool))
 
 
 def test_inference_mode_switches_to_tiled_for_large_pixel_count(tmp_path: Path) -> None:

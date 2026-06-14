@@ -18,6 +18,7 @@ from rasterio.windows import Window, transform as window_transform
 from pyproj import Geod
 from shapely.geometry import mapping, shape
 
+from src.domain.change_products import threshold_change_probability
 from src.utils.geometry import parse_aoi_geometry, reproject_geometry
 
 if TYPE_CHECKING:
@@ -274,7 +275,10 @@ def make_bandon_patch_predictor(
         )
         return PatchPrediction(
             probability=result.change_probability.astype(np.float32, copy=False),
-            mask=result.change_mask.astype(bool, copy=False),
+            mask=threshold_change_probability(
+                result.change_probability,
+                change_threshold=threshold,
+            ),
             metadata=result.metadata,
         )
 

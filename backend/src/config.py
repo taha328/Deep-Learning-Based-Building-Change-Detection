@@ -1,18 +1,22 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from functools import lru_cache
+import logging
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 ModeName = Literal["fast_preview", "full_run"]
-InferenceBackendName = Literal["bandon_mps", "mtgcdnet_s2looking_mps"]
+InferenceBackendName = Literal["bandon_mps"]
+CheckpointEnvName = Literal["APP_BANDON_CHECKPOINT_PATH"]
 ModelDeviceName = Literal["auto", "cpu", "cuda", "mps"]
 PersistenceBackendName = Literal["filesystem", "postgres"]
 PostCompletionRequestCleanupMode = Literal["off", "compact_heavy", "delete_full"]
+LOGGER = logging.getLogger(__name__)
 
 
 class ModeLimits(BaseModel):
@@ -23,10 +27,27 @@ class ModeLimits(BaseModel):
     max_inference_patches_per_scene: int
 
 
+@dataclass(frozen=True)
+class InferenceCheckpointConfig:
+    backend: InferenceBackendName
+    env_var: CheckpointEnvName
+    path: Path
+
+    def diagnostics(self) -> dict[str, str]:
+        return {
+            "inference_backend_requested": self.backend,
+            "inference_backend_resolved": self.backend,
+            "checkpoint_env_var_used": self.env_var,
+            "checkpoint_path_resolved": str(self.path),
+            "checkpoint_exists": str(self.path.is_file()).lower(),
+            "checkpoint_size_bytes": str(self.path.stat().st_size),
+        }
+
+
 class Settings(BaseModel):
     project_root: Path = Field(default_factory=lambda: Path(__file__).resolve().parents[2])
     runtime_cache_dir: Path = Field(default_factory=lambda: Path(__file__).resolve().parents[1] / "runtime_cache")
-    inference_backend: str = "bandon_mps"
+    inference_backend: InferenceBackendName = "bandon_mps"
     wmts_capabilities_url: str = (
         "https://wayback.maptiles.arcgis.com/arcgis/rest/services/"
         "World_Imagery/MapServer/WMTS/1.0.0/WMTSCapabilities.xml"
@@ -103,8 +124,8 @@ class Settings(BaseModel):
     generate_full_mosaic_png_for_heavy_batch: bool = False
     mosaic_preview_max_dimension: int = 4096
     scene_segmentation_concurrency: int = 2
-    default_change_threshold: float = 0.65
-    default_semantic_threshold: float = 0.65
+    change_threshold: float = 0.35
+    semantic_threshold: float = 0.35
     default_min_new_building_pixels: int = 30
     addition_min_area_m2: float = 8.0
     addition_max_existing_overlap_ratio: float = 0.50
@@ -137,8 +158,6 @@ class Settings(BaseModel):
     # MTGCDNet's active BANDON test_cfg uses crop_size=(513, 513). Validation
     # uses this guard without importing mmcv or launching the model.
     bandon_min_model_input_size_px: int = 513
-    s2looking_checkpoint_path: Path | None = None
-    s2looking_change_threshold: float = 0.65
     database_url: str = "postgresql+psycopg://building_change:building_change@localhost:5432/building_change"
     database_echo: bool = False
     db_inline_json_max_bytes: int = 256 * 1024
@@ -209,6 +228,13 @@ class Settings(BaseModel):
     )
     allowed_file_roots: tuple[Path, ...] = ()
 
+    @field_validator("inference_backend", mode="before")
+    @classmethod
+    def validate_inference_backend(cls, value: object) -> object:
+        if value != "bandon_mps":
+            raise ValueError(f"Unsupported inference backend: {value}. Supported backends: bandon_mps.")
+        return value
+
     def model_post_init(self, __context: object) -> None:
         if self.wayback_metadata_cache_dir is None:
             self.wayback_metadata_cache_dir = self.runtime_cache_dir / "wayback_metadata_cache"
@@ -274,30 +300,14 @@ class Settings(BaseModel):
             raise ValueError("mosaic_preview_max_dimension must be greater than or equal to 256.")
         if self.wayback_max_missing_tile_ratio < 0 or self.wayback_max_missing_tile_ratio > 1:
             raise ValueError("wayback_max_missing_tile_ratio must be between 0 and 1.")
-        if self.inference_backend not in {"bandon_mps", "mtgcdnet_s2looking_mps"}:
-            raise ValueError(
-                "APP_INFERENCE_BACKEND must be one of: bandon_mps, mtgcdnet_s2looking_mps."
-            )
-        if self.s2looking_change_threshold < 0 or self.s2looking_change_threshold > 1:
-            raise ValueError("s2looking_change_threshold must be between 0 and 1.")
-        if self.s2looking_checkpoint_path is not None:
-            s2looking_checkpoint_path = self.s2looking_checkpoint_path.expanduser()
-            if not s2looking_checkpoint_path.is_absolute():
-                s2looking_checkpoint_path = (self.project_root / s2looking_checkpoint_path).resolve()
-            else:
-                s2looking_checkpoint_path = s2looking_checkpoint_path.resolve()
-            self.s2looking_checkpoint_path = s2looking_checkpoint_path
-        if self.inference_backend == "mtgcdnet_s2looking_mps":
-            if self.s2looking_checkpoint_path is None:
-                raise ValueError(
-                    "APP_S2LOOKING_CHECKPOINT_PATH is required when "
-                    "APP_INFERENCE_BACKEND=mtgcdnet_s2looking_mps."
-                )
-            if not self.s2looking_checkpoint_path.is_file():
-                raise ValueError(
-                    "APP_S2LOOKING_CHECKPOINT_PATH does not point to an existing file: "
-                    f"{self.s2looking_checkpoint_path}"
-                )
+        if self.inference_backend != "bandon_mps":
+            raise ValueError(f"Unsupported inference backend: {self.inference_backend}. Supported backends: bandon_mps.")
+        if self.change_threshold < 0 or self.change_threshold > 1:
+            raise ValueError("APP_CHANGE_THRESHOLD must be between 0 and 1.")
+        if self.semantic_threshold < 0 or self.semantic_threshold > 1:
+            raise ValueError("APP_SEMANTIC_THRESHOLD must be between 0 and 1.")
+        self.bandon_checkpoint_path = _resolve_checkpoint_path(self.bandon_checkpoint_path, project_root=self.project_root)
+        resolve_inference_checkpoint(self)
         if not 1 <= self.temporal_imagery_prefetch_workers <= 4:
             raise ValueError("temporal_imagery_prefetch_workers must be between 1 and 4.")
         if self.temporal_imagery_prefetch_max_pairs < 1:
@@ -381,6 +391,32 @@ class Settings(BaseModel):
 
     def get_mode_limits(self, mode: ModeName) -> ModeLimits:
         return self.preview_limits if mode == "fast_preview" else self.full_limits
+
+
+def _resolve_checkpoint_path(path: Path, *, project_root: Path) -> Path:
+    expanded = path.expanduser()
+    return expanded.resolve() if expanded.is_absolute() else (project_root / expanded).resolve()
+
+
+def resolve_inference_checkpoint(settings: Settings) -> InferenceCheckpointConfig:
+    if settings.inference_backend != "bandon_mps":
+        raise ValueError(f"Unsupported inference backend: {settings.inference_backend}. Supported backends: bandon_mps.")
+    env_var: CheckpointEnvName = "APP_BANDON_CHECKPOINT_PATH"
+    path = settings.bandon_checkpoint_path
+
+    resolved = _resolve_checkpoint_path(path, project_root=settings.project_root)
+    if not resolved.is_file():
+        raise ValueError(
+            f"{env_var} for APP_INFERENCE_BACKEND={settings.inference_backend} "
+            f"does not point to an existing file: {resolved}"
+        )
+    LOGGER.info(
+        "CHECKPOINT_CONSISTENCY_VALID backend=%s activeEnvVar=%s activePath=%s",
+        settings.inference_backend,
+        env_var,
+        resolved,
+    )
+    return InferenceCheckpointConfig(backend=settings.inference_backend, env_var=env_var, path=resolved)
 
 
 def _float_env(name: str, default: float) -> float:
@@ -745,8 +781,8 @@ def get_settings() -> Settings:
             "APP_SCENE_SEGMENTATION_CONCURRENCY",
             base.scene_segmentation_concurrency,
         ),
-        default_change_threshold=_float_env("APP_CHANGE_THRESHOLD", base.default_change_threshold),
-        default_semantic_threshold=_float_env("APP_SEMANTIC_THRESHOLD", base.default_semantic_threshold),
+        change_threshold=_float_env("APP_CHANGE_THRESHOLD", base.change_threshold),
+        semantic_threshold=_float_env("APP_SEMANTIC_THRESHOLD", base.semantic_threshold),
         default_min_new_building_pixels=_int_env(
             "APP_MIN_NEW_BUILDING_PIXELS",
             base.default_min_new_building_pixels,
@@ -821,15 +857,6 @@ def get_settings() -> Settings:
         bandon_min_model_input_size_px=_int_env(
             "APP_BANDON_MIN_MODEL_INPUT_SIZE_PX",
             base.bandon_min_model_input_size_px,
-        ),
-        s2looking_checkpoint_path=(
-            Path(s2looking_checkpoint_env)
-            if (s2looking_checkpoint_env := _optional_str_env("APP_S2LOOKING_CHECKPOINT_PATH"))
-            else None
-        ),
-        s2looking_change_threshold=_float_env(
-            "APP_S2LOOKING_CHANGE_THRESHOLD",
-            base.s2looking_change_threshold,
         ),
         database_url=os.getenv("DATABASE_URL", base.database_url),
         database_echo=_bool_env("DATABASE_ECHO", base.database_echo),

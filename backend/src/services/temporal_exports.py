@@ -2,14 +2,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
+from contextvars import ContextVar
 import csv
 from io import BytesIO
 import html
+import hashlib
 import json
 import logging
+import math
 from pathlib import Path
 import re
+import shutil
 import tempfile
+import time
+import unicodedata
 import xml.etree.ElementTree as ET
 import zipfile
 from typing import Any
@@ -18,17 +24,17 @@ import geopandas as gpd
 from openpyxl import Workbook
 from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
-from shapely.geometry import GeometryCollection, MultiPolygon, Polygon, shape
+from shapely.geometry import GeometryCollection, MultiPolygon, Polygon, box, mapping, shape
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
 
 from src.config import Settings, get_settings
 from src.domain.cache import load_cached_response
-from src.domain.mapbox_current import MAPBOX_SOURCE_ID
 from src.schemas import RunResponse, TemporalMilestone, TemporalMilestoneMetrics, TemporalProject
 from src.services.temporal_projects import (
     _ensure_temporal_derived_geometry_layers,
     _hydrate_milestone_buffer_layers,
+    _hydrate_temporal_layer_artifacts,
     get_temporal_project,
 )
 from src.utils.geometry import centroid_lonlat, reproject_geometry, utm_epsg_from_lonlat
@@ -72,7 +78,11 @@ TEMPORAL_RESULTS_EXPORT_LABELS = {
 
 TOPOJSON_DEFAULT_QUANTIZATION = 1_000_000
 TOPOJSON_EXPORT_VERSION = "clean-quantized-v3"
-TOPOJSON_ALLOWED_LAYERS = ("additions", "buffer_10m", "cumulative_growth")
+SHAPEFILE_EXPORT_VERSION = "zone-clipped-mutually-exclusive-qgz-v12"
+QGIS_PROJECT_CRS = "EPSG:3857"
+QGIS_VECTOR_CRS = "EPSG:4326"
+QGIS_PROJECT_EXTENT_PADDING_RATIO = 0.075
+TOPOJSON_ALLOWED_LAYERS = ("additions", "buffer_10m")
 TOPOJSON_PROPERTY_KEYS = ("id", "project", "date", "year", "period", "layer", "area_m2", "area_ha")
 TOPOJSON_LAYER_ID_SLUGS = {
     "additions": "additions",
@@ -120,6 +130,50 @@ class KmlView:
     range_m: float = DEFAULT_GOOGLE_EARTH_LOOKAT_RANGE_METERS
 
 
+@dataclass(frozen=True)
+class TemporalShapefileLayer:
+    group_key: str
+    group_label: str
+    filename: str
+    display_name: str
+    artifact_key: str
+    release_identifier: str
+    feature_collection: dict[str, Any]
+    is_global: bool = False
+
+
+@dataclass(frozen=True)
+class ExportedLayerValidation:
+    path: Path
+    display_name: str
+    group_name: str
+    relative_path: str
+    feature_count: int
+    crs_authid: str
+    xmin: float
+    ymin: float
+    xmax: float
+    ymax: float
+    is_valid_for_qgis_project: bool
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
+class TemporalQgisRaster:
+    release_identifier: str
+    period_label: str
+    source_path: Path
+    relative_path: str
+    layer_id: str
+    display_name: str
+    bounds_3857: Bounds
+
+
+Bounds = tuple[float, float, float, float]
+TEMPORAL_WEB_MILESTONE_COLORS = ("#00B050", "#FFD700", "#0066FF", "#E31A1C", "#00C8C8", "#FF1493", "#7FFF00", "#8B4513")
+_EXPORT_CONTEXT: ContextVar[dict[str, Any] | None] = ContextVar("temporal_export_context", default=None)
+
+
 def _settings(settings: Settings | None) -> Settings:
     return settings or get_settings()
 
@@ -130,8 +184,103 @@ def _export_now() -> datetime:
 
 def _load_project(project_id: str, settings: Settings) -> TemporalProject:
     project = get_temporal_project(project_id, settings)
+    project = _hydrate_temporal_layer_artifacts(project, settings)
     project = _hydrate_milestone_buffer_layers(project, settings)
-    return _ensure_temporal_derived_geometry_layers(project)
+    project = _ensure_temporal_derived_geometry_layers(project)
+    context = _EXPORT_CONTEXT.get()
+    return _clip_project_to_export_geometry(project, context["geometry"]) if context else project
+
+
+def _polygonal_geometry(value: BaseGeometry) -> BaseGeometry:
+    if value.geom_type in {"Polygon", "MultiPolygon"}:
+        return value.buffer(0)
+    if value.geom_type == "GeometryCollection":
+        polygons = [part for part in value.geoms if part.geom_type in {"Polygon", "MultiPolygon"}]
+        return unary_union(polygons).buffer(0) if polygons else GeometryCollection()
+    return GeometryCollection()
+
+
+def resolve_export_perimeter(project: TemporalProject, perimeter: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not perimeter or perimeter.get("mode") == "project_aoi":
+        return None
+    if not project.aoi_geojson:
+        raise ValueError("Project AOI is unavailable.")
+    geometry_payload = perimeter.get("geometry")
+    try:
+        requested = _polygonal_geometry(shape(geometry_payload))
+        project_aoi = _polygonal_geometry(shape(project.aoi_geojson))
+    except Exception as exc:
+        raise ValueError(f"Invalid export perimeter geometry: {exc}") from exc
+    if requested.is_empty:
+        raise ValueError("Export perimeter geometry is empty.")
+    clipped = _polygonal_geometry(requested.intersection(project_aoi))
+    if clipped.is_empty:
+        raise ValueError("La zone sélectionnée est hors de l’AOI du projet.")
+    return {
+        "mode": "custom_geometry",
+        "source": perimeter.get("source"),
+        "geometry": clipped,
+        "was_clipped_to_project_aoi": not clipped.equals(requested),
+    }
+
+
+def _clip_feature_collection(payload: dict[str, Any] | None, mask: BaseGeometry) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return payload
+    clipped_features: list[dict[str, Any]] = []
+    for feature in _features(payload):
+        geometry_payload = feature.get("geometry") if isinstance(feature, dict) else None
+        if not isinstance(geometry_payload, dict):
+            continue
+        try:
+            geometry = _polygonal_geometry(shape(geometry_payload).intersection(mask))
+        except Exception:
+            continue
+        if geometry.is_empty:
+            continue
+        clipped = dict(feature)
+        clipped["geometry"] = mapping(geometry)
+        clipped_features.append(clipped)
+    return {**payload, "features": clipped_features}
+
+
+def _clip_project_to_export_geometry(project: TemporalProject, mask: BaseGeometry) -> TemporalProject:
+    clipped = project.model_copy(deep=True)
+    clipped.aoi_geojson = mapping(mask)
+    geojson_fields = (
+        "automated_additions_geojson",
+        "automated_candidate_footprint_geojson",
+        "automated_building_blocks_geojson",
+        "manual_override_geojson",
+        "additions_geojson",
+        "effective_building_blocks_geojson",
+        "effective_footprint_geojson",
+        "cumulative_union_geojson",
+        "cumulative_convex_hull_geojson",
+        "cumulative_growth_blocks_geojson",
+        "cumulative_growth_envelope_geojson",
+    )
+    for milestone in clipped.milestones:
+        for field_name in geojson_fields:
+            setattr(milestone, field_name, _clip_feature_collection(getattr(milestone, field_name), mask))
+        milestone.buffer_layers_geojson = {
+            key: value
+            for key, payload in milestone.buffer_layers_geojson.items()
+            if (value := _clip_feature_collection(payload, mask)) is not None
+        }
+    return clipped
+
+
+def _export_metadata() -> dict[str, Any]:
+    context = _EXPORT_CONTEXT.get()
+    if not context:
+        return {"perimeter_mode": "project_aoi"}
+    return {
+        "perimeter_mode": "custom_geometry",
+        "perimeter_source": context["source"],
+        "was_clipped_to_project_aoi": context["was_clipped_to_project_aoi"],
+        "perimeter_geometry": mapping(context["geometry"]),
+    }
 
 
 def _metric_crs(project: TemporalProject) -> str:
@@ -204,7 +353,7 @@ def _percent(numerator: float | None, denominator: float | None) -> float | None
 
 
 def _date_string(value: str | None) -> str | None:
-    if not value or value == "current_basemap":
+    if not value:
         return None
     match = re.search(r"\d{4}-\d{2}-\d{2}", value)
     if match:
@@ -246,8 +395,6 @@ def _run_response_for_milestone(project: TemporalProject, milestone: TemporalMil
 
 
 def _imagery_source(project: TemporalProject, milestone: TemporalMilestone) -> str:
-    if milestone.release_identifier == MAPBOX_SOURCE_ID or project.latest_source == "mapbox_current":
-        return "Mapbox Satellite actuel"
     return "ESRI Wayback"
 
 
@@ -259,10 +406,6 @@ def _archive_date(
 ) -> tuple[str | None, str]:
     run_response, side = _run_response_for_milestone(project, milestone, settings)
     summary = run_response.summary if run_response else None
-
-    if milestone.release_identifier == MAPBOX_SOURCE_ID:
-        fallback = export_now.date().isoformat()
-        return fallback, "Image actuelle / Mapbox - date d'imagerie indisponible; date d'export utilisee."
 
     if summary is not None and side == "t2":
         for value in (summary.dominant_src_date_t2, summary.release_date_t2):
@@ -443,7 +586,6 @@ def build_temporal_results_workbook(project_id: str, settings: Settings | None =
         {"Champ": "Nom du projet", "Valeur": project.name},
         {"Champ": "Date d'export", "Valeur": export_now.date()},
         {"Champ": "Nombre de jalons", "Valeur": len(project.milestones)},
-        {"Champ": "Source du jalon le plus récent", "Valeur": project.latest_source},
         {"Champ": "Backend utilisé", "Valeur": _backend_label(project)},
         {"Champ": "Système de coordonnées utilisé pour les surfaces", "Valeur": crs},
     ]
@@ -673,8 +815,6 @@ def _description(project: TemporalProject, milestone: TemporalMilestone, date_no
     ]
     if date_note:
         rows.append(("Note", date_note))
-    if milestone.release_identifier == MAPBOX_SOURCE_ID:
-        rows.append(("Limite KML", "Image actuelle / Mapbox - l'imagerie de fond Google Earth Pro n'est pas contrôlable par KML."))
     html_rows = "".join(f"<tr><th>{html.escape(label)}</th><td>{html.escape(value)}</td></tr>" for label, value in rows)
     return f"<table>{html_rows}</table>"
 
@@ -816,11 +956,9 @@ def _feature_area_m2(feature: dict[str, Any], crs: str) -> float | None:
 def _result_layer_payloads(milestone: TemporalMilestone) -> list[tuple[str, dict[str, Any] | None]]:
     return [
         ("additions", milestone.additions_geojson),
-        ("cumulative_growth", milestone.cumulative_growth_blocks_geojson),
         ("buffer_10m", milestone.buffer_layers_geojson.get("10m") or milestone.buffer_layers_geojson.get("10")),
         ("buffer_15m", milestone.buffer_layers_geojson.get("15m") or milestone.buffer_layers_geojson.get("15")),
         ("buffer_20m", milestone.buffer_layers_geojson.get("20m") or milestone.buffer_layers_geojson.get("20")),
-        ("diagnostics", milestone.automated_candidate_footprint_geojson),
     ]
 
 
@@ -861,6 +999,7 @@ def build_temporal_results_geojson(project_id: str, settings: Settings | None = 
     payload = {
         "type": "FeatureCollection",
         "name": f"{project.project_id}_temporal_results",
+        "export_metadata": _export_metadata(),
         "features": _temporal_result_features(project, resolved_settings, export_now),
     }
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -887,10 +1026,8 @@ def _topojson_result_layer_payloads(milestone: TemporalMilestone) -> list[tuple[
     return [
         ("additions", milestone.additions_geojson),
         ("buffer_10m", milestone.buffer_layers_geojson.get("10m") or milestone.buffer_layers_geojson.get("10")),
-        ("cumulative_growth", milestone.cumulative_growth_envelope_geojson),
         ("buffer_15m", milestone.buffer_layers_geojson.get("15m") or milestone.buffer_layers_geojson.get("15")),
         ("buffer_20m", milestone.buffer_layers_geojson.get("20m") or milestone.buffer_layers_geojson.get("20")),
-        ("diagnostics", milestone.automated_candidate_footprint_geojson),
     ]
 
 
@@ -1204,11 +1341,11 @@ def build_temporal_results_json(project_id: str, settings: Settings | None = Non
             "semantics": project.semantics,
             "created_at": project.created_at,
             "updated_at": project.updated_at,
-            "latest_source": project.latest_source,
         },
         "run": {
             "source_backend": _source_backend(project),
             "exported_at": export_now.isoformat().replace("+00:00", "Z"),
+            "export_perimeter": _export_metadata(),
         },
         "milestones": milestones,
         "artifacts": {
@@ -1284,55 +1421,908 @@ class TextIOBytesWriter:
         return len(value)
 
 
+def _filesystem_safe_label(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
+    normalized = re.sub(r"[^A-Za-z0-9]+", "_", normalized).strip("_")
+    return normalized or "resultats"
+
+
+def _milestone_quarter_label(milestone: TemporalMilestone) -> str:
+    parsed = _parse_date(milestone.release_date)
+    if parsed is not None:
+        return f"{parsed.year} Q{((parsed.month - 1) // 3) + 1}"
+    match = re.search(r"(20\d{2})", milestone.release_identifier)
+    return f"{match.group(1)} Q1" if match else _filesystem_safe_label(milestone.release_identifier).replace("_", " ")
+
+
+def _feature_collection_with_export_metadata(
+    payload: dict[str, Any],
+    *,
+    release_identifier: str,
+    period_label: str,
+) -> dict[str, Any]:
+    features: list[dict[str, Any]] = []
+    for feature in _features(payload):
+        if not isinstance(feature, dict):
+            continue
+        copied = dict(feature)
+        properties = dict(feature.get("properties")) if isinstance(feature.get("properties"), dict) else {}
+        properties["release_id"] = release_identifier
+        properties["period"] = period_label
+        copied["properties"] = properties
+        features.append(copied)
+    return {"type": "FeatureCollection", "features": features}
+
+
+def _merged_feature_collection(
+    milestones: list[TemporalMilestone],
+    *,
+    payload_getter,
+) -> dict[str, Any]:
+    features: list[dict[str, Any]] = []
+    for milestone in milestones:
+        payload = payload_getter(milestone)
+        if not _features(payload):
+            continue
+        enriched = _feature_collection_with_export_metadata(
+            payload,
+            release_identifier=milestone.release_identifier,
+            period_label=_milestone_quarter_label(milestone),
+        )
+        features.extend(enriched["features"])
+    return {"type": "FeatureCollection", "features": features}
+
+
+def _temporal_shapefile_export_layers(project: TemporalProject) -> list[TemporalShapefileLayer]:
+    completed = [milestone for milestone in project.milestones if milestone.status == "complete"]
+    if not completed:
+        return []
+    baseline = completed[0]
+    non_baseline = completed[1:]
+    newest_first = list(reversed(non_baseline))
+    start_label = _milestone_quarter_label(baseline)
+    end_label = _milestone_quarter_label(completed[-1])
+    range_file_label = f"{_filesystem_safe_label(start_label)}_{_filesystem_safe_label(end_label)}"
+    range_display_label = f"{start_label} \u2192 {end_label}"
+    layers: list[TemporalShapefileLayer] = []
+
+    cumulative_payload = _merged_feature_collection(
+        non_baseline,
+        payload_getter=lambda milestone: milestone.additions_geojson,
+    )
+    if _features(cumulative_payload):
+        layers.append(
+            TemporalShapefileLayer(
+                group_key="tous_les_nouveaux_batiments",
+                group_label="Tous les nouveaux bâtiments",
+                filename=f"tous_les_nouveaux_batiments_{range_file_label}",
+                display_name=f"Tous les nouveaux bâtiments {range_display_label}",
+                artifact_key="additions",
+                release_identifier=f"{baseline.release_identifier}:{completed[-1].release_identifier}",
+                feature_collection=cumulative_payload,
+                is_global=True,
+            )
+        )
+
+    for milestone in newest_first:
+        period = _milestone_quarter_label(milestone)
+        if _features(milestone.additions_geojson):
+            layers.append(
+                TemporalShapefileLayer(
+                    group_key="batiments_ajoutes_par_date",
+                    group_label="Bâtiments ajoutés par date",
+                    filename=f"batiments_ajoutes_{_filesystem_safe_label(period)}",
+                    display_name=f"Bâtiments ajoutés {period}",
+                    artifact_key="additions",
+                    release_identifier=milestone.release_identifier,
+                    feature_collection=_feature_collection_with_export_metadata(
+                        milestone.additions_geojson or {"type": "FeatureCollection", "features": []},
+                        release_identifier=milestone.release_identifier,
+                        period_label=period,
+                    ),
+                )
+            )
+
+    for distance in ("10m", "15m", "20m"):
+        group_key = f"buffer_{distance}"
+        group_label = f"Buffer {distance}"
+        for milestone in newest_first:
+            payload = milestone.buffer_layers_geojson.get(distance) or milestone.buffer_layers_geojson.get(distance.removesuffix("m"))
+            if not _features(payload):
+                continue
+            period = _milestone_quarter_label(milestone)
+            layers.append(
+                TemporalShapefileLayer(
+                    group_key=group_key,
+                    group_label=group_label,
+                    filename=f"buffer_{distance}_{_filesystem_safe_label(period)}",
+                    display_name=f"Buffer {distance} {period}",
+                    artifact_key=f"building_change_buffer_{distance}",
+                    release_identifier=milestone.release_identifier,
+                    feature_collection=_feature_collection_with_export_metadata(
+                        payload or {"type": "FeatureCollection", "features": []},
+                        release_identifier=milestone.release_identifier,
+                        period_label=period,
+                    ),
+                )
+            )
+        merged = _merged_feature_collection(
+            non_baseline,
+            payload_getter=lambda milestone, key=distance: milestone.buffer_layers_geojson.get(key)
+            or milestone.buffer_layers_geojson.get(key.removesuffix("m")),
+        )
+        if _features(merged):
+            layers.append(
+                TemporalShapefileLayer(
+                    group_key=group_key,
+                    group_label=group_label,
+                    filename=f"buffer_{distance}_{range_file_label}",
+                    display_name=f"Buffer {distance} {range_display_label}",
+                    artifact_key=f"building_change_buffer_{distance}",
+                    release_identifier=f"{baseline.release_identifier}:{completed[-1].release_identifier}",
+                    feature_collection=merged,
+                    is_global=True,
+                )
+            )
+    context = _EXPORT_CONTEXT.get()
+    if context:
+        layers.append(
+            TemporalShapefileLayer(
+                group_key="zone_export",
+                group_label="Zone d’export",
+                filename="zone_export",
+                display_name="Zone d’export",
+                artifact_key="export_perimeter",
+                release_identifier="export_perimeter",
+                feature_collection={
+                    "type": "FeatureCollection",
+                    "features": [{
+                        "type": "Feature",
+                        "properties": {"release_id": "export_perimeter", "period": context["source"]},
+                        "geometry": mapping(context["geometry"]),
+                    }],
+                },
+                is_global=True,
+            )
+        )
+    return layers
+
+
+def _temporal_milestone_color_map(project: TemporalProject) -> dict[str, str]:
+    completed = sorted(
+        [milestone for milestone in project.milestones if milestone.status == "complete"],
+        key=lambda milestone: (_parse_date(milestone.release_date) or date.min, milestone.release_identifier),
+    )
+    return {
+        milestone.release_identifier: TEMPORAL_WEB_MILESTONE_COLORS[index - 1]
+        for index, milestone in enumerate(completed)
+        if index > 0
+    }
+
+
+def _hex_rgba(color: str, alpha: int) -> str:
+    red, green, blue = (int(color[index:index + 2], 16) for index in (1, 3, 5))
+    return f"{red},{green},{blue},{alpha}"
+
+
+def _qgis_layer_style(project: TemporalProject, layer: TemporalShapefileLayer) -> tuple[str, str, str]:
+    if layer.group_key == "zone_export":
+        return _hex_rgba("#F59E0B", 36), _hex_rgba("#D97706", 255), "0.5"
+    if layer.is_global and layer.group_key == "tous_les_nouveaux_batiments":
+        return _hex_rgba("#00C8C8", 128), _hex_rgba("#0E7490", 245), "0.4"
+    if layer.is_global:
+        return _hex_rgba("#F59E0B", 112), _hex_rgba("#C2410C", 245), "0.35"
+    color = _temporal_milestone_color_map(project).get(layer.release_identifier, "#64748B")
+    alpha = 72 if layer.group_key.startswith("buffer_") else 150
+    return _hex_rgba(color, alpha), _hex_rgba(color, 245), "0.35"
+
+
+def _write_temporal_shapefile(layer: TemporalShapefileLayer, output_dir: Path) -> Path | None:
+    records: list[dict[str, Any]] = []
+    geometries: list[BaseGeometry] = []
+    for feature in _features(layer.feature_collection):
+        geometry_payload = feature.get("geometry") if isinstance(feature, dict) else None
+        if not isinstance(geometry_payload, dict):
+            continue
+        try:
+            geometry = shape(geometry_payload).buffer(0)
+        except Exception:
+            continue
+        if geometry.is_empty:
+            continue
+        properties = feature.get("properties") if isinstance(feature.get("properties"), dict) else {}
+        records.append(
+            {
+                "release_id": str(properties.get("release_id") or layer.release_identifier)[:254],
+                "period": str(properties.get("period") or "")[:254],
+                "area_m2": _float(properties.get("area_m2")),
+                "score": _float(properties.get("score")),
+            }
+        )
+        geometries.append(geometry)
+    if not records:
+        return None
+    output_dir.mkdir(parents=True, exist_ok=True)
+    shp_path = output_dir / f"{layer.filename}.shp"
+    gdf = gpd.GeoDataFrame(records, geometry=geometries, crs="EPSG:4326")
+    gdf.to_file(shp_path, driver="ESRI Shapefile", engine="pyogrio", encoding="UTF-8")
+    cpg_path = shp_path.with_suffix(".cpg")
+    if not cpg_path.exists():
+        cpg_path.write_text("UTF-8", encoding="ascii")
+    return shp_path
+
+
+def _invalid_layer_validation(
+    path: Path,
+    display_name: str,
+    group_name: str,
+    *,
+    reason: str,
+) -> ExportedLayerValidation:
+    return ExportedLayerValidation(
+        path=path,
+        display_name=display_name,
+        group_name=group_name,
+        relative_path="",
+        feature_count=0,
+        crs_authid="",
+        xmin=0.0,
+        ymin=0.0,
+        xmax=0.0,
+        ymax=0.0,
+        is_valid_for_qgis_project=False,
+        reason=reason,
+    )
+
+
+def validate_exported_vector_layer(
+    path: Path,
+    display_name: str,
+    group_name: str,
+    root_dir: Path,
+) -> ExportedLayerValidation:
+    required = [path, path.with_suffix(".shx"), path.with_suffix(".dbf")]
+    missing = [candidate.name for candidate in required if not candidate.is_file()]
+    if missing:
+        return _invalid_layer_validation(path, display_name, group_name, reason=f"missing sidecars: {missing}")
+    try:
+        relative_path = path.resolve().relative_to(root_dir.resolve()).as_posix()
+    except ValueError:
+        return _invalid_layer_validation(path, display_name, group_name, reason="datasource path escapes export root")
+    try:
+        gdf = gpd.read_file(path, engine="pyogrio")
+    except Exception as exc:
+        return _invalid_layer_validation(path, display_name, group_name, reason=f"unable to reopen shapefile: {exc}")
+    if gdf.empty:
+        return _invalid_layer_validation(path, display_name, group_name, reason="feature_count is zero")
+    if gdf.geometry.name not in gdf.columns:
+        return _invalid_layer_validation(path, display_name, group_name, reason="geometry column is missing")
+    geometry = gdf.geometry
+    if geometry.isna().all():
+        return _invalid_layer_validation(path, display_name, group_name, reason="all geometries are null")
+    non_null = geometry.dropna()
+    if non_null.empty or non_null.is_empty.all():
+        return _invalid_layer_validation(path, display_name, group_name, reason="all geometries are empty")
+    if gdf.crs is None:
+        gdf = gdf.set_crs("EPSG:4326", allow_override=True)
+        gdf.to_file(path, driver="ESRI Shapefile", engine="pyogrio", encoding="UTF-8")
+    crs_authid = gdf.crs.to_string() if gdf.crs is not None else ""
+    if crs_authid.upper() not in {"EPSG:4326", "OGC:CRS84"}:
+        return _invalid_layer_validation(path, display_name, group_name, reason=f"unsupported CRS: {crs_authid}")
+    bounds = tuple(float(value) for value in gdf.total_bounds)
+    if len(bounds) != 4 or not all(math.isfinite(value) for value in bounds):
+        return _invalid_layer_validation(path, display_name, group_name, reason=f"non-finite bounds: {bounds}")
+    xmin, ymin, xmax, ymax = bounds
+    if xmin > xmax or ymin > ymax:
+        return _invalid_layer_validation(path, display_name, group_name, reason=f"invalid bounds: {bounds}")
+    return ExportedLayerValidation(
+        path=path,
+        display_name=display_name,
+        group_name=group_name,
+        relative_path=f"./{relative_path}",
+        feature_count=len(gdf),
+        crs_authid="EPSG:4326",
+        xmin=xmin,
+        ymin=ymin,
+        xmax=xmax,
+        ymax=ymax,
+        is_valid_for_qgis_project=True,
+    )
+
+
+def _union_bounds(bounds: list[Bounds]) -> Bounds:
+    if not bounds:
+        raise ValueError("Cannot compute an extent from zero layers.")
+    return (
+        min(item[0] for item in bounds),
+        min(item[1] for item in bounds),
+        max(item[2] for item in bounds),
+        max(item[3] for item in bounds),
+    )
+
+
+def _qgis_srs_xml(authid: str = QGIS_VECTOR_CRS, indent: str = "      ") -> list[str]:
+    if authid == QGIS_PROJECT_CRS:
+        return [
+            f"{indent}<srs>",
+            f"{indent}  <spatialrefsys nativeFormat=\"Wkt\">",
+            f"{indent}    <wkt>PROJCRS[&quot;WGS 84 / Pseudo-Mercator&quot;,BASEGEOGCRS[&quot;WGS 84&quot;,ENSEMBLE[&quot;World Geodetic System 1984 ensemble&quot;,MEMBER[&quot;World Geodetic System 1984 (Transit)&quot;],MEMBER[&quot;World Geodetic System 1984 (G730)&quot;],MEMBER[&quot;World Geodetic System 1984 (G873)&quot;],MEMBER[&quot;World Geodetic System 1984 (G1150)&quot;],MEMBER[&quot;World Geodetic System 1984 (G1674)&quot;],MEMBER[&quot;World Geodetic System 1984 (G1762)&quot;],MEMBER[&quot;World Geodetic System 1984 (G2139)&quot;],MEMBER[&quot;World Geodetic System 1984 (G2296)&quot;],ELLIPSOID[&quot;WGS 84&quot;,6378137,298.257223563,LENGTHUNIT[&quot;metre&quot;,1]],ENSEMBLEACCURACY[2.0]],PRIMEM[&quot;Greenwich&quot;,0,ANGLEUNIT[&quot;degree&quot;,0.0174532925199433]],ID[&quot;EPSG&quot;,4326]],CONVERSION[&quot;Popular Visualisation Pseudo-Mercator&quot;,METHOD[&quot;Popular Visualisation Pseudo Mercator&quot;,ID[&quot;EPSG&quot;,1024]],PARAMETER[&quot;Latitude of natural origin&quot;,0,ANGLEUNIT[&quot;degree&quot;,0.0174532925199433],ID[&quot;EPSG&quot;,8801]],PARAMETER[&quot;Longitude of natural origin&quot;,0,ANGLEUNIT[&quot;degree&quot;,0.0174532925199433],ID[&quot;EPSG&quot;,8802]],PARAMETER[&quot;False easting&quot;,0,LENGTHUNIT[&quot;metre&quot;,1],ID[&quot;EPSG&quot;,8806]],PARAMETER[&quot;False northing&quot;,0,LENGTHUNIT[&quot;metre&quot;,1],ID[&quot;EPSG&quot;,8807]]],CS[Cartesian,2],AXIS[&quot;easting (X)&quot;,east,ORDER[1],LENGTHUNIT[&quot;metre&quot;,1]],AXIS[&quot;northing (Y)&quot;,north,ORDER[2],LENGTHUNIT[&quot;metre&quot;,1]],USAGE[SCOPE[&quot;Web mapping and visualisation.&quot;],AREA[&quot;World between 85.06°S and 85.06°N.&quot;],BBOX[-85.06,-180,85.06,180]],ID[&quot;EPSG&quot;,3857]]</wkt>",
+            f"{indent}    <proj4>+proj=merc +a=6378137 +b=6378137 +lat_ts=0 +lon_0=0 +x_0=0 +y_0=0 +k=1 +units=m +nadgrids=@null +wktext +no_defs</proj4>",
+            f"{indent}    <srsid>3857</srsid>",
+            f"{indent}    <srid>3857</srid>",
+            f"{indent}    <authid>EPSG:3857</authid>",
+            f"{indent}    <description>WGS 84 / Pseudo-Mercator</description>",
+            f"{indent}    <projectionacronym>merc</projectionacronym>",
+            f"{indent}    <ellipsoidacronym>EPSG:7030</ellipsoidacronym>",
+            f"{indent}    <geographicflag>false</geographicflag>",
+            f"{indent}  </spatialrefsys>",
+            f"{indent}</srs>",
+        ]
+    return [
+        f"{indent}<srs>",
+        f"{indent}  <spatialrefsys nativeFormat=\"Wkt\">",
+        f"{indent}    <wkt>GEOGCRS[&quot;WGS 84&quot;,DATUM[&quot;World Geodetic System 1984&quot;,ELLIPSOID[&quot;WGS 84&quot;,6378137,298.257223563]],CS[ellipsoidal,2],AXIS[&quot;geodetic latitude (Lat)&quot;,north],AXIS[&quot;geodetic longitude (Lon)&quot;,east],ANGLEUNIT[&quot;degree&quot;,0.0174532925199433],ID[&quot;EPSG&quot;,4326]]</wkt>",
+        f"{indent}    <proj4>+proj=longlat +datum=WGS84 +no_defs</proj4>",
+        f"{indent}    <srsid>3452</srsid>",
+        f"{indent}    <srid>4326</srid>",
+        f"{indent}    <authid>EPSG:4326</authid>",
+        f"{indent}    <description>WGS 84</description>",
+        f"{indent}    <projectionacronym>longlat</projectionacronym>",
+        f"{indent}    <ellipsoidacronym>EPSG:7030</ellipsoidacronym>",
+        f"{indent}    <geographicflag>true</geographicflag>",
+        f"{indent}  </spatialrefsys>",
+        f"{indent}</srs>",
+    ]
+
+
+def _extent_xml(bounds: Bounds, indent: str = "      ") -> list[str]:
+    xmin, ymin, xmax, ymax = bounds
+    return [
+        f"{indent}<extent>",
+        f"{indent}  <xmin>{xmin:.15g}</xmin>",
+        f"{indent}  <ymin>{ymin:.15g}</ymin>",
+        f"{indent}  <xmax>{xmax:.15g}</xmax>",
+        f"{indent}  <ymax>{ymax:.15g}</ymax>",
+        f"{indent}</extent>",
+    ]
+
+
+def _qgis_project_extent(vector_extent_wgs84: Bounds) -> Bounds:
+    projected = reproject_geometry(
+        box(*vector_extent_wgs84),
+        QGIS_VECTOR_CRS,
+        QGIS_PROJECT_CRS,
+    )
+    xmin, ymin, xmax, ymax = (float(value) for value in projected.bounds)
+    width = max(xmax - xmin, 1.0)
+    height = max(ymax - ymin, 1.0)
+    x_padding = width * QGIS_PROJECT_EXTENT_PADDING_RATIO
+    y_padding = height * QGIS_PROJECT_EXTENT_PADDING_RATIO
+    return xmin - x_padding, ymin - y_padding, xmax + x_padding, ymax + y_padding
+
+
+def _default_visible_layer_names(layers: list[TemporalShapefileLayer]) -> set[str]:
+    visible: set[str] = set()
+    newest_additions = next((layer for layer in layers if layer.group_key == "batiments_ajoutes_par_date"), None)
+    zone = next((layer for layer in layers if layer.group_key == "zone_export"), None)
+    for layer in (newest_additions, zone):
+        if layer is not None:
+            visible.add(layer.display_name)
+    return visible
+
+
+def _reference_raster_source(project_dir: Path, milestone: TemporalMilestone) -> Path | None:
+    candidates = []
+    if milestone.reference_imagery:
+        for value in (
+            milestone.reference_imagery.canonical_cog_path,
+            milestone.reference_imagery.cog_path,
+            milestone.reference_imagery.image_path,
+        ):
+            if value:
+                candidates.append(Path(value).expanduser())
+    candidates.append(project_dir / "milestones" / milestone.release_identifier / "reference_imagery_cog.tif")
+    return next((path.resolve() for path in candidates if path.is_file()), None)
+
+
+def _copy_qgis_reference_rasters(
+    project: TemporalProject,
+    settings: Settings,
+    export_root: Path,
+) -> list[TemporalQgisRaster]:
+    from rasterio import open as rasterio_open
+    from rasterio.mask import mask as rasterio_mask
+    from rasterio.transform import array_bounds
+    from rasterio.warp import transform_bounds, transform_geom
+
+    project_dir = settings.temporal_projects_dir / project.project_id
+    context = _EXPORT_CONTEXT.get()
+    rasters: list[TemporalQgisRaster] = []
+    for milestone in [item for item in project.milestones if item.status == "complete"]:
+        source = _reference_raster_source(project_dir, milestone)
+        if source is None:
+            logger.warning(
+                "EXPORT_RESULTS_QGIS_RASTER_MISSING projectId=%s release=%s expected=%s",
+                project.project_id,
+                milestone.release_identifier,
+                project_dir / "milestones" / milestone.release_identifier / "reference_imagery_cog.tif",
+            )
+            continue
+        relative_path = Path("rasters") / _filesystem_safe_label(milestone.release_identifier) / (
+            "reference_imagery_export_zone.tif" if context else "reference_imagery_cog.tif"
+        )
+        target = export_root / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with rasterio_open(source) as source_dataset:
+            if source_dataset.crs is None:
+                raise ValueError(f"Reference raster has no CRS: {source}")
+            source_bounds = tuple(float(value) for value in source_dataset.bounds)
+            if context:
+                logger.info(
+                    "EXPORT_RESULTS_QGIS_RASTER_CLIP_START projectId=%s release=%s",
+                    project.project_id,
+                    milestone.release_identifier,
+                )
+                raster_geometry = transform_geom(QGIS_VECTOR_CRS, source_dataset.crs, mapping(context["geometry"]))
+                clipped, clipped_transform = rasterio_mask(source_dataset, [raster_geometry], crop=True)
+                profile = source_dataset.profile.copy()
+                profile.update(
+                    driver="GTiff",
+                    height=clipped.shape[1],
+                    width=clipped.shape[2],
+                    transform=clipped_transform,
+                    compress="deflate",
+                    tiled=True,
+                )
+                with rasterio_open(target, "w", **profile) as output_dataset:
+                    output_dataset.write(clipped)
+                output_bounds = tuple(
+                    float(value)
+                    for value in array_bounds(clipped.shape[1], clipped.shape[2], clipped_transform)
+                )
+                logger.info(
+                    "EXPORT_RESULTS_QGIS_RASTER_CLIPPED projectId=%s release=%s source=%s output=%s srcBounds=%s outBounds=%s bytes=%s",
+                    project.project_id,
+                    milestone.release_identifier,
+                    source,
+                    relative_path,
+                    source_bounds,
+                    output_bounds,
+                    target.stat().st_size,
+                )
+            else:
+                shutil.copy2(source, target)
+        with rasterio_open(target) as dataset:
+            if dataset.crs is None:
+                raise ValueError(f"Reference raster has no CRS: {source}")
+            bounds = tuple(float(value) for value in dataset.bounds)
+            if dataset.crs.to_string().upper() != QGIS_PROJECT_CRS:
+                bounds = transform_bounds(dataset.crs, QGIS_PROJECT_CRS, *bounds)
+        raster = TemporalQgisRaster(
+            release_identifier=milestone.release_identifier,
+            period_label=_milestone_quarter_label(milestone),
+            source_path=target,
+            relative_path=f"./{relative_path.as_posix()}",
+            layer_id=f"reference_imagery_{_filesystem_safe_label(milestone.release_identifier)}",
+            display_name=f"Imagerie de référence – {_milestone_quarter_label(milestone)}",
+            bounds_3857=bounds,
+        )
+        rasters.append(raster)
+        logger.info(
+            "EXPORT_RESULTS_QGIS_RASTER_INCLUDED projectId=%s release=%s relativePath=%s bytes=%s",
+            project.project_id,
+            milestone.release_identifier,
+            relative_path,
+            target.stat().st_size,
+        )
+    return rasters
+
+
+def _categorized_renderer_xml(project: TemporalProject, indent: str = "      ") -> list[str]:
+    colors = _temporal_milestone_color_map(project)
+    categories: list[str] = []
+    symbols: list[str] = []
+    for index, milestone in enumerate([item for item in project.milestones[1:] if item.status == "complete"]):
+        color = colors.get(milestone.release_identifier, "#64748B")
+        categories.append(
+            f'{indent}    <category value="{html.escape(milestone.release_identifier)}" symbol="{index}" label="{html.escape(_milestone_quarter_label(milestone))}" render="true"/>'
+        )
+        symbols.append(
+            f'{indent}    <symbol type="fill" name="{index}" alpha="1" clip_to_extent="1" force_rhr="0"><layer class="SimpleFill" enabled="1" pass="0" locked="0"><Option type="Map"><Option name="color" value="{_hex_rgba(color, 150)}" type="QString"/><Option name="outline_color" value="{_hex_rgba(color, 245)}" type="QString"/><Option name="outline_width" value="0.35" type="QString"/><Option name="outline_width_unit" value="Pixel" type="QString"/><Option name="style" value="solid" type="QString"/></Option></layer></symbol>'
+        )
+    return [
+        f'{indent}<renderer-v2 type="categorizedSymbol" attr="release_id" symbollevels="0" forceraster="0" enableorderby="0" referencescale="-1">',
+        f"{indent}  <categories>",
+        *categories,
+        f"{indent}  </categories>",
+        f"{indent}  <symbols>",
+        *symbols,
+        f"{indent}  </symbols>",
+        f"{indent}</renderer-v2>",
+    ]
+
+
+def _temporal_shapefile_qgs_xml(
+    project: TemporalProject,
+    layers: list[TemporalShapefileLayer],
+    validations: list[ExportedLayerValidation],
+    project_extent_wgs84: Bounds,
+    rasters: list[TemporalQgisRaster],
+) -> str:
+    project_extent_3857 = _qgis_project_extent(project_extent_wgs84)
+    layer_ids = {layer.filename: f"{layer.filename}_{index}" for index, layer in enumerate(layers, start=1)}
+    validation_by_name = {validation.display_name: validation for validation in validations}
+    visible_names = _default_visible_layer_names(layers)
+    completed = [milestone for milestone in project.milestones if milestone.status == "complete"]
+    latest_release = completed[-1].release_identifier if completed else None
+    raster_by_release = {raster.release_identifier: raster for raster in rasters}
+    lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<qgis projectname="" version="3.40.0">',
+        f"  <title>{html.escape(project.name)}</title>",
+        '  <homePath path=""/>',
+        '  <projectionsEnabled>1</projectionsEnabled>',
+        '  <autotransaction active="0"/>',
+        '  <evaluateDefaultValues active="0"/>',
+        '  <trust active="0"/>',
+    ]
+    lines.extend(["  <projectCrs>"])
+    lines.extend(_qgis_srs_xml(QGIS_PROJECT_CRS, "    ")[1:-1])
+    lines.extend(["  </projectCrs>", '  <layer-tree-group name="Résultats temporels" expanded="1">'])
+    lines.append(
+        '    <layer-tree-group name="Bâtiments ajoutés par date" checked="Qt::Checked" expanded="1" mutually-exclusive="1" mutually-exclusive-child="0">'
+    )
+    for milestone in reversed(completed):
+        is_latest = milestone.release_identifier == latest_release
+        checked = "Qt::Checked" if is_latest else "Qt::Unchecked"
+        lines.append(
+            f'      <layer-tree-group name="{html.escape(_milestone_quarter_label(milestone))}" checked="{checked}" expanded="{1 if is_latest else 0}">'
+        )
+        raster = raster_by_release.get(milestone.release_identifier)
+        for layer in [item for item in layers if not item.is_global and item.release_identifier == milestone.release_identifier]:
+            layer_checked = "Qt::Checked" if layer.group_key in {"batiments_ajoutes_par_date", "buffer_10m"} else "Qt::Unchecked"
+            lines.append(
+                f'        <layer-tree-layer id="{layer_ids[layer.filename]}" name="{html.escape(layer.display_name)}" checked="{layer_checked}" expanded="0" providerKey="ogr" source="{html.escape(validation_by_name[layer.display_name].relative_path)}"/>'
+            )
+        if raster is not None:
+            lines.append(
+                f'        <layer-tree-layer id="{raster.layer_id}" name="{html.escape(raster.display_name)}" checked="Qt::Checked" expanded="0" providerKey="gdal" source="{html.escape(raster.relative_path)}"/>'
+            )
+        lines.append("      </layer-tree-group>")
+    lines.append("    </layer-tree-group>")
+    lines.append('    <layer-tree-group name="Synthèse" expanded="1">')
+    for layer in [item for item in layers if item.is_global]:
+        checked = "Qt::Checked" if layer.display_name in visible_names else "Qt::Unchecked"
+        lines.append(
+            f'      <layer-tree-layer id="{layer_ids[layer.filename]}" name="{html.escape(layer.display_name)}" checked="{checked}" expanded="0" providerKey="ogr" source="{html.escape(validation_by_name[layer.display_name].relative_path)}"/>'
+        )
+    lines.append("    </layer-tree-group>")
+    lines.extend(["  </layer-tree-group>", "  <layerorder>"])
+    for layer in layers:
+        lines.append(f'    <layer id="{layer_ids[layer.filename]}"/>')
+    for raster in reversed(rasters):
+        lines.append(f'    <layer id="{raster.layer_id}"/>')
+    lines.extend(["  </layerorder>", "  <mapcanvas name=\"theMapCanvas\" annotationsVisible=\"1\" destinationCrs=\"EPSG:3857\">"])
+    lines.extend(_extent_xml(project_extent_3857, "    "))
+    lines.extend(_qgis_srs_xml(QGIS_PROJECT_CRS, "    "))
+    lines.extend(["    <rotation>0</rotation>", "    <renderMapTile>0</renderMapTile>", "  </mapcanvas>", "  <projectViewSettings>"])
+    lines.extend(["    <defaultViewExtent>"])
+    lines.extend(_extent_xml(project_extent_3857, "      ")[1:-1])
+    lines.extend(_qgis_srs_xml(QGIS_PROJECT_CRS, "      "))
+    lines.extend(["    </defaultViewExtent>", "  </projectViewSettings>", "  <projectlayers>"])
+    for layer in layers:
+        validation = validation_by_name[layer.display_name]
+        source = validation.relative_path
+        layer_bounds = (validation.xmin, validation.ymin, validation.xmax, validation.ymax)
+        fill_color, outline_color, outline_width = _qgis_layer_style(project, layer)
+        lines.extend(
+            [
+                f'    <maplayer type="vector" geometry="Polygon" simplifyDrawingHints="1" simplifyDrawingTol="1" simplifyLocal="1" simplifyMaxScale="1" readOnly="0" hasScaleBasedVisibilityFlag="0" autoRefreshMode="Disabled" autoRefreshTime="0" styleCategories="AllStyleCategories" name="{html.escape(layer.display_name)}" id="{layer_ids[layer.filename]}">',
+                f"      <id>{layer_ids[layer.filename]}</id>",
+                f"      <layername>{html.escape(layer.display_name)}</layername>",
+                f"      <datasource>{html.escape(source)}</datasource>",
+                "      <provider>ogr</provider>",
+            ]
+        )
+        lines.extend(_extent_xml(layer_bounds))
+        lines.extend(_qgis_srs_xml(QGIS_VECTOR_CRS))
+        if layer.group_key == "tous_les_nouveaux_batiments":
+            lines.extend(_categorized_renderer_xml(project))
+        else:
+            lines.extend(
+                [
+                    '      <renderer-v2 type="singleSymbol" symbollevels="0" forceraster="0" enableorderby="0" referencescale="-1">',
+                    '        <symbols><symbol type="fill" name="0" alpha="1" clip_to_extent="1" force_rhr="0"><layer class="SimpleFill" enabled="1" pass="0" locked="0">',
+                    f'          <Option type="Map"><Option name="color" value="{fill_color}" type="QString"/><Option name="outline_color" value="{outline_color}" type="QString"/><Option name="outline_width" value="{outline_width}" type="QString"/><Option name="outline_width_unit" value="Pixel" type="QString"/><Option name="style" value="solid" type="QString"/></Option>',
+                    "        </layer></symbol></symbols>",
+                    "      </renderer-v2>",
+                ]
+            )
+        lines.extend(["      <labeling type=\"simple\"/>", "      <customproperties/>", "    </maplayer>"])
+    for raster in rasters:
+        logger.info(
+            "EXPORT_RESULTS_QGIS_RASTER_LAYER_ADDED projectId=%s release=%s layer=%s source=%s",
+            project.project_id,
+            raster.release_identifier,
+            raster.display_name,
+            raster.relative_path,
+        )
+        lines.extend(
+            [
+                f'    <maplayer type="raster" hasScaleBasedVisibilityFlag="0" autoRefreshMode="Disabled" autoRefreshTime="0" name="{html.escape(raster.display_name)}" id="{raster.layer_id}">',
+                f"      <id>{raster.layer_id}</id>",
+                f"      <layername>{html.escape(raster.display_name)}</layername>",
+                f"      <datasource>{html.escape(raster.relative_path)}</datasource>",
+                "      <provider>gdal</provider>",
+            ]
+        )
+        lines.extend(_extent_xml(raster.bounds_3857))
+        lines.extend(_qgis_srs_xml(QGIS_PROJECT_CRS))
+        lines.extend(["    </maplayer>"])
+    lines.extend(
+        [
+            "  </projectlayers>",
+            "  <properties>",
+            "    <SpatialRefSys>",
+            '      <ProjectionsEnabled type="int">1</ProjectionsEnabled>',
+            "    </SpatialRefSys>",
+            "  </properties>",
+            "</qgis>",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _generate_qgz_with_qgis_api(
+    qgz_path: Path,
+    project: TemporalProject,
+    layers: list[TemporalShapefileLayer],
+    validations: list[ExportedLayerValidation],
+) -> bool:
+    try:
+        from qgis.core import QgsCoordinateReferenceSystem, QgsProject, QgsVectorLayer
+    except Exception:
+        return False
+    qgis_project = QgsProject()
+    qgis_project.clear()
+    qgis_project.setTitle(project.name)
+    qgis_project.setCrs(QgsCoordinateReferenceSystem("EPSG:4326"))
+    qgis_project.setFilePathStorage(QgsProject.FilePathType.Relative)
+    root = qgis_project.layerTreeRoot()
+    validation_by_name = {validation.display_name: validation for validation in validations}
+    groups: dict[str, Any] = {}
+    visible_names = _default_visible_layer_names(layers)
+    for layer in layers:
+        group = groups.get(layer.group_label)
+        if group is None:
+            group = root.addGroup(layer.group_label)
+            groups[layer.group_label] = group
+        vector = QgsVectorLayer(str(validation_by_name[layer.display_name].path), layer.display_name, "ogr")
+        if not vector.isValid():
+            return False
+        qgis_project.addMapLayer(vector, False)
+        node = group.addLayer(vector)
+        node.setItemVisibilityChecked(layer.display_name in visible_names)
+    return bool(qgis_project.write(str(qgz_path)) and qgz_path.is_file())
+
+
+def _write_temporal_shapefile_qgz(
+    path: Path,
+    project: TemporalProject,
+    layers: list[TemporalShapefileLayer],
+    validations: list[ExportedLayerValidation],
+    project_extent_wgs84: Bounds,
+    rasters: list[TemporalQgisRaster],
+) -> str:
+    logger.info("EXPORT_QGZ_GENERATE_START projectId=%s backend=styled_xml", project.project_id)
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
+        archive.writestr(
+            f"{path.stem}.qgs",
+            _temporal_shapefile_qgs_xml(project, layers, validations, project_extent_wgs84, rasters),
+        )
+    return "styled_xml"
+
+
 def build_temporal_results_shapefile_zip(project_id: str, settings: Settings | None = None) -> bytes:
     resolved_settings = _settings(settings)
     project = _load_project(project_id, resolved_settings)
-    export_now = _export_now()
-    features_by_layer: dict[str, list[dict[str, Any]]] = {}
-    for feature in _temporal_result_features(project, resolved_settings, export_now):
-        properties = feature.get("properties") or {}
-        layer_type = str(properties.get("layer_type") or "results")
-        features_by_layer.setdefault(layer_type, []).append(feature)
-
+    started_at = time.perf_counter()
+    completed = [milestone for milestone in project.milestones if milestone.status == "complete"]
+    if completed:
+        logger.info(
+            "EXPORT_LAYER_SKIPPED_BASELINE projectId=%s release=%s",
+            project_id,
+            completed[0].release_identifier,
+        )
+    for milestone in completed[1:]:
+        expected_payloads = {
+            "additions": milestone.additions_geojson,
+            "building_change_buffer_10m": milestone.buffer_layers_geojson.get("10m"),
+            "building_change_buffer_15m": milestone.buffer_layers_geojson.get("15m"),
+            "building_change_buffer_20m": milestone.buffer_layers_geojson.get("20m"),
+        }
+        for artifact_key, payload in expected_payloads.items():
+            if _features(payload):
+                continue
+            logger.info(
+                "EXPORT_LAYER_MISSING projectId=%s group=%s release=%s artifact_key=%s",
+                project_id,
+                "batiments_ajoutes_par_date" if artifact_key == "additions" else artifact_key.replace("building_change_", ""),
+                milestone.release_identifier,
+                artifact_key,
+            )
+    layers = _temporal_shapefile_export_layers(project)
+    if not layers:
+        raise ValueError(f"No non-empty temporal result layers are available for project {project_id}.")
+    group_keys = [
+        "tous_les_nouveaux_batiments",
+        "batiments_ajoutes_par_date",
+        "buffer_10m",
+        "buffer_15m",
+        "buffer_20m",
+    ]
+    if any(layer.group_key == "zone_export" for layer in layers):
+        group_keys.append("zone_export")
     zip_stream = BytesIO()
     with tempfile.TemporaryDirectory(prefix="temporal-shapefile-export-") as tmp_name:
         tmp_dir = Path(tmp_name)
-        with zipfile.ZipFile(zip_stream, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
-            for layer_type, features in sorted(features_by_layer.items()):
-                records: list[dict[str, Any]] = []
-                geometries: list[BaseGeometry] = []
-                for feature in features:
-                    geometry_payload = feature.get("geometry")
-                    if not isinstance(geometry_payload, dict):
-                        continue
-                    try:
-                        geometry = shape(geometry_payload).buffer(0)
-                    except Exception:
-                        continue
-                    if geometry.is_empty:
-                        continue
-                    properties = feature.get("properties") if isinstance(feature.get("properties"), dict) else {}
-                    records.append(
-                        {
-                            "project_id": str(properties.get("project_id") or "")[:254],
-                            "release_id": str(properties.get("release_identifier") or "")[:254],
-                            "date": str(properties.get("date") or "")[:254],
-                            "layer_type": str(properties.get("layer_type") or "")[:254],
-                            "area_m2": _float(properties.get("area_m2")),
-                            "run_id": str(properties.get("run_id") or "")[:254],
-                        }
+        written_layers: list[TemporalShapefileLayer] = []
+        validated_layers: list[ExportedLayerValidation] = []
+        for group_key in group_keys:
+            logger.info("EXPORT_GROUP_START projectId=%s group=%s", project_id, group_key)
+            (tmp_dir / group_key).mkdir(parents=True, exist_ok=True)
+            for layer in [candidate for candidate in layers if candidate.group_key == group_key]:
+                shp_path = _write_temporal_shapefile(layer, tmp_dir / group_key)
+                if shp_path is None:
+                    logger.info(
+                        "EXPORT_LAYER_SKIPPED_EMPTY projectId=%s group=%s release=%s artifact_key=%s path=%s",
+                        project_id,
+                        group_key,
+                        layer.release_identifier,
+                        layer.artifact_key,
+                        tmp_dir / group_key / f"{layer.filename}.shp",
                     )
-                    geometries.append(geometry)
-                if not records:
                     continue
-                gdf = gpd.GeoDataFrame(records, geometry=geometries, crs="EPSG:4326")
-                layer_dir = tmp_dir / layer_type
-                layer_dir.mkdir(parents=True, exist_ok=True)
-                shp_path = layer_dir / f"{layer_type}.shp"
-                gdf.to_file(shp_path, driver="ESRI Shapefile", engine="pyogrio", encoding="UTF-8")
-                for path in sorted(layer_dir.iterdir()):
-                    archive.write(path, arcname=f"{layer_type}/{path.name}")
-    return zip_stream.getvalue()
+                written_layers.append(layer)
+                validation = validate_exported_vector_layer(
+                    shp_path,
+                    layer.display_name,
+                    layer.group_label,
+                    tmp_dir,
+                )
+                if not validation.is_valid_for_qgis_project:
+                    written_layers.pop()
+                    logger.warning(
+                        "EXPORT_QGZ_LAYER_SKIPPED_INVALID projectId=%s path=%s reason=%s",
+                        project_id,
+                        shp_path,
+                        validation.reason,
+                    )
+                    continue
+                validated_layers.append(validation)
+                logger.info(
+                    "EXPORT_QGZ_LAYER_VALIDATED projectId=%s path=%s feature_count=%s crs=%s xmin=%s ymin=%s xmax=%s ymax=%s",
+                    project_id,
+                    shp_path,
+                    validation.feature_count,
+                    validation.crs_authid,
+                    validation.xmin,
+                    validation.ymin,
+                    validation.xmax,
+                    validation.ymax,
+                )
+                event = "EXPORT_GLOBAL_LAYER_WRITTEN" if layer.is_global else "EXPORT_LAYER_WRITTEN"
+                logger.info(
+                    "%s projectId=%s group=%s release=%s artifact_key=%s feature_count=%s path=%s",
+                    event,
+                    project_id,
+                    group_key,
+                    layer.release_identifier,
+                    layer.artifact_key,
+                    len(_features(layer.feature_collection)),
+                    shp_path,
+                )
+        if not written_layers:
+            raise ValueError(f"No valid temporal result geometries are available for project {project_id}.")
+        rasters = _copy_qgis_reference_rasters(project, resolved_settings, tmp_dir)
+        if not rasters:
+            logger.warning("EXPORT_RESULTS_QGIS_RASTER_ALL_MISSING projectId=%s", project_id)
+        validation_by_name = {validation.display_name: validation for validation in validated_layers}
+        for group_key in group_keys:
+            group_layers = [layer for layer in written_layers if layer.group_key == group_key]
+            if not group_layers:
+                continue
+            group_extent = _union_bounds(
+                [
+                    (
+                        validation_by_name[layer.display_name].xmin,
+                        validation_by_name[layer.display_name].ymin,
+                        validation_by_name[layer.display_name].xmax,
+                        validation_by_name[layer.display_name].ymax,
+                    )
+                    for layer in group_layers
+                ]
+            )
+            logger.info(
+                "EXPORT_QGZ_GROUP_EXTENT projectId=%s group=%s xmin=%s ymin=%s xmax=%s ymax=%s layer_count=%s",
+                project_id,
+                group_key,
+                *group_extent,
+                len(group_layers),
+            )
+        project_extent = _union_bounds(
+            [(item.xmin, item.ymin, item.xmax, item.ymax) for item in validated_layers]
+        )
+        projected_extent = _qgis_project_extent(project_extent)
+        logger.info(
+            "EXPORT_QGZ_SOURCE_VECTOR_EXTENT projectId=%s crs=%s xmin=%s ymin=%s xmax=%s ymax=%s",
+            project_id,
+            QGIS_VECTOR_CRS,
+            *project_extent,
+        )
+        logger.info(
+            "EXPORT_QGZ_PROJECT_EXTENT projectId=%s crs=%s paddingRatio=%s xmin=%s ymin=%s xmax=%s ymax=%s",
+            project_id,
+            QGIS_PROJECT_CRS,
+            QGIS_PROJECT_EXTENT_PADDING_RATIO,
+            *projected_extent,
+        )
+        logger.info(
+            "EXPORT_QGZ_LAYER_ORDER projectId=%s order=%s",
+            project_id,
+            ",".join([*[layer.display_name for layer in written_layers], *[raster.display_name for raster in rasters]]),
+        )
+        logger.info(
+            'EXPORT_RESULTS_QGIS_LAYER_TREE projectId=%s rootGroup="Bâtiments ajoutés par date" mutuallyExclusive=true groups=Synthèse',
+            project_id,
+        )
+        logger.info(
+            "EXPORT_RESULTS_QGIS_DEFAULT_VISIBILITY projectId=%s activeDate=%s raster=true additions=true buffer10=true buffer15=false buffer20=false",
+            project_id,
+            _milestone_quarter_label(completed[-1]) if completed else "",
+        )
+        logger.info("EXPORT_RESULTS_QGIS_ONLINE_BASEMAP_REMOVED projectId=%s", project_id)
+        qgz_path = tmp_dir / f"resultats_{_filesystem_safe_label(project.project_id)}.qgz"
+        qgz_backend = _write_temporal_shapefile_qgz(
+            qgz_path,
+            project,
+            written_layers,
+            validated_layers,
+            project_extent,
+            rasters,
+        )
+        if not qgz_path.is_file() or qgz_path.stat().st_size <= 1024:
+            logger.error(
+                "EXPORT_QGZ_VALIDATION_FAILED projectId=%s path=%s reason=missing_or_unrealistically_small",
+                project_id,
+                qgz_path,
+            )
+            raise ValueError(f"Generated QGZ is missing or unrealistically small: {qgz_path}")
+        logger.info(
+            "EXPORT_RESULTS_QGIS_WRITTEN projectId=%s qgz=%s vectorLayers=%s rasterLayers=%s backend=%s projectCrs=%s bytes=%s",
+            project_id,
+            qgz_path,
+            len(written_layers),
+            len(rasters),
+            qgz_backend,
+            QGIS_PROJECT_CRS,
+            qgz_path.stat().st_size,
+        )
+        with zipfile.ZipFile(zip_stream, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
+            for group_key in group_keys:
+                archive.writestr(f"{group_key}/", b"")
+            archive.write(qgz_path, arcname=qgz_path.name)
+            for path in sorted(tmp_dir.rglob("*")):
+                if path.is_file() and path != qgz_path:
+                    archive.write(path, arcname=str(path.relative_to(tmp_dir)))
+    payload = zip_stream.getvalue()
+    logger.info(
+        "EXPORT_ZIP_WRITTEN projectId=%s path=results_shapefile.zip bytes=%s durationMs=%s",
+        project_id,
+        len(payload),
+        round((time.perf_counter() - started_at) * 1000, 2),
+    )
+    return payload
 
 
 def _project_json_path(project_id: str, settings: Settings) -> Path:
@@ -1340,6 +2330,10 @@ def _project_json_path(project_id: str, settings: Settings) -> Path:
 
 
 def _topojson_export_metadata_path(path: Path) -> Path:
+    return path.with_name(f"{path.name}.metadata.json")
+
+
+def _shapefile_export_metadata_path(path: Path) -> Path:
     return path.with_name(f"{path.name}.metadata.json")
 
 
@@ -1354,6 +2348,17 @@ def _topojson_cache_version_is_valid(path: Path) -> bool:
     return metadata.get("version") == TOPOJSON_EXPORT_VERSION
 
 
+def _shapefile_cache_version_is_valid(path: Path) -> bool:
+    metadata_path = _shapefile_export_metadata_path(path)
+    if not metadata_path.is_file():
+        return False
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return metadata.get("version") == SHAPEFILE_EXPORT_VERSION
+
+
 def _write_topojson_export_metadata(path: Path, project_id: str) -> None:
     metadata = {
         "version": TOPOJSON_EXPORT_VERSION,
@@ -1366,10 +2371,21 @@ def _write_topojson_export_metadata(path: Path, project_id: str) -> None:
     _atomic_write_bytes(_topojson_export_metadata_path(path), json.dumps(metadata, separators=(",", ":")).encode("utf-8"))
 
 
+def _write_shapefile_export_metadata(path: Path, project_id: str) -> None:
+    metadata = {
+        "version": SHAPEFILE_EXPORT_VERSION,
+        "project_id": project_id,
+        "updated_at": _export_now().isoformat().replace("+00:00", "Z"),
+    }
+    _atomic_write_bytes(_shapefile_export_metadata_path(path), json.dumps(metadata, separators=(",", ":")).encode("utf-8"))
+
+
 def _export_cache_is_valid(path: Path, project_id: str, settings: Settings, export_format: str | None = None) -> bool:
     if not path.is_file():
         return False
     if export_format == "topojson" and not _topojson_cache_version_is_valid(path):
+        return False
+    if export_format == "shapefile" and not _shapefile_cache_version_is_valid(path):
         return False
     project_path = _project_json_path(project_id, settings)
     if not project_path.is_file():
@@ -1388,7 +2404,12 @@ def _atomic_write_bytes(path: Path, payload: bytes) -> None:
             tmp_path.unlink(missing_ok=True)
 
 
-def build_temporal_results_export_file(project_id: str, export_format: str, settings: Settings | None = None) -> Path:
+def build_temporal_results_export_file(
+    project_id: str,
+    export_format: str,
+    settings: Settings | None = None,
+    perimeter: dict[str, Any] | None = None,
+) -> Path:
     resolved_settings = _settings(settings)
     normalized_format = export_format.lower()
     if normalized_format == "zip":
@@ -1397,15 +2418,24 @@ def build_temporal_results_export_file(project_id: str, export_format: str, sett
         raise ValueError(f"Unsupported temporal results export format: {export_format}")
 
     started_at = datetime.now(UTC)
+    project = _load_project(project_id, resolved_settings)
+    export_context = resolve_export_perimeter(project, perimeter)
+    context_token = _EXPORT_CONTEXT.set(export_context)
+    is_custom_export = export_context is not None
+    custom_suffix = ""
+    if is_custom_export:
+        geometry_hash = hashlib.sha256(export_context["geometry"].wkb).hexdigest()[:12]
+        custom_suffix = f".custom-{geometry_hash}"
     cache_path = (
         resolved_settings.temporal_projects_dir
         / project_id
         / "exports"
-        / TEMPORAL_RESULTS_EXPORT_FILENAMES[normalized_format]
+        / (TEMPORAL_RESULTS_EXPORT_FILENAMES[normalized_format] + custom_suffix)
     )
     logger.info("EXPORT_REQUEST projectId=%s format=%s", project_id, normalized_format)
-    if _export_cache_is_valid(cache_path, project_id, resolved_settings, normalized_format):
+    if not is_custom_export and _export_cache_is_valid(cache_path, project_id, resolved_settings, normalized_format):
         logger.info("EXPORT_CACHE_HIT projectId=%s format=%s path=%s", project_id, normalized_format, cache_path)
+        _EXPORT_CONTEXT.reset(context_token)
         return cache_path
 
     logger.info("EXPORT_GENERATE_START projectId=%s format=%s", project_id, normalized_format)
@@ -1421,11 +2451,15 @@ def build_temporal_results_export_file(project_id: str, export_format: str, sett
         }
         payload = builders[normalized_format](project_id, settings=resolved_settings)
         _atomic_write_bytes(cache_path, payload)
-        if normalized_format == "topojson":
+        if not is_custom_export and normalized_format == "topojson":
             _write_topojson_export_metadata(cache_path, project_id)
+        elif not is_custom_export and normalized_format == "shapefile":
+            _write_shapefile_export_metadata(cache_path, project_id)
     except Exception as exc:
         logger.exception("EXPORT_GENERATE_FAILED projectId=%s format=%s error=%s", project_id, normalized_format, exc)
         raise
+    finally:
+        _EXPORT_CONTEXT.reset(context_token)
     duration_ms = round((datetime.now(UTC) - started_at).total_seconds() * 1000, 2)
     logger.info(
         "EXPORT_GENERATE_DONE projectId=%s format=%s bytes=%s durationMs=%s",

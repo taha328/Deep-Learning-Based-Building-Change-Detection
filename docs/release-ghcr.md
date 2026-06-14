@@ -1,10 +1,10 @@
 # GHCR Image Release Guide
 
-This project uses GitHub Container Registry for client deployment images.
+This project uses GitHub Container Registry for packaged deployment images.
 
 ## Images
 
-CPU client delivery images:
+CPU deployment images:
 
 ```text
 ghcr.io/taha328/building-change-backend:cpu-v0.1.0
@@ -18,7 +18,7 @@ The CPU backend and frontend tags are published as multi-platform images for
 for the host architecture. These images support Docker hosts with sufficient RAM
 and disk on those two architectures.
 
-The client deployment uses `imresamu/postgis:16-3.4`, which publishes native
+The packaged deployment uses `imresamu/postgis:16-3.4`, which publishes native
 `linux/amd64` and `linux/arm64` variants while preserving PostgreSQL 16 and
 PostGIS 3.4 compatibility. The image labels identify its source as the upstream
 `postgis/docker-postgis` project. The selected image is configurable through
@@ -44,7 +44,7 @@ Workflow:
 Manual publish:
 
 1. Open GitHub Actions.
-2. Select `Publish client images`.
+2. Select `Publish deployment images`.
 3. Click `Run workflow`.
 4. Set `version` to `v0.1.0`.
 5. Leave `publish_cuda` unchecked for the supported CPU release.
@@ -67,14 +67,14 @@ Public packages allow clients to pull the images without `docker login ghcr.io`.
 
 If packages must remain private:
 
-1. Grant the client GitHub account or organization access to the packages.
-2. Instruct the client to authenticate before startup:
+1. Grant the authorized GitHub account or organization access to the packages.
+2. Authenticate before startup:
 
    ```bash
    docker login ghcr.io
    ```
 
-Do not commit personal access tokens, fine-grained tokens, classic PATs, or client
+Do not commit personal access tokens, fine-grained tokens, classic PATs, or deployment
 credentials to this repository or deployment bundle.
 
 ## Verify Package Publication

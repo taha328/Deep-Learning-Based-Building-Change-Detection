@@ -7,12 +7,14 @@ from src.execution_profiles import PipelineExecutionConfig
 
 
 ModeName = Literal["fast_preview", "full_run"]
-InferenceBackendName = Literal["bandon_mps", "mtgcdnet_s2looking_mps"]
-LatestImagerySource = Literal["esri_wayback", "mapbox_current"]
+InferenceBackendName = Literal["bandon_mps"]
 ReferenceLayerKind = Literal["vector", "raster"]
 ReferenceGeometryType = Literal["point", "line", "polygon", "mixed", "raster"]
 ReferenceLayerScope = Literal["aoi_clipped", "full_layer"]
 ReferenceLayerStorageStrategy = Literal["geojson", "gpkg", "postgis", "pmtiles", "mbtiles", "cog", "raster_tiles"]
+TemporalExportFormat = Literal["xlsx", "kml", "geojson", "topojson", "shapefile", "tsv", "json"]
+TemporalExportPerimeterMode = Literal["project_aoi", "custom_geometry"]
+TemporalExportPerimeterSource = Literal["drawn", "imported"]
 
 
 class GeoJSONGeometry(BaseModel):
@@ -35,6 +37,37 @@ class GeoJSONFeatureCollection(BaseModel):
 
     type: Literal["FeatureCollection"] = "FeatureCollection"
     features: list[GeoJSONFeature] = Field(default_factory=list)
+
+
+class TemporalExportPerimeter(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: TemporalExportPerimeterMode = "project_aoi"
+    source: TemporalExportPerimeterSource | None = None
+    geometry: GeoJSONGeometry | None = None
+
+    @field_validator("geometry")
+    @classmethod
+    def validate_geometry_type(cls, value: GeoJSONGeometry | None) -> GeoJSONGeometry | None:
+        if value is not None and value.type not in {"Polygon", "MultiPolygon"}:
+            raise ValueError("Export perimeter geometry must be a Polygon or MultiPolygon.")
+        return value
+
+
+class TemporalResultsExportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    format: TemporalExportFormat
+    perimeter: TemporalExportPerimeter = Field(default_factory=TemporalExportPerimeter)
+
+    @field_validator("perimeter")
+    @classmethod
+    def validate_perimeter(cls, value: TemporalExportPerimeter) -> TemporalExportPerimeter:
+        if value.mode == "project_aoi" and (value.geometry is not None or value.source is not None):
+            raise ValueError("project_aoi perimeter must not include source or geometry.")
+        if value.mode == "custom_geometry" and (value.geometry is None or value.source is None):
+            raise ValueError("custom_geometry perimeter requires source and geometry.")
+        return value
 
 
 class ReleaseMetadata(BaseModel):
@@ -132,7 +165,7 @@ class ValidationRequest(BaseModel):
     t2_release: str
     mode: ModeName
     inference_backend: InferenceBackendName | None = None
-    change_threshold: float | None = None
+    change_threshold: float | None = Field(default=None, ge=0.01, le=0.99)
     semantic_threshold: float | None = None
     min_new_building_pixels: int | None = None
     min_new_building_area_m2: float | None = None
@@ -143,7 +176,6 @@ class ValidationRequest(BaseModel):
     buffer_distances_m: list[float] | None = None
     keep_disjoint_buffer_parts_separate: bool = True
     road_constraint_layer_path: str | None = None
-    latest_source: LatestImagerySource = "esri_wayback"
     existing_footprint_geojson: dict[str, Any] | None = None
 
     @field_validator("buffer_distances_m")
@@ -174,8 +206,8 @@ class ValidationResponse(BaseModel):
 class RunRequest(ValidationRequest):
     model_config = ConfigDict(extra="forbid")
 
-    change_threshold: float = 0.60
-    semantic_threshold: float = 0.50
+    change_threshold: float | None = Field(default=None, ge=0.01, le=0.99)
+    semantic_threshold: float | None = None
     old_building_mask_dilation_pixels: int = 2
     new_building_core_distance_pixels: int = 2
     merge_close_gap_m: float = 10.0
@@ -386,7 +418,21 @@ class TemporalProject(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     validation_blocking_errors: list[str] = Field(default_factory=list)
     download_bundle_path: str | None = None
-    latest_source: LatestImagerySource = "esri_wayback"
+
+
+def validate_stored_temporal_project(value: Any) -> TemporalProject:
+    """Load persisted projects written before latest-source removal."""
+    if isinstance(value, dict):
+        value = dict(value)
+        value.pop("latest_source", None)
+        milestones = value.get("milestones")
+        if isinstance(milestones, list):
+            value["milestones"] = [
+                milestone
+                for milestone in milestones
+                if not isinstance(milestone, dict) or milestone.get("release_identifier") != "mapbox.satellite"
+            ]
+    return TemporalProject.model_validate(value)
 
 
 class TemporalProjectResponse(TemporalProject):
@@ -441,6 +487,12 @@ class TemporalProjectRunResponse(BaseModel):
     success: bool = True
     error_message: str | None = None
     project: TemporalProject
+
+
+class TemporalProjectRunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    change_threshold: float | None = Field(default=None, ge=0.01, le=0.99)
 
 
 class TemporalProjectReference(BaseModel):

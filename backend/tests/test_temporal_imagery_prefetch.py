@@ -7,7 +7,6 @@ from types import SimpleNamespace
 
 from src.config import Settings
 from src.domain.cache import save_cached_response
-from src.domain.mapbox_current import MAPBOX_SOURCE_ID
 from src.domain.mosaic import MosaicResult
 from src.execution_profiles import PipelineExecutionConfig
 from src.schemas import RunRequest, RunResponse, SummaryStats, TemporalProject
@@ -70,21 +69,6 @@ def _sample_project(project_id: str = "temporal-prefetch") -> TemporalProject:
             {"release_identifier": "WB_2025_R01"},
             {"release_identifier": "WB_2026_R01"},
         ],
-        created_at="2026-05-01T00:00:00Z",
-        updated_at="2026-05-01T00:00:00Z",
-    )
-
-
-def _mapbox_project(project_id: str = "temporal-prefetch-mapbox") -> TemporalProject:
-    return TemporalProject(
-        project_id=project_id,
-        name="Temporal Prefetch Mapbox",
-        aoi_geojson=_sample_project().aoi_geojson,
-        milestones=[
-            {"release_identifier": "WB_2025_R01"},
-            {"release_identifier": "WB_2026_R01"},
-        ],
-        latest_source="mapbox_current",
         created_at="2026-05-01T00:00:00Z",
         updated_at="2026-05-01T00:00:00Z",
     )
@@ -174,15 +158,13 @@ def _fake_mosaic_result(cache_dir: Path, *, provider: str, identifier: str, sour
     )
 
 
-def test_temporal_imagery_prefetch_plan_builds_expected_pairs_for_mapbox_latest(monkeypatch, tmp_path) -> None:
+def test_temporal_imagery_prefetch_plan_builds_wayback_pairs_only(monkeypatch, tmp_path) -> None:
     settings = Settings(
         runtime_cache_dir=tmp_path,
         temporal_imagery_prefetch_enabled=True,
-        mapbox_current_imagery_enabled=True,
-        mapbox_access_token="test-token",
     )
     monkeypatch.setattr("src.services.temporal_projects.list_releases", lambda _: _sample_releases(settings))
-    project = save_temporal_project(_mapbox_project(), settings)
+    project = save_temporal_project(_sample_project(), settings)
 
     plan = _plan_temporal_milestone_runs(
         project,
@@ -195,9 +177,9 @@ def test_temporal_imagery_prefetch_plan_builds_expected_pairs_for_mapbox_latest(
     assert len(prefetch_plan) == 2
     assert [(item.t1_provider, item.t2_provider) for item in prefetch_plan] == [
         ("esri_wayback", "esri_wayback"),
-        ("esri_wayback", "mapbox"),
+        ("esri_wayback", "esri_wayback"),
     ]
-    assert prefetch_plan[-1].t2_release_identifier == MAPBOX_SOURCE_ID
+    assert prefetch_plan[-1].t2_release_identifier == "WB_2026_R01"
     assert prefetch_plan[-1].t2_effective_release_identifier == "WB_2026_R01"
 
 
@@ -206,11 +188,9 @@ def test_run_temporal_imagery_prefetch_uses_shared_cache_only_without_manifest_o
         runtime_cache_dir=tmp_path,
         temporal_imagery_prefetch_enabled=True,
         temporal_imagery_prefetch_workers=1,
-        mapbox_current_imagery_enabled=True,
-        mapbox_access_token="test-token",
     )
     monkeypatch.setattr("src.services.temporal_projects.list_releases", lambda _: _sample_releases(settings))
-    project = save_temporal_project(_mapbox_project("prefetch-no-manifest"), settings)
+    project = save_temporal_project(_sample_project("prefetch-no-manifest"), settings)
     plan = _plan_temporal_milestone_runs(
         project,
         settings=settings,
@@ -227,13 +207,8 @@ def test_run_temporal_imagery_prefetch_uses_shared_cache_only_without_manifest_o
         download_calls.append(("esri_wayback", release.identifier, settings.materialize_source_imagery_in_requests, settings.download_workers))
         return _fake_mosaic_result(settings.wayback_mosaic_cache_dir / release.identifier, provider="esri_wayback", identifier=release.identifier, source_type="historical_release")
 
-    def _fake_mapbox_download(self, bbox, *, settings, zoom=None, aoi_geojson=None):
-        download_calls.append(("mapbox", MAPBOX_SOURCE_ID, settings.materialize_source_imagery_in_requests, settings.download_workers))
-        return _fake_mosaic_result(settings.mapbox_current_imagery_cache_dir / "mapbox", provider="mapbox", identifier=MAPBOX_SOURCE_ID, source_type="current_basemap")
-
     monkeypatch.setattr("src.services.temporal_projects._resolve_release_for_aoi", _fake_resolve)
     monkeypatch.setattr("src.services.temporal_projects.EsriWaybackProvider.download", _fake_wayback_download)
-    monkeypatch.setattr("src.services.temporal_projects.MapboxCurrentProvider.download", _fake_mapbox_download)
 
     results = _run_temporal_imagery_prefetch(project, settings=settings, pair_plan=plan)
 
@@ -251,12 +226,10 @@ def test_run_temporal_project_prefetches_before_serial_pair_runner_and_writes_ti
         runtime_cache_dir=tmp_path,
         temporal_imagery_prefetch_enabled=True,
         temporal_imagery_prefetch_workers=1,
-        mapbox_current_imagery_enabled=True,
-        mapbox_access_token="test-token",
     )
     releases = _sample_releases(settings)
     monkeypatch.setattr("src.services.temporal_projects.list_releases", lambda _: releases)
-    project = save_temporal_project(_mapbox_project("prefetch-run-order"), settings)
+    project = save_temporal_project(_sample_project("prefetch-run-order"), settings)
 
     events: list[str] = []
 
@@ -267,16 +240,11 @@ def test_run_temporal_project_prefetches_before_serial_pair_runner_and_writes_ti
         events.append(f"prefetch:esri:{release.identifier}:{label}")
         return _fake_mosaic_result(settings.wayback_mosaic_cache_dir / f"{release.identifier}-{label}", provider="esri_wayback", identifier=release.identifier, source_type="historical_release")
 
-    def _fake_mapbox_download(self, bbox, *, settings, zoom=None):
-        events.append("prefetch:mapbox:mapbox.satellite")
-        return _fake_mosaic_result(settings.mapbox_current_imagery_cache_dir / "mapbox-run", provider="mapbox", identifier=MAPBOX_SOURCE_ID, source_type="current_basemap")
-
     monkeypatch.setattr("src.services.temporal_projects._resolve_release_for_aoi", _fake_resolve)
     monkeypatch.setattr("src.services.temporal_projects.EsriWaybackProvider.download", _fake_wayback_download)
-    monkeypatch.setattr("src.services.temporal_projects.MapboxCurrentProvider.download", _fake_mapbox_download)
 
     def _pair_runner(request: RunRequest) -> RunResponse:
-        events.append(f"pair_runner:{request.t1_release}->{request.t2_release}:{request.latest_source}")
+        events.append(f"pair_runner:{request.t1_release}->{request.t2_release}")
         response = _bandon_pair_response(settings, request, releases=releases)
         save_cached_response(settings, response.summary.request_hash, response)
         return response
@@ -291,8 +259,8 @@ def test_run_temporal_project_prefetches_before_serial_pair_runner_and_writes_ti
     assert response.success is True
     pair_events = [event for event in events if event.startswith("pair_runner:")]
     assert pair_events == [
-        "pair_runner:WB_2025_R01->WB_2026_R01:esri_wayback",
-        "pair_runner:WB_2026_R01->WB_2026_R01:mapbox_current",
+        "pair_runner:WB_2024_R01->WB_2025_R01",
+        "pair_runner:WB_2025_R01->WB_2026_R01",
     ]
     first_pair_event_index = events.index(pair_events[0])
     assert all(event.startswith("prefetch:") for event in events[:first_pair_event_index])

@@ -6,11 +6,11 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from src.config import Settings
+from src.config import Settings, resolve_inference_checkpoint
 from src.domain.bandon_runner import probe_bandon_runtime
 
 
-InferenceBackendName = Literal["bandon_mps", "mtgcdnet_s2looking_mps"]
+InferenceBackendName = Literal["bandon_mps"]
 BackendProbeMode = InferenceBackendName
 ModelDeviceName = Literal["auto", "cpu", "cuda", "mps"]
 
@@ -46,11 +46,28 @@ class InferenceRuntimeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     backend: InferenceBackendName
+    checkpoint_env_var: str
     checkpoint_path: Path
     change_threshold: float
+    semantic_threshold: float
+    threshold_source: Literal["backend_settings_env"] = "backend_settings_env"
     device: ModelDeviceName
     repo_dir: Path
     config_path: Path
+
+    def diagnostics(self) -> dict[str, str]:
+        return {
+            "inference_backend_requested": self.backend,
+            "inference_backend_resolved": self.backend,
+            "checkpoint_env_var_used": self.checkpoint_env_var,
+            "checkpoint_path_resolved": str(self.checkpoint_path),
+            "checkpoint_exists": str(self.checkpoint_path.is_file()).lower(),
+            "checkpoint_size_bytes": str(self.checkpoint_path.stat().st_size),
+            "change_threshold": str(self.change_threshold),
+            "semantic_threshold": str(self.semantic_threshold),
+            "threshold_source": self.threshold_source,
+            "device_requested": self.device,
+        }
 
 
 class LocalInferenceBackend:
@@ -59,11 +76,7 @@ class LocalInferenceBackend:
     def __init__(self, execution_config: PipelineExecutionConfig) -> None:
         self.execution_config = execution_config
         self.probe_mode: InferenceBackendName = execution_config.inference_backend
-        self.label = (
-            "BANDON MTGCDNet (Local)"
-            if self.probe_mode == "bandon_mps"
-            else "MTGCDNet S2Looking (Local)"
-        )
+        self.label = "BANDON (Local)"
 
     def configure_settings(self, settings: Settings) -> Settings:
         return settings.model_copy(update={"inference_backend": self.execution_config.inference_backend})
@@ -71,8 +84,8 @@ class LocalInferenceBackend:
     def availability(self, settings: Settings) -> BackendAvailability:
         configured = self.configure_settings(settings)
         try:
-            resolve_inference_runtime(configured)
-        except RuntimeError as exc:
+            runtime = resolve_inference_runtime(configured)
+        except (RuntimeError, ValueError) as exc:
             return BackendAvailability(
                 mode=self.probe_mode,
                 label=self.label,
@@ -81,13 +94,15 @@ class LocalInferenceBackend:
                 reason=str(exc),
             )
         probe = probe_bandon_runtime(configured)
+        diagnostics = runtime.diagnostics()
+        diagnostics.update(probe.diagnostics())
         return BackendAvailability(
             mode=self.probe_mode,
             label=self.label,
             available=probe.available,
             enabled_by_default=configured.inference_backend == self.probe_mode,
             reason=None if probe.available else probe.message,
-            diagnostics=probe.diagnostics(),
+            diagnostics=diagnostics,
         )
 
     def enforce_remote_patch_budget(self) -> bool:
@@ -105,14 +120,21 @@ class LocalInferenceBackend:
         return {
             "model_backend": self.model_backend,
             "inference_backend": runtime.backend,
-            "bandon_processing_version": 3,
+            "inference_backend_requested": runtime.backend,
+            "inference_backend_resolved": runtime.backend,
+            "bandon_processing_version": 4,
             "bandon_repo_dir": str(runtime.repo_dir),
             "bandon_config_path": str(config_path),
             "checkpoint_path": str(checkpoint_path),
+            "checkpoint_env_var_used": runtime.checkpoint_env_var,
+            "checkpoint_path_resolved": str(checkpoint_path),
+            "checkpoint_exists": checkpoint_path.is_file(),
+            "checkpoint_size_bytes": checkpoint_path.stat().st_size,
             "checkpoint_sha256": _sha256_file_or_none(checkpoint_path) or "",
             "device": runtime.device,
+            "device_requested": runtime.device,
             "change_threshold": runtime.change_threshold,
-            "semantic_threshold": configured.default_semantic_threshold,
+            "threshold_source": runtime.threshold_source,
         }
 
     def create_inference_runner(self, settings: Settings):
@@ -121,30 +143,17 @@ class LocalInferenceBackend:
 
 
 def resolve_inference_runtime(settings: Settings) -> InferenceRuntimeConfig:
-    if settings.inference_backend == "bandon_mps":
-        return InferenceRuntimeConfig(
-            backend="bandon_mps",
-            checkpoint_path=settings.bandon_checkpoint_path,
-            change_threshold=settings.default_change_threshold,
-            device=settings.bandon_device,
-            repo_dir=settings.bandon_repo_dir,
-            config_path=settings.bandon_config_path,
-        )
-    if settings.inference_backend == "mtgcdnet_s2looking_mps":
-        if settings.s2looking_checkpoint_path is None:
-            raise RuntimeError(
-                "APP_S2LOOKING_CHECKPOINT_PATH is required when "
-                "APP_INFERENCE_BACKEND=mtgcdnet_s2looking_mps."
-            )
-        return InferenceRuntimeConfig(
-            backend="mtgcdnet_s2looking_mps",
-            checkpoint_path=settings.s2looking_checkpoint_path,
-            change_threshold=settings.s2looking_change_threshold,
-            device=settings.bandon_device,
-            repo_dir=settings.bandon_repo_dir,
-            config_path=settings.bandon_config_path,
-        )
-    raise RuntimeError(f"Unsupported inference backend: {settings.inference_backend}")
+    checkpoint = resolve_inference_checkpoint(settings)
+    return InferenceRuntimeConfig(
+        backend=checkpoint.backend,
+        checkpoint_env_var=checkpoint.env_var,
+        checkpoint_path=checkpoint.path,
+        change_threshold=settings.change_threshold,
+        semantic_threshold=settings.semantic_threshold,
+        device=settings.bandon_device,
+        repo_dir=settings.bandon_repo_dir,
+        config_path=settings.bandon_config_path,
+    )
 
 
 def resolve_backend(
@@ -154,12 +163,12 @@ def resolve_backend(
 ) -> LocalInferenceBackend:
     if execution_config is None:
         backend = settings.inference_backend if settings is not None else "bandon_mps"
-        execution_config = PipelineExecutionConfig(inference_backend=backend)  # type: ignore[arg-type]
+        execution_config = PipelineExecutionConfig(inference_backend=backend)
     return LocalInferenceBackend(execution_config)
 
 
 def resolve_configured_inference_execution_config(settings: Settings) -> PipelineExecutionConfig:
-    return PipelineExecutionConfig(inference_backend=settings.inference_backend)  # type: ignore[arg-type]
+    return PipelineExecutionConfig(inference_backend=settings.inference_backend)
 
 
 def collect_backend_availability(
@@ -169,7 +178,4 @@ def collect_backend_availability(
 ) -> list[BackendAvailability]:
     if execution_config is not None:
         return [resolve_backend(execution_config, settings=settings).availability(settings)]
-    return [
-        resolve_backend(PipelineExecutionConfig(inference_backend="bandon_mps"), settings=settings).availability(settings),
-        resolve_backend(PipelineExecutionConfig(inference_backend="mtgcdnet_s2looking_mps"), settings=settings).availability(settings),
-    ]
+    return [resolve_backend(PipelineExecutionConfig(inference_backend="bandon_mps"), settings=settings).availability(settings)]
