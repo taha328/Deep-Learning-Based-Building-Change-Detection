@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import redis
@@ -22,6 +23,9 @@ from src.repositories.job_repository import (
     normalize_job_status,
 )
 from src.schemas import RunRequest, TemporalProjectRunRequest
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _broker_url(settings: Settings) -> str:
@@ -201,6 +205,21 @@ def cancel_job(job_id: str, *, settings: Settings) -> JobResponse:
         raise JobNotFoundError(str(exc), details={"job_id": job_id}) from exc
 
 
-def mark_job_execution_failed(job_id: str, message: str, *, settings: Settings, error_code: str = "runtime_error") -> None:
-    with session_scope(settings) as session:
-        mark_job_failed(job_id=job_id, error_code=error_code, error_message=message, session=session)
+def mark_job_execution_failed(job_id: str, message: str, *, settings: Settings, error_code: str = "runtime_error") -> bool:
+    try:
+        with session_scope(settings) as session:
+            mark_job_failed(
+                job_id=job_id,
+                error_code=error_code,
+                error_message=message,
+                settings=settings,
+                session=session,
+            )
+    except Exception:  # noqa: BLE001
+        LOGGER.exception(
+            "JOB_FAILURE_PERSISTENCE_FAILED jobId=%s originalError=%s",
+            job_id,
+            message,
+        )
+        return False
+    return True

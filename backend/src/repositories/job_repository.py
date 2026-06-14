@@ -233,31 +233,33 @@ def mark_job_failed(
                 session=scoped_session,
             )
 
-    resolved_settings = settings or Settings()
     record = _get_job(session, job_id)
     record.status = "failed"
     record.progress = 100
     record.stage = "failed"
     record.error_code = error_code
     record.error_message = error_message
-    record.raw_result = (
-        externalize_payload_if_needed(
+    if raw_result is None:
+        record.raw_result = None
+    elif settings is None:
+        # Failure persistence must not depend on fully validating runtime/model
+        # settings. Keep the error payload inline when no settings were supplied.
+        record.raw_result = raw_result
+    else:
+        record.raw_result = externalize_payload_if_needed(
             raw_result,
-            settings=resolved_settings,
+            settings=settings,
             table="jobs",
             column="raw_result",
             schema="job_result_v1",
             target_path=payload_storage_path(
-                resolved_settings,
+                settings,
                 table="jobs",
                 column="raw_result",
                 key=job_id,
                 filename="raw_result.json",
             ),
         )
-        if raw_result is not None
-        else None
-    )
     if record.completed_at is None:
         record.completed_at = utc_now()
     return record

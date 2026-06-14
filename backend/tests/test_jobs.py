@@ -14,7 +14,7 @@ from src.jobs import tasks as job_tasks
 from src.jobs import service as jobs_service
 from src.jobs.exceptions import JobsDisabledError
 from src.jobs.service import cancel_job, start_detection_job, start_temporal_project_job
-from src.repositories.job_repository import mark_job_completed
+from src.repositories.job_repository import mark_job_completed, mark_job_failed
 from src.schemas import ArtifactEntry, DiagnosticMetadata, RunRequest, RunResponse, SummaryStats, TemporalProjectRunRequest
 from src.jobs.tasks import _log_worker_effective_backend
 
@@ -215,6 +215,153 @@ def test_mark_job_completed_clears_previous_error_fields(tmp_path) -> None:
     assert record.status == "completed"
     assert record.error_code is None
     assert record.error_message is None
+
+
+def test_mark_job_failed_with_session_does_not_construct_settings(monkeypatch) -> None:
+    session = _FakeJobSession(
+        job=JobRecord(
+            job_id="job-runtime-failure",
+            job_kind="temporal_project",
+            status="running",
+            progress=25,
+            stage="fetching_imagery",
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+    )
+
+    monkeypatch.setattr(
+        "src.repositories.job_repository.Settings",
+        lambda: pytest.fail("mark_job_failed must not construct Settings during failure persistence"),
+    )
+
+    record = mark_job_failed(
+        job_id="job-runtime-failure",
+        error_code="runtime_error",
+        error_message="Original temporal failure",
+        session=session,  # type: ignore[arg-type]
+    )
+
+    assert record.status == "failed"
+    assert record.progress == 100
+    assert record.stage == "failed"
+    assert record.error_message == "Original temporal failure"
+    assert record.completed_at is not None
+
+
+def test_mark_job_failed_keeps_raw_failure_payload_inline_without_settings(monkeypatch) -> None:
+    session = _FakeJobSession(
+        job=JobRecord(
+            job_id="job-runtime-failure-payload",
+            job_kind="temporal_project",
+            status="running",
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+    )
+    payload = {"original_error": "imagery request failed"}
+
+    monkeypatch.setattr(
+        "src.repositories.job_repository.Settings",
+        lambda: pytest.fail("mark_job_failed must not construct Settings during failure persistence"),
+    )
+
+    record = mark_job_failed(
+        job_id="job-runtime-failure-payload",
+        error_code="runtime_error",
+        error_message="Original temporal failure",
+        raw_result=payload,
+        session=session,  # type: ignore[arg-type]
+    )
+
+    assert record.raw_result == payload
+
+
+def test_mark_job_execution_failed_passes_settings_and_preserves_original_error(monkeypatch, tmp_path) -> None:
+    session = _FakeJobSession(
+        job=JobRecord(
+            job_id="job-worker-failure",
+            job_kind="temporal_project",
+            status="running",
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+    )
+    settings = Settings(runtime_cache_dir=tmp_path)
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(jobs_service, "session_scope", lambda *_args, **_kwargs: _job_session_scope(session))
+
+    def persist_failure(**kwargs):
+        captured.update(kwargs)
+        return mark_job_failed(**kwargs)
+
+    monkeypatch.setattr(jobs_service, "mark_job_failed", persist_failure)
+
+    persisted = jobs_service.mark_job_execution_failed(
+        "job-worker-failure",
+        "RuntimeError: original worker error",
+        settings=settings,
+    )
+
+    assert persisted is True
+    assert captured["settings"] is settings
+    assert session.job.status == "failed"
+    assert session.job.error_message == "RuntimeError: original worker error"
+
+
+def test_mark_job_execution_failed_logs_persistence_error_without_raising(monkeypatch, tmp_path, caplog) -> None:
+    settings = Settings(runtime_cache_dir=tmp_path)
+
+    @contextmanager
+    def failing_session_scope(*_args, **_kwargs):
+        raise RuntimeError("database unavailable")
+        yield
+
+    monkeypatch.setattr(jobs_service, "session_scope", failing_session_scope)
+
+    with caplog.at_level("ERROR"):
+        persisted = jobs_service.mark_job_execution_failed(
+            "job-worker-failure",
+            "ValueError: original worker error",
+            settings=settings,
+        )
+
+    assert persisted is False
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "JOB_FAILURE_PERSISTENCE_FAILED" in messages
+    assert "ValueError: original worker error" in messages
+
+
+def test_temporal_worker_persists_original_exception_before_reraising(monkeypatch, tmp_path) -> None:
+    settings = Settings(runtime_cache_dir=tmp_path)
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(job_tasks, "_resolve_settings", lambda *_args, **_kwargs: settings)
+    monkeypatch.setattr(job_tasks, "_log_worker_effective_backend", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        job_tasks,
+        "_prepare_job_for_execution",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("original temporal failure")),
+    )
+    monkeypatch.setattr(
+        job_tasks,
+        "mark_job_execution_failed",
+        lambda job_id, message, *, settings: captured.update(
+            job_id=job_id,
+            message=message,
+            settings=settings,
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="original temporal failure"):
+        job_tasks.run_temporal_project_job.run("job-temporal-failure", "project-1")
+
+    assert captured == {
+        "job_id": "job-temporal-failure",
+        "message": "RuntimeError: original temporal failure",
+        "settings": settings,
+    }
 
 
 def test_get_job_response_normalizes_legacy_complete(monkeypatch, tmp_path) -> None:
