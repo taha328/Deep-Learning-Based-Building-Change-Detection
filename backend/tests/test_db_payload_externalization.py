@@ -13,6 +13,7 @@ from src.jobs.service import _job_response
 from src.repositories.job_repository import mark_job_completed
 from src.repositories.payload_storage import (
     build_payload_reference,
+    compute_sha256,
     externalize_payload_if_needed,
     payload_storage_path,
     resolve_payload_reference,
@@ -269,6 +270,24 @@ def test_missing_referenced_file_returns_clear_error(tmp_path) -> None:
 
     with pytest.raises(FileNotFoundError, match="Referenced DB payload file is missing"):
         resolve_payload_reference(reference, table="projects", column="raw_payload")
+
+
+def test_resolve_relative_source_payload_reference_against_runtime_cache(tmp_path) -> None:
+    settings = Settings(runtime_cache_dir=tmp_path / "shared-runtime")
+    target = settings.runtime_cache_dir / "temporal_projects" / "portable" / "project.json"
+    target.parent.mkdir(parents=True)
+    target.write_text('{"project_id":"portable"}')
+    reference = {
+        "storage": "file",
+        "path": "backend/runtime_cache/temporal_projects/portable/project.json",
+        "sha256": compute_sha256(target),
+        "size_bytes": target.stat().st_size,
+        "schema": "temporal_project_payload_v1",
+    }
+
+    payload = resolve_payload_reference(reference, settings=settings, table="projects", column="raw_payload")
+
+    assert payload == {"project_id": "portable"}
 
 
 def test_list_summaries_do_not_resolve_payload_files(monkeypatch, tmp_path) -> None:

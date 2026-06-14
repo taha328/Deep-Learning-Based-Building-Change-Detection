@@ -592,6 +592,33 @@ def test_temporal_project_rejects_removed_latest_source() -> None:
         TemporalProject.model_validate(payload)
 
 
+def test_temporal_project_rebases_relative_source_project_dir_to_runtime_cache(tmp_path) -> None:
+    settings = Settings(runtime_cache_dir=tmp_path / "shared-runtime")
+    project = _sample_project("portable-project-dir")
+    project.project_dir = "backend/runtime_cache/temporal_projects/portable-project-dir"
+
+    saved = save_temporal_project(project, settings)
+    expected_dir = settings.temporal_projects_dir / project.project_id
+
+    assert saved.project_dir == str(expected_dir.resolve())
+    assert (expected_dir / "project.json").is_file()
+    assert "backend/runtime_cache" not in saved.project_dir
+
+
+def test_temporal_project_reloads_with_equivalent_worker_settings(tmp_path) -> None:
+    runtime_root = tmp_path / "shared-runtime"
+    api_settings = Settings(runtime_cache_dir=runtime_root)
+    worker_settings = Settings(runtime_cache_dir=runtime_root)
+    project = _sample_project("shared-api-worker-project")
+    project.project_dir = "backend/runtime_cache/temporal_projects/shared-api-worker-project"
+
+    saved = save_temporal_project(project, api_settings)
+    loaded = get_temporal_project(saved.project_id, worker_settings)
+
+    assert loaded.project_id == saved.project_id
+    assert loaded.project_dir == str((runtime_root / "temporal_projects" / saved.project_id).resolve())
+
+
 def test_temporal_project_keeps_only_selected_wayback_milestones(monkeypatch, tmp_path) -> None:
     settings = Settings(runtime_cache_dir=tmp_path)
     releases = _sample_releases(settings)
@@ -1073,7 +1100,7 @@ def test_list_temporal_projects_deduplicates_saved_projects_and_hides_cached_pai
     ]
 
 
-def test_save_temporal_project_avoids_overwriting_another_project_in_the_same_directory(monkeypatch, tmp_path) -> None:
+def test_save_temporal_project_rebases_out_of_root_directories_per_project(monkeypatch, tmp_path) -> None:
     settings = Settings(runtime_cache_dir=tmp_path)
     monkeypatch.setattr("src.services.temporal_projects.list_releases", lambda _: _sample_releases(settings))
     shared_directory = str(tmp_path / "shared-project-dir")
@@ -1086,8 +1113,8 @@ def test_save_temporal_project_avoids_overwriting_another_project_in_the_same_di
     second_project.project_dir = shared_directory
     saved_second = save_temporal_project(second_project, settings)
 
-    assert saved_first.project_dir == shared_directory
-    assert saved_second.project_dir == str(tmp_path / "shared-project-dir" / "second-project")
+    assert saved_first.project_dir == str((settings.temporal_projects_dir / "first-project").resolve())
+    assert saved_second.project_dir == str((settings.temporal_projects_dir / "second-project").resolve())
     assert get_temporal_project(saved_first.project_id, settings).project_id == "first-project"
     assert get_temporal_project(saved_second.project_id, settings).project_id == "second-project"
 

@@ -23,6 +23,7 @@ from src.repositories.job_repository import (
     normalize_job_status,
 )
 from src.schemas import RunRequest, TemporalProjectRunRequest
+from src.services.temporal_projects import get_temporal_project
 
 
 LOGGER = logging.getLogger(__name__)
@@ -55,8 +56,8 @@ def assert_redis_available(settings: Settings) -> None:
         )
 
 
-def _job_response(job: JobRecord) -> JobResponse:
-    raw_result = get_job_full_result(job.raw_result)
+def _job_response(job: JobRecord, *, settings: Settings | None = None) -> JobResponse:
+    raw_result = get_job_full_result(job.raw_result, settings=settings)
     return JobResponse.model_validate(
         {
             "job_id": job.job_id,
@@ -90,6 +91,22 @@ def start_temporal_project_job(
     run_request: TemporalProjectRunRequest | None = None,
 ) -> JobStartResponse:
     assert_redis_available(settings)
+    try:
+        persisted_project = get_temporal_project(project_id, settings)
+    except FileNotFoundError as exc:
+        raise JobNotFoundError(
+            f"Temporal project is not reloadable by the worker: {project_id}",
+            details={
+                "project_id": project_id,
+                "runtime_cache_dir": str(settings.runtime_cache_dir.resolve()),
+                "error": str(exc),
+            },
+        ) from exc
+    if not persisted_project.milestones:
+        raise JobNotFoundError(
+            f"Temporal project has no persisted milestones: {project_id}",
+            details={"project_id": project_id},
+        )
     enqueue_error: Exception | None = None
     job_id: str | None = None
     celery_task_id: str | None = None
@@ -178,7 +195,7 @@ def start_detection_job(request: RunRequest, *, settings: Settings) -> JobStartR
 
 def get_job_response(job_id: str, *, settings: Settings) -> JobResponse:
     try:
-        return _job_response(get_job(job_id, settings=settings))
+        return _job_response(get_job(job_id, settings=settings), settings=settings)
     except FileNotFoundError as exc:
         raise JobNotFoundError(str(exc), details={"job_id": job_id}) from exc
 
@@ -200,7 +217,7 @@ def cancel_job(job_id: str, *, settings: Settings) -> JobResponse:
             if job.celery_task_id:
                 # Revoke prevents queued tasks from starting; active tasks stop cooperatively at phase checks.
                 celery_app.control.revoke(job.celery_task_id, terminate=False, signal="SIGTERM")
-            return _job_response(job)
+            return _job_response(job, settings=settings)
     except FileNotFoundError as exc:
         raise JobNotFoundError(str(exc), details={"job_id": job_id}) from exc
 

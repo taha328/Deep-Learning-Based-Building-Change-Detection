@@ -140,6 +140,11 @@ def test_start_temporal_job_requires_existing_project(monkeypatch, tmp_path) -> 
 
     monkeypatch.setattr(jobs_service, "assert_redis_available", lambda settings: None)
     monkeypatch.setattr(jobs_service, "session_scope", lambda *_args, **_kwargs: _job_session_scope(session))
+    monkeypatch.setattr(
+        jobs_service,
+        "get_temporal_project",
+        lambda *_args, **_kwargs: SimpleNamespace(milestones=[SimpleNamespace(release_identifier="WB_2026_R01")]),
+    )
     sent: dict[str, object] = {}
     monkeypatch.setattr(
         jobs_service.celery_app,
@@ -160,6 +165,27 @@ def test_start_temporal_job_requires_existing_project(monkeypatch, tmp_path) -> 
     assert session.job.project_db_id == session.project.id
     assert session.job.raw_request["change_threshold"] == 0.6
     assert sent["kwargs"]["kwargs"]["run_request_payload"] == {"change_threshold": 0.6}
+
+
+def test_start_temporal_job_does_not_enqueue_unreloadable_project(monkeypatch, tmp_path) -> None:
+    session = _FakeJobSession(project=SimpleNamespace(id=uuid.uuid4(), project_id="temporal-missing"))
+    settings = Settings(runtime_cache_dir=tmp_path, jobs_enabled=True, redis_url="redis://localhost:6379/0")
+    sent: list[object] = []
+
+    monkeypatch.setattr(jobs_service, "assert_redis_available", lambda settings: None)
+    monkeypatch.setattr(jobs_service, "session_scope", lambda *_args, **_kwargs: _job_session_scope(session))
+    monkeypatch.setattr(
+        jobs_service,
+        "get_temporal_project",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(FileNotFoundError("missing project.json")),
+    )
+    monkeypatch.setattr(jobs_service.celery_app, "send_task", lambda *args, **kwargs: sent.append((args, kwargs)))
+
+    with pytest.raises(jobs_service.JobNotFoundError, match="not reloadable"):
+        start_temporal_project_job("temporal-missing", settings=settings)
+
+    assert sent == []
+    assert session.job is None
 
 
 def test_cancel_job_marks_request_and_revokes(monkeypatch, tmp_path) -> None:

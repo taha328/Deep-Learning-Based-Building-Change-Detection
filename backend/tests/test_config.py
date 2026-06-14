@@ -138,6 +138,26 @@ def test_get_settings_rejects_missing_environment_selected_checkpoint(
         get_settings()
 
 
+def test_get_settings_uses_docker_runtime_cache_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    get_settings.cache_clear()
+    checkpoint = tmp_path / "bandon.pth"
+    checkpoint.write_bytes(b"bandon")
+    monkeypatch.setenv("APP_RUNTIME_CACHE_DIR", "/data/runtime_cache")
+    monkeypatch.setenv("APP_PACKAGED_DEPLOYMENT", "true")
+    monkeypatch.setenv("APP_BANDON_CHECKPOINT_PATH", str(checkpoint))
+    monkeypatch.setattr(Settings, "ensure_runtime_cache_dirs", lambda self: None)
+
+    settings = get_settings()
+
+    assert settings.runtime_cache_dir == Path("/data/runtime_cache")
+    assert settings.packaged_deployment is True
+
+
+def test_packaged_settings_reject_noncanonical_runtime_cache(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="APP_RUNTIME_CACHE_DIR=/data/runtime_cache"):
+        Settings(runtime_cache_dir=tmp_path / "backend/runtime_cache", packaged_deployment=True)
+
+
 def test_get_settings_reads_canonical_threshold_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     get_settings.cache_clear()
     monkeypatch.setenv("APP_RUNTIME_CACHE_DIR", str(tmp_path / "runtime"))

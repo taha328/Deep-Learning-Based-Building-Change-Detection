@@ -175,6 +175,7 @@ class Settings(BaseModel):
     celery_task_reject_on_worker_lost: bool = False
     celery_worker_prefetch_multiplier: int = 1
     jobs_enabled: bool = True
+    packaged_deployment: bool = False
     keep_intermediate_artifacts: bool = False
     materialize_source_imagery_in_requests: bool = False
     post_completion_request_cleanup_enabled: bool = True
@@ -348,6 +349,8 @@ class Settings(BaseModel):
             raise ValueError("APP_POST_COMPLETION_REQUEST_CLEANUP_MODE must be one of: off, compact_heavy, delete_full.")
         if self.post_completion_request_cleanup_grace_seconds < 0:
             raise ValueError("APP_POST_COMPLETION_REQUEST_CLEANUP_GRACE_SECONDS must be greater than or equal to 0.")
+        if self.packaged_deployment and self.runtime_cache_dir.expanduser().resolve() != Path("/data/runtime_cache"):
+            raise ValueError("Packaged deployment requires APP_RUNTIME_CACHE_DIR=/data/runtime_cache.")
         self.ensure_runtime_cache_dirs()
         if not self.allowed_file_roots:
             self.allowed_file_roots = (self.request_cache_dir, self.temporal_projects_dir)
@@ -520,6 +523,7 @@ def get_settings() -> Settings:
     return Settings(
         project_root=base.project_root,
         runtime_cache_dir=Path(os.getenv("APP_RUNTIME_CACHE_DIR", str(base.runtime_cache_dir))),
+        packaged_deployment=_bool_env("APP_PACKAGED_DEPLOYMENT", base.packaged_deployment),
         inference_backend=os.getenv("APP_INFERENCE_BACKEND", base.inference_backend),  # type: ignore[arg-type]
         wmts_capabilities_url=os.getenv("APP_WMTS_CAPABILITIES_URL", base.wmts_capabilities_url),
         tile_matrix_set=os.getenv("APP_TILE_MATRIX_SET", base.tile_matrix_set),
