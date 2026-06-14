@@ -1,0 +1,55 @@
+name: Publish release bundle
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Existing GitHub Release tag containing the model artifact, for example v0.1.1"
+        required: true
+        default: "v0.1.1"
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    name: Package and publish one-command release bundle
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Download model artifact from release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/model-artifact"
+          gh release download "$VERSION" \
+            --pattern "building-change-model-bandon-mtgcdnet-$VERSION.zip" \
+            --dir "$RUNNER_TEMP/model-artifact"
+          unzip -q "$RUNNER_TEMP/model-artifact/building-change-model-bandon-mtgcdnet-$VERSION.zip" \
+            -d "$RUNNER_TEMP/model-artifact/extracted"
+          checkpoint="$(find "$RUNNER_TEMP/model-artifact/extracted" -path '*/models/bandon/mtgcdnet_iter_40000.pth' -type f -print -quit)"
+          test -n "$checkpoint"
+          echo "CHECKPOINT_PATH=$checkpoint" >> "$GITHUB_ENV"
+
+      - name: Build and verify release bundle
+        run: |
+          bash -n install.sh scripts/package-release.sh
+          ./scripts/package-release.sh
+
+      - name: Validate extracted release runtime
+        run: |
+          mkdir -p "$RUNNER_TEMP/release-audit"
+          unzip -q dist/building-change-app.zip -d "$RUNNER_TEMP/release-audit"
+          app_dir="$(dirname "$(find "$RUNNER_TEMP/release-audit" -maxdepth 2 -name docker-compose.yml -type f -print -quit)")"
+          cd "$app_dir"
+          docker compose --env-file .env config >/dev/null
+          bash -n scripts/start.sh scripts/health.sh scripts/stop.sh
+
+      - name: Upload release bundle
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: gh release upload "$VERSION" dist/building-change-app.zip --clobber
