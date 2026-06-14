@@ -84,6 +84,19 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Validate frontend runtime Mapbox injection
+        shell: bash
+        run: |
+          output="$(mktemp)"
+          RUNTIME_CONFIG_PATH="$output" MAPBOX_API_KEY="pk.runtime-validation" \
+            sh frontend/docker-entrypoint.d/40-runtime-config.sh
+          grep -q 'MAPBOX_API_KEY: "pk.runtime-validation"' "$output"
+          if RUNTIME_CONFIG_PATH="$output" MAPBOX_API_KEY="sk.invalid" \
+            sh frontend/docker-entrypoint.d/40-runtime-config.sh; then
+            echo "Frontend runtime config accepted a secret Mapbox token." >&2
+            exit 1
+          fi
+
       - name: Set image version
         id: version
         shell: bash

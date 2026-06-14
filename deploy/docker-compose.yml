@@ -92,6 +92,8 @@ services:
   frontend:
     image: ${FRONTEND_IMAGE:-building-change-frontend:latest}
     restart: unless-stopped
+    environment:
+      MAPBOX_API_KEY: ${MAPBOX_API_KEY:-}
     ports:
       - "127.0.0.1:${FRONTEND_PORT:-8080}:80"
     depends_on:

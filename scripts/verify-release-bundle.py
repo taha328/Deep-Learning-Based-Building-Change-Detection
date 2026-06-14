@@ -27,6 +27,7 @@ SECRET_PATTERN = re.compile(
     r"(ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|"
     r"AKIA[0-9A-Z]{16}|-----BEGIN (?:RSA|OPENSSH|EC) PRIVATE KEY-----)"
 )
+MAPBOX_TOKEN_PATTERN = re.compile(r"^MAPBOX_API_KEY=(.*)$", re.MULTILINE)
 
 
 def normalized_names(names: list[str]) -> set[str]:
@@ -81,6 +82,10 @@ def main() -> int:
                 raise SystemExit(f"Local absolute path found in release file: {info.filename}")
             if SECRET_PATTERN.search(payload):
                 raise SystemExit(f"Potential secret found in release file: {info.filename}")
+            for match in MAPBOX_TOKEN_PATTERN.finditer(payload):
+                token = match.group(1).strip()
+                if token and not token.startswith("pk."):
+                    raise SystemExit(f"Non-public Mapbox token found in release file: {info.filename}")
 
         checkpoint_names = [
             name
