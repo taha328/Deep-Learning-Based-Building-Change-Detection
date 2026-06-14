@@ -58,13 +58,18 @@ function clampPercent(value: number): number {
 }
 
 function formatArea(areaM2: number | undefined | null, fallback = "—"): string {
-  if (!areaM2 || areaM2 <= 0) return fallback;
+  if (areaM2 === undefined || areaM2 === null || !Number.isFinite(areaM2)) return fallback;
+  if (areaM2 <= 0) return "0 m²";
   if (areaM2 >= 1_000_000) return `${formatNumber(areaM2 / 1_000_000, 2)} km²`;
   return `${formatNumber(areaM2, 0)} m²`;
 }
 
 function formatPercent(value: number, fractionDigits = 1): string {
   return `${formatNumber(value, fractionDigits)}%`;
+}
+
+function formatOptionalPercent(value: number | null, fractionDigits = 1, fallback = "—"): string {
+  return value === null || !Number.isFinite(value) ? fallback : formatPercent(value, fractionDigits);
 }
 
 function formatCompactNumber(value: number | undefined | null, fallback = "—"): string {
@@ -239,14 +244,14 @@ function ComparisonCard({ milestone, previousMilestone, t }: ComparisonCardProps
     );
   }
 
-  const addedAreaDelta = milestone.metrics.added_area_m2 - previousMilestone.metrics.added_area_m2;
+  const addedArea = milestone.metrics.added_area_m2;
   const totalAreaDelta = milestone.metrics.total_area_m2 - previousMilestone.metrics.total_area_m2;
-  const additionsCountDelta = milestone.metrics.additions_feature_count - previousMilestone.metrics.additions_feature_count;
-  const blockCountDelta = milestone.metrics.added_block_count - previousMilestone.metrics.added_block_count;
+  const additionsCount = milestone.metrics.additions_feature_count;
+  const blockCount = milestone.metrics.added_block_count;
   const footprintGrowthPercent =
     previousMilestone.metrics.total_area_m2 > 0
-      ? ((totalAreaDelta / previousMilestone.metrics.total_area_m2) * 100)
-      : 0;
+      ? ((addedArea / previousMilestone.metrics.total_area_m2) * 100)
+      : null;
 
   const renderTrend = (delta: number | undefined, tone: "up" | "stable" | "down" | "none") => {
     if (tone === "up") return <ArrowUp className="h-3.5 w-3.5 text-primary" />;
@@ -271,21 +276,21 @@ function ComparisonCard({ milestone, previousMilestone, t }: ComparisonCardProps
         <div className="flex items-center justify-between gap-2">
           <span className="text-caption text-muted-foreground">{t("temporal.metrics.additions_count")}</span>
           <div className="flex items-center gap-1.5">
-            {renderTrend(additionsCountDelta, trendTone(additionsCountDelta))}
-            <span className="text-label font-semibold font-mono text-foreground">{formatDelta(additionsCountDelta, formatCompactNumber)}</span>
+            {renderTrend(additionsCount, trendTone(additionsCount))}
+            <span className="text-label font-semibold font-mono text-foreground">{formatDelta(additionsCount, formatCompactNumber)}</span>
           </div>
         </div>
         <div className="flex items-center justify-between gap-2">
           <span className="text-caption text-muted-foreground">{t("temporal.metrics.blocks_added")}</span>
           <div className="flex items-center gap-1.5">
-            {renderTrend(blockCountDelta, trendTone(blockCountDelta))}
-            <span className="text-label font-semibold font-mono text-foreground">{formatDelta(blockCountDelta, formatCompactNumber)}</span>
+            {renderTrend(blockCount, trendTone(blockCount))}
+            <span className="text-label font-semibold font-mono text-foreground">{formatDelta(blockCount, formatCompactNumber)}</span>
           </div>
         </div>
         <div className="border-t border-sidebar-border/50 pt-2">
           <div className="flex items-center justify-between gap-2">
             <span className="text-caption font-semibold text-foreground">{t("temporal.metrics.footprint_growth_percent")}</span>
-            <span className="text-label font-semibold font-mono text-primary">{formatPercent(footprintGrowthPercent, 1)}</span>
+            <span className="text-label font-semibold font-mono text-primary">{formatOptionalPercent(footprintGrowthPercent, 1)}</span>
           </div>
         </div>
       </div>

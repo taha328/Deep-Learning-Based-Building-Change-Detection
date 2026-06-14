@@ -1,0 +1,16 @@
+[general]
+name=Building Change Detection
+qgisMinimumVersion=3.34
+description=Wayback building change detection with QGIS-native AOI selection and GIS layer loading.
+version=0.1.0
+author=Taha Elouali
+email=taha_elouali2016@hotmail.com
+about=Use the Building_change_app backend API from QGIS to create temporal projects, run jobs, load generated layers, and download reports.
+tracker=
+repository=
+homepage=
+category=Raster
+icon=icon.svg
+experimental=False
+deprecated=False
+hasProcessingProvider=False

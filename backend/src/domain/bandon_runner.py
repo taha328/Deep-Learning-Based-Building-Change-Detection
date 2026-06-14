@@ -88,6 +88,8 @@ class BandonRunResult:
 
 
 def _resolve_runtime_paths(settings: Settings) -> dict[str, Path]:
+    from src.config import resolve_inference_checkpoint
+
     repo_dir = settings.bandon_repo_dir.expanduser().resolve()
     env_prefix = settings.bandon_env_prefix.expanduser().resolve()
     config_path = settings.bandon_config_path.expanduser()
@@ -95,11 +97,7 @@ def _resolve_runtime_paths(settings: Settings) -> dict[str, Path]:
         config_path = (repo_dir / config_path).resolve()
     else:
         config_path = config_path.resolve()
-    checkpoint_path = settings.bandon_checkpoint_path.expanduser()
-    if not checkpoint_path.is_absolute():
-        checkpoint_path = (settings.project_root / checkpoint_path).resolve()
-    else:
-        checkpoint_path = checkpoint_path.resolve()
+    checkpoint_path = resolve_inference_checkpoint(settings).path
     runner_path = repo_dir / "tools" / "infer_mps.py"
     return {
         "repo_dir": repo_dir,
@@ -351,7 +349,7 @@ def probe_bandon_runtime(settings: Settings) -> BandonRuntimeProbe:
     return BandonRuntimeProbe(
         available=True,
         message=(
-            f"BANDON MTGCDNet runtime is available via {command[0]} on {settings.bandon_device}"
+            f"BANDON runtime is available via {command[0]} on {settings.bandon_device}"
             f" resolved to {device_resolved}. "
             f"torch={payload.get('torch_version')} mmcv={payload.get('mmcv_version')}"
         ),
@@ -452,7 +450,7 @@ def run_bandon_inference(
     if completed.returncode != 0:
         error_text = completed.stderr.strip() or completed.stdout.strip() or "unknown error"
         raise RuntimeError(
-            "BANDON MTGCDNet inference failed with exit code "
+            "BANDON inference failed with exit code "
             f"{completed.returncode}: {error_text}"
         )
 
@@ -460,11 +458,11 @@ def run_bandon_inference(
     probability_path = out_dir / "change_probability.npy"
     mask_path = out_dir / "change_mask.png"
     if not metadata_path.exists():
-        raise RuntimeError(f"BANDON MTGCDNet did not write run_metadata.json to {metadata_path}")
+        raise RuntimeError(f"BANDON did not write run_metadata.json to {metadata_path}")
     if not probability_path.exists():
-        raise RuntimeError(f"BANDON MTGCDNet did not write change_probability.npy to {probability_path}")
+        raise RuntimeError(f"BANDON did not write change_probability.npy to {probability_path}")
     if not mask_path.exists():
-        raise RuntimeError(f"BANDON MTGCDNet did not write change_mask.png to {mask_path}")
+        raise RuntimeError(f"BANDON did not write change_mask.png to {mask_path}")
 
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     metadata.update(
@@ -498,14 +496,14 @@ def run_bandon_inference(
     device_resolved = str(metadata.get("device_resolved") or "")
     if settings.bandon_device in {"cuda", "mps"} and device_resolved != settings.bandon_device:
         raise RuntimeError(
-            f"BANDON MTGCDNet resolved device '{device_resolved}' instead of requested {settings.bandon_device}."
+            f"BANDON resolved device '{device_resolved}' instead of requested {settings.bandon_device}."
         )
     if not settings.bandon_allow_mps_fallback:
         if bool(metadata.get("allow_mps_fallback")):
-            raise RuntimeError("BANDON MTGCDNet unexpectedly enabled allow_mps_fallback.")
+            raise RuntimeError("BANDON unexpectedly enabled allow_mps_fallback.")
         if metadata.get("pytorch_enable_mps_fallback"):
             raise RuntimeError(
-                "BANDON MTGCDNet unexpectedly ran with PYTORCH_ENABLE_MPS_FALLBACK enabled."
+                "BANDON unexpectedly ran with PYTORCH_ENABLE_MPS_FALLBACK enabled."
             )
 
     return BandonRunResult(

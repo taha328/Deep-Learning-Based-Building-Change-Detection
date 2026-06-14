@@ -6,6 +6,7 @@ from time import perf_counter
 from typing import Any
 
 from src.config import Settings, get_settings
+from src.execution_profiles import resolve_inference_runtime
 from src.core_api import run_detection_api, run_temporal_project_api
 from src.db.session import session_scope
 from src.jobs.celery_app import celery_app
@@ -20,7 +21,7 @@ from src.repositories.job_repository import (
     mark_job_running,
 )
 from src.repositories.run_repository import get_latest_detection_run_id, get_latest_temporal_run_id
-from src.schemas import RunRequest, RunResponse, TemporalProjectRunResponse
+from src.schemas import RunRequest, RunResponse, TemporalProjectRunRequest, TemporalProjectRunResponse
 
 
 LOGGER = logging.getLogger(__name__)
@@ -55,12 +56,33 @@ def _resolve_settings(settings_payload: dict[str, Any] | None = None) -> Setting
 
 
 def _log_worker_effective_backend(*, job_id: str, job_kind: str, settings: Settings) -> None:
-    checkpoint_path = settings.s2looking_checkpoint_path if settings.inference_backend == "mtgcdnet_s2looking_mps" else settings.bandon_checkpoint_path
-    threshold = settings.s2looking_change_threshold if settings.inference_backend == "mtgcdnet_s2looking_mps" else settings.default_change_threshold
+    runtime = resolve_inference_runtime(settings)
+    checkpoint_path = runtime.checkpoint_path
+    threshold = settings.change_threshold
     LOGGER.info("CELERY_PROCESS_PID=%s jobId=%s jobKind=%s", os.getpid(), job_id, job_kind)
     LOGGER.info("CELERY_EFFECTIVE_INFERENCE_BACKEND=%s jobId=%s jobKind=%s", settings.inference_backend, job_id, job_kind)
     LOGGER.info("CELERY_EFFECTIVE_CHECKPOINT_PATH=%s jobId=%s jobKind=%s", checkpoint_path, job_id, job_kind)
+    LOGGER.info("CELERY_EFFECTIVE_CHECKPOINT_ENV=%s jobId=%s jobKind=%s", runtime.checkpoint_env_var, job_id, job_kind)
     LOGGER.info("CELERY_EFFECTIVE_THRESHOLD=%s jobId=%s jobKind=%s", threshold, job_id, job_kind)
+    LOGGER.info(
+        "CELERY_EFFECTIVE_THRESHOLDS source=backend_settings_env semantic=%s change=%s jobId=%s jobKind=%s",
+        runtime.semantic_threshold,
+        runtime.change_threshold,
+        job_id,
+        job_kind,
+    )
+    LOGGER.info(
+        "EFFECTIVE_INFERENCE_RUNTIME backend=%s checkpointEnvVar=%s checkpointPath=%s "
+        "thresholdsSource=%s semantic=%s change=%s jobId=%s jobKind=%s",
+        runtime.backend,
+        runtime.checkpoint_env_var,
+        runtime.checkpoint_path,
+        runtime.threshold_source,
+        runtime.semantic_threshold,
+        runtime.change_threshold,
+        job_id,
+        job_kind,
+    )
     LOGGER.info(
         "CELERY_EFFECTIVE_INFERENCE_BACKEND jobId=%s jobKind=%s value=%s checkpointPath=%s threshold=%s",
         job_id,
@@ -173,8 +195,20 @@ def _latest_temporal_run_id(project_id: str, settings: Settings) -> str | None:
 
 
 @celery_app.task(bind=True, name="building_change.run_temporal_project")
-def run_temporal_project_job(self, job_id: str, project_id: str, settings_payload: dict[str, Any] | None = None) -> dict[str, Any]:
+def run_temporal_project_job(
+    self,
+    job_id: str,
+    project_id: str,
+    settings_payload: dict[str, Any] | None = None,
+    run_request_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     settings = _resolve_settings(settings_payload)
+    LOGGER.info(
+        "TEMPORAL_RUN_REQUEST_THRESHOLD projectId=%s changeThreshold=%s source=%s",
+        project_id,
+        run_request_payload.get("change_threshold") if run_request_payload else settings.change_threshold,
+        "request_override" if run_request_payload and run_request_payload.get("change_threshold") is not None else "backend_settings_env",
+    )
     _log_worker_effective_backend(job_id=job_id, job_kind="temporal_project", settings=settings)
     timer = StageTimer()
     try:
@@ -210,6 +244,7 @@ def run_temporal_project_job(self, job_id: str, project_id: str, settings_payloa
             settings=settings,
             progress_callback=progress_callback,
             x_ip_token=None,
+            run_request=TemporalProjectRunRequest.model_validate(run_request_payload) if run_request_payload else None,
         )
         timer.mark("processing")
         _publish_progress(self, job_id, 90, "saving_artifacts", "Saving temporal outputs and generated artifacts.", settings)

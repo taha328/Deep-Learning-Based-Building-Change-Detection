@@ -1,7 +1,7 @@
 # BANDON Model Artifact
 
 The BANDON checkpoint is a separately delivered model artifact. It is not
-tracked by Git, included in the client deployment bundle, baked into Docker
+tracked by Git, included in the packaged deployment bundle, baked into Docker
 images, or published to GHCR.
 
 ## Artifact Contents
@@ -46,7 +46,7 @@ MODEL_ARTIFACT_URL=https://github.com/taha328/building_change_app/releases/downl
 
 Private GitHub release assets require their authenticated API asset URL rather
 than the browser-style `releases/download/...` URL. Discover the API URL with an
-authorized GitHub client:
+authorized GitHub CLI session:
 
 ```bash
 gh api repos/taha328/building_change_app/releases/tags/v0.1.1 \
@@ -84,6 +84,6 @@ cat building-change-model-bandon-mtgcdnet-v0.1.1.sha256
 
 ## Runtime Compatibility
 
-- CPU Docker is the supported client runtime.
+- CPU Docker is the supported packaged runtime.
 - Native MPS remains a development runtime.
 - CUDA is pending validation on a compatible NVIDIA host and is not production-certified.

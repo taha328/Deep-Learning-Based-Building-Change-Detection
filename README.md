@@ -1,238 +1,287 @@
 # Building Change Detection
 
-This monorepo contains a React frontend and a local-first FastAPI backend:
+Building Change Detection is a local-first platform for detecting, reviewing, and exporting building additions and changes across historical satellite imagery. Users define an area of interest, select Esri Wayback releases, run local deep-learning inference, inspect temporal metrics and map layers, and export geospatial results.
 
-- [`frontend/`](./frontend): React + Vite application
-- [`backend/`](./backend): FastAPI API plus local processing pipeline
+## What The Platform Does
 
-The frontend talks only to FastAPI. Inference is local-only through `bandon_mps` or `mtgcdnet_s2looking_mps`.
+- Discovers high-resolution historical imagery from Esri Wayback.
+- Validates AOIs and estimates imagery and inference workloads.
+- Downloads, caches, mosaics, and aligns imagery for selected dates.
+- Runs local building-change inference and derives cleaned vector products.
+- Tracks temporal projects, milestones, growth metrics, and generated artifacts.
+- Exports raster and vector results for GIS workflows, including QGIS-compatible outputs.
 
-## Repository Layout
+## Architecture
+
+The React frontend calls a FastAPI API. FastAPI handles validation and synchronous operations, while Redis and Celery support queued processing. PostgreSQL/PostGIS stores project, run, artifact, and spatial metadata when postgres persistence is enabled. Large imagery, inference outputs, exports, and caches remain on disk or in the Docker `runtime_cache` volume.
+
+The processing path is:
 
 ```text
-frontend/  # React + Vite UI
-backend/   # FastAPI API and processing pipeline
-shared/    # API contract snapshot
-notebook_.ipynb  # original scientific workflow
+AOI + Wayback releases
+  -> imagery metadata and tile retrieval
+  -> cached mosaics and reference imagery
+  -> BANDON inference
+  -> raster cleanup and vectorization
+  -> temporal metrics, map layers, and exports
 ```
 
-## Local Run
+## Technology Stack
 
-One-command dev stack:
+- Frontend: React 18, Vite, TypeScript, Zustand, React Query, MapLibre, Tailwind
+- API and workers: FastAPI, Celery, Redis
+- Persistence: PostgreSQL 16, PostGIS, SQLAlchemy, GeoAlchemy2, Alembic
+- Geospatial processing: GDAL, Rasterio, GeoPandas, Shapely, PyProj, Rio-Tiler
+- Inference: PyTorch and the patched repository under `vendor/BANDON-mps`
+- Deployment: Docker and Docker Compose
+
+## Deep-Learning Runtime
+
+`bandon_mps` is the only supported selectable inference backend. The patched BANDON runtime supports:
+
+- `MODEL_DEVICE=auto`: CUDA when available, then native macOS MPS when available, otherwise CPU.
+- `MODEL_DEVICE=cpu`: always CPU.
+- `MODEL_DEVICE=cuda`: requires an available CUDA device and fails clearly otherwise.
+- `MODEL_DEVICE=mps`: requires available native macOS MPS and fails clearly otherwise.
+
+`APP_BANDON_DEVICE` remains a backward-compatible fallback, but `MODEL_DEVICE` takes precedence.
+
+The active BANDON config and checkpoint retain internal MTGCDNet filenames:
+
+```text
+vendor/BANDON-mps/workdirs_bandon/MTGCDNet/config.py
+vendor/BANDON-mps/checkpoints/mtgcdnet_iter_40000.pth
+```
+
+Those names do not represent a separate selectable MTGCDNet backend. Checkpoints are external artifacts: they are not committed to Git or baked into application images.
+
+## Repository Structure
+
+```text
+backend/             FastAPI API, workers, processing pipeline, migrations, and tests
+frontend/            React/Vite application
+deploy/              Packaged Docker deployment and operational scripts
+docker/              Source-build Dockerfiles
+docs/                Focused model, release, and Wayback technical notes
+qgis_plugin/         QGIS integration source
+scripts/             Development and model-artifact utilities
+shared/              API contract snapshot
+vendor/BANDON-mps/   Patched BANDON runtime
+```
+
+## Prerequisites
+
+Recommended packaged deployment:
+
+- Docker Engine or Docker Desktop with Docker Compose
+- `linux/amd64` or `linux/arm64`
+- At least 16 GB RAM; 24 GB or more is recommended for CPU inference
+- Sufficient disk for images, PostgreSQL data, imagery caches, and exports
+- The separately distributed BANDON checkpoint artifact
+
+Source development additionally requires Python 3, Node.js/npm, and system geospatial libraries compatible with the pinned GDAL Python package.
+
+## Recommended Docker Setup
+
+The packaged deployment under `deploy/` runs the full stack: `postgres`, `redis`, `backend-api`, `celery-worker`, and `frontend`. CPU Docker is the supported default. The optional CUDA override is not production-certified and requires separate validation on a compatible NVIDIA host.
 
 ```bash
-./scripts/dev_start_all.sh
+git clone https://github.com/taha328/building_change_app.git
+cd building_change_app/deploy
+cp .env.example .env
+```
+
+Set a non-default `POSTGRES_PASSWORD` in `deploy/.env` before shared deployment. The default images are public GHCR multi-platform CPU images.
+
+Install the separately delivered model artifact:
+
+```bash
+MODEL_ARTIFACT_FILE=/path/to/building-change-model-bandon-mtgcdnet-v0.1.1.zip ./scripts/fetch-model.sh
+```
+
+Alternatively, manually place the checkpoint at:
+
+```text
+deploy/models/bandon/mtgcdnet_iter_40000.pth
+```
+
+Start and validate the stack:
+
+```bash
+./scripts/start.sh
+./scripts/health.sh
+./scripts/validate-runtime.sh
+./scripts/smoke-test.sh
 ```
 
 Open:
 
-```text
-http://127.0.0.1:5173/
+- Application: `http://127.0.0.1:8080`
+- API: `http://127.0.0.1:8000`
+- API documentation: `http://127.0.0.1:8000/docs`
+
+Stop without deleting persisted data:
+
+```bash
+./scripts/stop.sh
 ```
 
-Keep the `dev_start_all.sh` terminal open. Pressing `CTRL+C` stops the frontend, backend, and Celery worker; if the browser says connection refused, start the stack again. To stop stale dev processes and free ports `5173`, `5174`, and `8000` manually:
+To remove the stack and its persisted Docker volumes intentionally:
+
+```bash
+docker compose down -v
+```
+
+Windows PowerShell equivalents are available under `deploy/scripts/windows/`.
+
+## Environment Configuration
+
+The principal deployment variables are defined in `deploy/.env.example`:
+
+| Variable | Purpose |
+| --- | --- |
+| `BACKEND_IMAGE`, `FRONTEND_IMAGE`, `POSTGIS_IMAGE` | Container image selection |
+| `FRONTEND_PORT`, `BACKEND_PORT` | Local bound ports |
+| `MODEL_DEVICE` | `auto`, `cpu`, `cuda`, or `mps` runtime selection |
+| `APP_INFERENCE_BACKEND` | Must remain `bandon_mps` |
+| `APP_CHANGE_THRESHOLD`, `APP_SEMANTIC_THRESHOLD` | Inference thresholds |
+| `APP_BANDON_CHECKPOINT_PATH` | Checkpoint path inside the backend container |
+| `APP_RUNTIME_CACHE_DIR` | Generated artifact and cache root |
+| `PERSISTENCE_BACKEND`, `DATABASE_URL` | Persistence mode and PostgreSQL connection |
+| `REDIS_URL` | Celery broker/result backend connection |
+| `CORS_ALLOWED_ORIGINS` | Browser origins allowed by FastAPI |
+
+Esri Wayback access uses public service endpoints and requires no API key. A Mapbox public token is needed only for optional Mapbox-backed frontend/current-imagery features; set `VITE_MAPBOX_API_KEY` for frontend development and `MAPBOX_ACCESS_TOKEN` for backend current-imagery retrieval.
+
+## Source Development
+
+Start PostgreSQL and Redis, initialize PostGIS, then run the local stack:
+
+```bash
+docker compose up -d postgres redis
+cd backend
+source .venv/bin/activate
+export PYTHONNOUSERSITE=1
+python scripts/setup_postgis_db.py --migrate --verify
+cd ..
+./scripts/dev_start_all.sh
+```
+
+The application runs at `http://127.0.0.1:5173`. Stop it with `CTRL+C` or:
 
 ```bash
 ./scripts/dev_stop_all.sh
 ```
 
-Backend:
+Manual backend and worker startup:
 
 ```bash
 cd backend
 source .venv/bin/activate
 export PYTHONNOUSERSITE=1
-export DATABASE_URL="postgresql+psycopg://building_change:building_change@localhost:5432/building_change"
 export PERSISTENCE_BACKEND=postgres
-export REDIS_URL="redis://localhost:6379/0"
+export DATABASE_URL=postgresql+psycopg://building_change:building_change@localhost:5432/building_change
+export REDIS_URL=redis://localhost:6379/0
+python scripts/setup_postgis_db.py --migrate --verify
 python scripts/start_backend.py
 ```
 
-Local Celery worker:
+In another terminal:
 
 ```bash
 cd backend
 source .venv/bin/activate
 export PYTHONNOUSERSITE=1
-export DATABASE_URL="postgresql+psycopg://building_change:building_change@localhost:5432/building_change"
-export PERSISTENCE_BACKEND=postgres
-export REDIS_URL="redis://localhost:6379/0"
 python scripts/verify_worker_env.py
 python scripts/start_celery_worker.py
 ```
 
-Use `scripts/start_backend.py` for local reload mode. Raw `uvicorn --reload` from the backend directory can watch `.venv` and reload forever when site-packages change. On macOS, the local Celery worker uses the `solo` pool for this geospatial/ML stack.
-
-Optional PostgreSQL/PostGIS persistence:
+In another terminal:
 
 ```bash
-docker compose up -d postgres redis
-cd backend
-python scripts/setup_postgis_db.py --migrate --verify
+cd frontend
+cp .env.example .env.local
+npm install
+npm run dev:local
 ```
 
-## CPU Docker Run
+On macOS, the worker launcher uses Celery's `solo` pool because the geospatial and ML stack is not safe under the default prefork workflow.
 
-The backend CPU image mounts the BANDON checkpoint instead of baking it into the image. Keep the checkpoint at:
+## Source Docker Builds
 
-```text
-vendor/BANDON-mps/checkpoints/mtgcdnet_iter_40000.pth
-```
-
-Build and validate the CPU runtime:
+The root Compose file builds the CPU backend and worker while exposing PostgreSQL and Redis. It does not include the packaged frontend service.
 
 ```bash
 docker compose build backend-api
-docker compose run --rm -e MODEL_DEVICE=auto backend-api /app/backend/.venv/bin/python /app/backend/scripts/validate_bandon_runtime.py
-docker compose run --rm -e MODEL_DEVICE=cpu backend-api /app/backend/.venv/bin/python /app/backend/scripts/validate_bandon_runtime.py
-```
-
-Run database migrations explicitly, then start the API and worker:
-
-```bash
 docker compose up -d postgres redis
 docker compose run --rm backend-api /app/backend/.venv/bin/python /app/backend/scripts/setup_postgis_db.py --migrate --verify
 docker compose up -d backend-api celery-worker
 curl http://127.0.0.1:8000/api/health
 ```
 
-## CUDA Docker Run
-
-The default Compose stack remains CPU-only:
-
-```bash
-docker compose up -d postgres redis backend-api celery-worker
-```
-
-CUDA Docker is an override for Linux NVIDIA hosts. It requires an NVIDIA GPU,
-a compatible host driver, NVIDIA Container Toolkit, and Docker Compose GPU
-support. Mac Docker is not a CUDA target; native macOS MPS remains the separate
-local runtime path.
-
-Build and start the CUDA backend image:
+For CUDA development on a Linux NVIDIA host:
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.cuda.yml build backend-api
-docker compose -f docker-compose.yml -f docker-compose.cuda.yml up -d postgres redis backend-api celery-worker
+docker compose -f docker-compose.yml -f docker-compose.cuda.yml run --rm backend-api \
+  /app/backend/.venv/bin/python /app/backend/scripts/validate_bandon_runtime.py --json
 ```
 
-Validate GPU visibility and PyTorch CUDA inside the container:
+CUDA requires a compatible NVIDIA driver, NVIDIA Container Toolkit, Docker GPU support, and target-host validation. Mac Docker is not a CUDA target; native macOS MPS is a separate local runtime path.
 
-```bash
-nvidia-smi
-docker run --rm --gpus all nvidia/cuda:<verified-tag> nvidia-smi
-docker compose -f docker-compose.yml -f docker-compose.cuda.yml run --rm backend-api nvidia-smi
-docker compose -f docker-compose.yml -f docker-compose.cuda.yml run --rm backend-api /app/backend/.venv/bin/python - <<'PY'
-import torch
-print("torch", torch.__version__)
-print("torch_cuda_version", torch.version.cuda)
-print("cuda_available", torch.cuda.is_available())
-print("device_count", torch.cuda.device_count())
-print("device_name", torch.cuda.get_device_name(0) if torch.cuda.is_available() else None)
-PY
-```
-
-Validate BANDON device modes:
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.cuda.yml run --rm -e MODEL_DEVICE=auto backend-api /app/backend/.venv/bin/python /app/backend/scripts/validate_bandon_runtime.py --json
-docker compose -f docker-compose.yml -f docker-compose.cuda.yml run --rm -e MODEL_DEVICE=cuda backend-api /app/backend/.venv/bin/python /app/backend/scripts/validate_bandon_runtime.py --json
-docker compose -f docker-compose.yml -f docker-compose.cuda.yml run --rm -e MODEL_DEVICE=cpu backend-api /app/backend/.venv/bin/python /app/backend/scripts/validate_bandon_runtime.py --json
-docker compose -f docker-compose.yml -f docker-compose.cuda.yml run --rm -e MODEL_DEVICE=mps backend-api /app/backend/.venv/bin/python /app/backend/scripts/validate_bandon_runtime.py --json
-```
-
-Expected CUDA-host behavior:
-
-```text
-MODEL_DEVICE=auto -> cuda when the GPU is visible, otherwise cpu
-MODEL_DEVICE=cuda -> cuda when visible, clear failure when unavailable
-MODEL_DEVICE=cpu  -> cpu even on a GPU host
-MODEL_DEVICE=mps  -> clear unavailable failure inside Linux CUDA Docker
-```
-
-## Automatic PostgreSQL/PostGIS Setup
-
-For local PostgreSQL/PostGIS:
-
-```bash
-cd backend
-python scripts/setup_postgis_db.py --migrate --verify
-```
-
-This command:
-- creates the `building_change` role if missing,
-- creates the `building_change` database if missing,
-- enables the PostGIS extension,
-- runs Alembic migrations,
-- verifies expected tables.
-
-Environment override:
-
-```bash
-cd backend
-DATABASE_URL="postgresql+psycopg://building_change:building_change@localhost:5432/building_change" python scripts/setup_postgis_db.py --migrate --verify
-```
-
-Docker path:
-
-```bash
-docker compose up -d postgres redis
-cd backend
-python scripts/setup_postgis_db.py --migrate --verify
-```
-
-Backend run path:
+## Tests
 
 ```bash
 cd backend
 source .venv/bin/activate
-export PYTHONNOUSERSITE=1
-export PERSISTENCE_BACKEND=postgres
-export DATABASE_URL="postgresql+psycopg://building_change:building_change@localhost:5432/building_change"
-export REDIS_URL="redis://localhost:6379/0"
-python scripts/start_backend.py
-curl http://127.0.0.1:8000/api/health/db
+PYTHONNOUSERSITE=1 pytest
 ```
-
-Windows PowerShell:
-
-```powershell
-cd backend
-$env:PERSISTENCE_BACKEND="postgres"
-$env:DATABASE_URL="postgresql+psycopg://building_change:building_change@localhost:5432/building_change"
-python scripts/setup_postgis_db.py --migrate --verify
-python -m uvicorn src.api.main:app --reload --host 127.0.0.1 --port 8000
-curl http://127.0.0.1:8000/api/health/db
-```
-
-`setup_postgis_db.py` creates the database and enables PostGIS. Alembic creates application tables.
-Rows are created only after saving/running temporal projects in postgres mode.
-Large raster/artifact files remain on disk by design.
-
-One-command setup is also available from repo root:
-
-```bash
-make postgres-setup
-```
-
-Frontend:
 
 ```bash
 cd frontend
-VITE_FASTAPI_BACKEND_URL=http://127.0.0.1:8000 npm run dev
+npm install
+npm test
+npm run build
 ```
 
-Async jobs use Redis + Celery when enabled. If Redis is unavailable, the frontend still falls back to the synchronous FastAPI run endpoints.
+Validate a built or packaged BANDON runtime with:
 
-## Pipeline Notes
+```bash
+cd backend
+MODEL_DEVICE=auto ./.venv/bin/python scripts/validate_bandon_runtime.py --json
+```
 
-The geospatial and model pipeline remains unchanged:
+## Cache And Storage Policy
 
-- live Wayback release discovery
-- AOI validation and tile-budget guards
-- local MTGCDNet change detection through `bandon_mps` or `mtgcdnet_s2looking_mps`
-- change score derivation, cleanup, vectorization, blocks, buffers, and exports
+- PostgreSQL/PostGIS stores durable project, run, artifact, and selected spatial metadata.
+- Redis is the Celery broker/result backend; it is not the durable artifact store.
+- Heavy imagery, rasters, previews, vector exports, and request workspaces live under `APP_RUNTIME_CACHE_DIR`.
+- Wayback tiles use a SQLite WAL cache by default, with the legacy file cache as fallback.
+- Reference imagery is shared through canonical cached COGs where possible.
+- Completed request workspaces are compacted according to post-completion cleanup settings while project-owned artifacts and provenance are preserved.
+- Docker volumes `postgres_data`, `redis_data`, and `runtime_cache` persist across ordinary stops.
 
-## API Contract Snapshot
+Do not run `docker compose down -v` unless deleting persisted data is intentional.
 
-The request/response contract snapshot is stored at [`shared/api-contract.json`](./shared/api-contract.json).
+## Operational Notes
+
+- CPU Docker is the supported packaged runtime.
+- Native MPS is supported for local macOS development.
+- CUDA is optional and is not production-certified.
+- First runs may be slow while Wayback metadata, tiles, and imagery caches populate.
+- Wayback inference prefers zoom 18 and may fall back to a safe lower zoom when coverage preflight requires it.
+- Raw `uvicorn --reload` from `backend/` may watch `.venv`; use `backend/scripts/start_backend.py`.
+- GDAL system libraries and Python bindings must remain version-compatible.
+
+## Troubleshooting
+
+- **Missing checkpoint:** verify `deploy/models/bandon/mtgcdnet_iter_40000.pth` for packaged deployment or the configured `APP_BANDON_CHECKPOINT_PATH`.
+- **Backend unhealthy:** run `deploy/scripts/health.sh`, then inspect `deploy/scripts/logs.sh backend-api`.
+- **Job remains queued:** inspect `celery-worker` logs and Redis health.
+- **Database unhealthy:** verify Docker resources, credentials, and `postgres` logs.
+- **Frontend cannot reach FastAPI:** verify the backend URL and `CORS_ALLOWED_ORIGINS`.
+- **Port already in use:** change `FRONTEND_PORT` or `BACKEND_PORT` in `deploy/.env`, or stop stale local processes.
+- **Slow CPU inference:** reduce AOI size for validation and allocate more Docker CPU/RAM.
+- **GDAL installation failure:** compare `gdal-config --version` with the pinned `gdal` version in `backend/requirements.txt`.
+
+Focused operational details remain in [`docs/model-artifact.md`](docs/model-artifact.md), [`docs/release-ghcr.md`](docs/release-ghcr.md), [`docs/wayback_tile_ingestion.md`](docs/wayback_tile_ingestion.md), and [`backend/docs/cache_strategy.md`](backend/docs/cache_strategy.md).

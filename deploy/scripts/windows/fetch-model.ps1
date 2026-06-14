@@ -14,7 +14,7 @@ if (-not $env:MODEL_ARTIFACT_FILE -and -not $env:MODEL_ARTIFACT_URL) {
 No model artifact source was provided.
 
 Install from a local artifact:
-  `$env:MODEL_ARTIFACT_FILE="C:\path\building-change-model-bandon-mtgcdnet-v0.1.0.zip"
+  `$env:MODEL_ARTIFACT_FILE="C:\path\building-change-model-bandon-mtgcdnet-v0.1.1.zip"
   .\scripts\windows\fetch-model.ps1
 
 Or set MODEL_ARTIFACT_URL to a controlled download URL.

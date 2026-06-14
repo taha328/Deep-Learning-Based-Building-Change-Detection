@@ -7,7 +7,7 @@ from src.api.errors import raise_api_error
 from src.config import Settings
 from src.jobs.exceptions import CeleryEnqueueError, JobNotFoundError, JobsDisabledError, RedisUnavailableError
 from src.jobs.schemas import JobResponse, JobStartResponse
-from src.schemas import RunRequest
+from src.schemas import RunRequest, TemporalProjectRunRequest
 
 
 router = APIRouter()
@@ -64,10 +64,14 @@ def start_detection(request: RunRequest, settings: Settings = Depends(get_app_se
 
 
 @router.post("/temporal-projects/{project_id}")
-def start_temporal_project(project_id: str, settings: Settings = Depends(get_app_settings)) -> JobStartResponse:
+def start_temporal_project(
+    project_id: str,
+    body: TemporalProjectRunRequest | None = None,
+    settings: Settings = Depends(get_app_settings),
+) -> JobStartResponse:
     from src.jobs.service import start_temporal_project_job
 
     try:
-        return start_temporal_project_job(project_id, settings=settings)
+        return start_temporal_project_job(project_id, settings=settings, run_request=body)
     except (JobNotFoundError, JobsDisabledError, RedisUnavailableError, CeleryEnqueueError) as exc:
         _raise_job_service_error(exc)

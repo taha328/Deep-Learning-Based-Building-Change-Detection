@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Callable
 
 from src.config import Settings, get_settings
@@ -17,6 +18,7 @@ from src.schemas import (
     RunResponse,
     TemporalOverrideRequest,
     TemporalProject,
+    TemporalProjectRunRequest,
     TemporalProjectRunResponse,
     TemporalProjectSummary,
     TemporalProjectValidationResponse,
@@ -38,6 +40,14 @@ from src.services.validation import validate_request
 
 
 ProgressCallback = Callable[[float, str, dict[str, object] | None], None]
+LOGGER = logging.getLogger(__name__)
+
+
+def _request_hash_context_with_threshold(backend, settings: Settings, change_threshold: float | None) -> dict[str, object]:
+    context = backend.request_hash_context(settings)
+    if change_threshold is not None:
+        context.update(change_threshold=change_threshold, threshold_source="request_override")
+    return context
 
 
 def _resolve_settings(settings: Settings | None) -> Settings:
@@ -63,7 +73,7 @@ def validate_request_api(
         releases=list_releases(resolved_settings),
         settings=backend.configure_settings(resolved_settings),
         remote_patch_budget_enabled=backend.enforce_remote_patch_budget(),
-        request_hash_context=backend.request_hash_context(resolved_settings),
+        request_hash_context=_request_hash_context_with_threshold(backend, resolved_settings, request.change_threshold),
     )
     return validation
 
@@ -106,7 +116,7 @@ def run_detection_api(
         inference_runner=backend.create_inference_runner(configured_settings),
         model_backend=backend.model_backend,
         remote_patch_budget_enabled=backend.enforce_remote_patch_budget(),
-        request_hash_context=backend.request_hash_context(configured_settings),
+        request_hash_context=_request_hash_context_with_threshold(backend, configured_settings, request.change_threshold),
     )
     if resolved_settings.persistence_backend == "postgres":
         from src.repositories.run_repository import save_detection_run
@@ -170,6 +180,7 @@ def run_temporal_project_api(
     execution_config: PipelineExecutionConfig | None = None,
     progress_callback: ProgressCallback | None = None,
     x_ip_token: str | None = None,
+    run_request: TemporalProjectRunRequest | None = None,
 ) -> TemporalProjectRunResponse:
     resolved_settings = _resolve_settings(settings)
     project = get_temporal_project(project_id, resolved_settings)
@@ -185,6 +196,16 @@ def run_temporal_project_api(
         )
 
     configured_settings = backend.configure_settings(resolved_settings)
+    change_threshold = run_request.change_threshold if run_request is not None else None
+    if change_threshold is not None:
+        configured_settings = configured_settings.model_copy(update={"change_threshold": change_threshold})
+    request_hash_context = _request_hash_context_with_threshold(backend, configured_settings, change_threshold)
+    LOGGER.info(
+        "TEMPORAL_RUN_REQUEST_THRESHOLD projectId=%s changeThreshold=%s source=%s",
+        project_id,
+        configured_settings.change_threshold,
+        "request_override" if change_threshold is not None else "backend_settings_env",
+    )
 
     def _pair_runner(request: RunRequest) -> RunResponse:
         return run_detection(
@@ -195,7 +216,7 @@ def run_temporal_project_api(
             inference_runner=backend.create_inference_runner(configured_settings),
             model_backend=backend.model_backend,
             remote_patch_budget_enabled=backend.enforce_remote_patch_budget(),
-            request_hash_context=backend.request_hash_context(configured_settings),
+            request_hash_context=request_hash_context,
         )
 
     response = run_temporal_project(
@@ -203,7 +224,7 @@ def run_temporal_project_api(
         settings=configured_settings,
         pair_runner=_pair_runner,
         remote_patch_budget_enabled=backend.enforce_remote_patch_budget(),
-        request_hash_context=backend.request_hash_context(configured_settings),
+        request_hash_context=request_hash_context,
         execution_config=resolved_execution_config,
     )
     if resolved_settings.persistence_backend == "postgres":

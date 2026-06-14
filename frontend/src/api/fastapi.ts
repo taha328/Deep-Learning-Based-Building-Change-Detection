@@ -25,6 +25,7 @@ import {
   type RunResponse,
   type TemporalProject,
   type TemporalProjectRunResponse,
+  type TemporalProjectRunRequest,
   type TemporalProjectExportBundle,
   type TemporalProjectSaveResponse,
   type TemporalProjectSummary,
@@ -189,9 +190,10 @@ async function startDetectionJob(request: ValidationRequest): Promise<JobStartRe
   return jobStartResponseSchema.parse(result);
 }
 
-async function startTemporalProjectJob(projectId: string): Promise<JobStartResponse> {
+async function startTemporalProjectJob(projectId: string, request: TemporalProjectRunRequest): Promise<JobStartResponse> {
   const result = await apiFetch<unknown>(`/api/jobs/temporal-projects/${encodeURIComponent(projectId)}`, {
     method: "POST",
+    body: JSON.stringify(request),
   });
   return jobStartResponseSchema.parse(result);
 }
@@ -459,8 +461,10 @@ export async function validateTemporalProject(project: TemporalProject): Promise
 
 export async function runTemporalProject(
   projectId: string,
+  request: TemporalProjectRunRequest,
   onStatus?: (message: string) => void,
   onProgress?: (progress: RunProgressState) => void,
+  onAccepted?: () => void,
 ): Promise<TemporalProjectRunResponse> {
   let progress = createActiveRunProgress();
   onProgress?.(progress);
@@ -468,7 +472,7 @@ export async function runTemporalProject(
 
   let startResponse: JobStartResponse | null = null;
   try {
-    startResponse = await startTemporalProjectJob(projectId);
+    startResponse = await startTemporalProjectJob(projectId, request);
   } catch (error) {
     if (isJobUnavailableError(error)) {
       try {
@@ -477,6 +481,7 @@ export async function runTemporalProject(
         onStatus?.(formatRunStatus(progress));
         const result = await apiFetch<unknown>(`/api/temporal-projects/${encodeURIComponent(projectId)}/run`, {
           method: "POST",
+          body: JSON.stringify(request),
         });
         const response = temporalProjectRunResponseSchema.parse(result);
         if (response.success === false) {
@@ -487,6 +492,7 @@ export async function runTemporalProject(
           throw new Error(message);
         }
 
+        onAccepted?.();
         const completed = createCompletedRunProgress();
         onProgress?.(completed);
         onStatus?.(formatRunStatus(completed));
@@ -521,6 +527,7 @@ export async function runTemporalProject(
     throw new Error("The backend failed to queue the temporal run.");
   }
 
+  onAccepted?.();
   try {
     progress = createPendingRunProgress();
     onProgress?.(progress);

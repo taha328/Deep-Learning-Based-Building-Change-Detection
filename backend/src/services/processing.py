@@ -15,16 +15,15 @@ import time
 from typing import Any, Callable, Literal
 
 from src.config import Settings
+from src.execution_profiles import InferenceRuntimeConfig, resolve_inference_runtime
 from src.domain.cache import load_cached_response, request_result_dir, save_cached_response
 from src.domain.artifact_manifest import register_artifact
 from src.domain.run_workspace import cleanup_run_tmp_dir, get_run_tmp_dir
 from src.domain.stage_timing import StageTimingRecorder
 from src.domain.bandon_runner import run_bandon_inference
-from src.domain.change_products import derive_new_building_products
+from src.domain.change_products import derive_new_building_products, threshold_change_probability
 from src.domain.exports import create_export_bundle_from_manifest, export_bandon_outputs, write_geojson, write_run_manifest
-from src.domain.imagery_providers import MapboxCurrentProvider
 from src.domain.inference_reference_imagery import get_or_create_inference_reference_imagery
-from src.domain.mapbox_current import MAPBOX_ATTRIBUTION, MAPBOX_SOURCE_ID
 from src.domain.mosaic import MosaicResult, WaybackTileDownloadError, align_mosaic_pair, download_wayback_mosaic
 from src.domain.tiled_inference import (
     TiledInferenceConfig,
@@ -200,7 +199,7 @@ def _resolve_available_tiles_for_aoi(
 
 
 def _inference_stage_message() -> str:
-    return "Running local MTGCDNet change detection"
+    return "Running local BANDON change detection"
 
 
 def _write_bandon_input_images(
@@ -499,21 +498,37 @@ def _detection_run_identity(
     model_backend: str,
     request_hash: str,
     change_threshold: float,
-    request_hash_context: dict[str, object] | None,
+    semantic_threshold: float,
+    threshold_source: str = "backend_settings_env",
+    request_hash_context: dict[str, object] | None = None,
 ) -> dict[str, object]:
     checkpoint_path: Path | None = None
     config_path: Path | None = None
+    checkpoint_env_var: str | None = None
     if model_backend == "bandon_mps":
-        checkpoint_path = _resolved_path(settings.bandon_checkpoint_path, base=settings.project_root)
-        config_path = _resolved_path(settings.bandon_config_path, base=settings.bandon_repo_dir)
+        runtime = resolve_inference_runtime(settings)
+        checkpoint_path = runtime.checkpoint_path
+        checkpoint_env_var = runtime.checkpoint_env_var
+        config_path = _resolved_path(runtime.config_path, base=runtime.repo_dir)
     checkpoint_sha256 = _sha256_file_or_none(checkpoint_path)
     identity: dict[str, object] = {
         "effective_backend": settings.inference_backend,
         "runner_family": "bandon_mps" if model_backend == "bandon_mps" else model_backend,
         "checkpoint_path": str(checkpoint_path) if checkpoint_path else None,
+        "checkpoint_env_var_used": checkpoint_env_var,
+        "checkpoint_path_resolved": str(checkpoint_path) if checkpoint_path else None,
+        "checkpoint_exists": checkpoint_path.is_file() if checkpoint_path else False,
+        "checkpoint_size_bytes": checkpoint_path.stat().st_size if checkpoint_path else None,
         "checkpoint_sha256": checkpoint_sha256,
         "threshold": change_threshold,
+        "change_threshold": change_threshold,
+        "semantic_threshold": semantic_threshold,
+        "semantic_threshold_applied": False,
+        "threshold_source": threshold_source,
         "config_path": str(config_path) if config_path else None,
+        "inference_backend_requested": settings.inference_backend,
+        "inference_backend_resolved": settings.inference_backend,
+        "device_requested": settings.bandon_device if model_backend == "bandon_mps" else None,
         "request_hash": request_hash,
         "pair_hash": request_hash,
         "inference_cache_key": request_hash,
@@ -529,8 +544,38 @@ def _log_effective_detection_identity(identity: dict[str, object]) -> None:
     LOGGER.info("EFFECTIVE_CHECKPOINT_PATH value=%s", identity.get("checkpoint_path"))
     LOGGER.info("EFFECTIVE_CHECKPOINT_SHA256 value=%s", identity.get("checkpoint_sha256"))
     LOGGER.info("EFFECTIVE_THRESHOLD value=%s", identity.get("threshold"))
+    LOGGER.info(
+        "EFFECTIVE_THRESHOLDS source=%s semantic=%s change=%s",
+        identity.get("threshold_source"),
+        identity.get("semantic_threshold"),
+        identity.get("change_threshold"),
+    )
+    LOGGER.info(
+        "EFFECTIVE_INFERENCE_RUNTIME backend=%s checkpointEnvVar=%s checkpointPath=%s "
+        "thresholdsSource=%s semantic=%s change=%s",
+        identity.get("effective_backend"),
+        identity.get("checkpoint_env_var_used"),
+        identity.get("checkpoint_path_resolved"),
+        identity.get("threshold_source"),
+        identity.get("semantic_threshold"),
+        identity.get("change_threshold"),
+    )
     LOGGER.info("EFFECTIVE_RUN_CACHE_KEY value=%s", identity.get("inference_cache_key"))
     LOGGER.info("EFFECTIVE_REQUEST_HASH value=%s", identity.get("request_hash"))
+    LOGGER.info(
+        "THRESHOLD_EFFECTIVE_VALUES backend=%s change=%s semantic=%s source=%s semantic_threshold_applied=false",
+        identity.get("effective_backend"),
+        identity.get("change_threshold"),
+        identity.get("semantic_threshold"),
+        identity.get("threshold_source"),
+    )
+    LOGGER.info(
+        "THRESHOLD_CACHE_KEY_CONTEXT requestHash=%s change=%s source=%s checkpointSha256=%s",
+        identity.get("request_hash"),
+        identity.get("change_threshold"),
+        identity.get("threshold_source"),
+        identity.get("checkpoint_sha256"),
+    )
 
 
 def _scene_imagery_provenance(scene: MosaicResult) -> dict[str, object]:
@@ -906,8 +951,8 @@ def _pair_summary_df(
                 "identifier": t2_identifier or prepared.t2_release.identifier,
                 "zoom": zoom_t2,
                 "release_date": t2_release_date or str(prepared.t2_release.release_date),
-                "provider": "mapbox" if (t2_identifier or prepared.t2_release.identifier) == MAPBOX_SOURCE_ID else "esri_wayback",
-                "source_type": "current_basemap" if (t2_identifier or prepared.t2_release.identifier) == MAPBOX_SOURCE_ID else "historical_release",
+                "provider": "esri_wayback",
+                "source_type": "historical_release",
                 "dominant_src_date": scene_t2_metadata.dominant_src_date,
                 "dominant_src_res_m": scene_t2_metadata.dominant_src_res_m,
                 "capture_date_count": scene_t2_metadata.capture_date_count,
@@ -1208,7 +1253,7 @@ def _build_failure_diagnostics(
     *,
     timings: StageTimings,
     prepared: PreparedRequest,
-    request: RunRequest,
+    runtime: InferenceRuntimeConfig,
     min_new_building_pixels: int,
     old_building_mask_dilation_pixels: int,
     new_building_core_distance_pixels: int,
@@ -1226,6 +1271,12 @@ def _build_failure_diagnostics(
         coverage["t1"] = _coverage_entry(prepared.t1_release.identifier, zoom_t1 or 0, scene_t1_metadata, tilemap_t1)
     if scene_t2_metadata is not None:
         coverage["t2"] = _coverage_entry(prepared.t2_release.identifier, zoom_t2 or 0, scene_t2_metadata, tilemap_t2)
+    LOGGER.info(
+        "FAILURE_DIAGNOSTICS_THRESHOLDS source=%s semantic=%s change=%s",
+        runtime.threshold_source,
+        runtime.semantic_threshold,
+        runtime.change_threshold,
+    )
     return DiagnosticMetadata(
         cache_hit=False,
         stage_seconds=dict(timings.values),
@@ -1238,8 +1289,8 @@ def _build_failure_diagnostics(
             ),
         },
         thresholds={
-            "change_threshold": request.change_threshold,
-            "semantic_threshold": request.semantic_threshold,
+            "change_threshold": runtime.change_threshold,
+            "semantic_threshold": runtime.semantic_threshold,
             "old_building_mask_dilation_pixels": float(old_building_mask_dilation_pixels),
             "new_building_core_distance_pixels": float(new_building_core_distance_pixels),
         },
@@ -1279,6 +1330,7 @@ def run_detection(
     remote_patch_budget_enabled: bool = False,
     request_hash_context: dict[str, object] | None = None,
 ) -> RunResponse:
+    semantic_threshold_override_supplied = request.semantic_threshold is not None
     request_hash_context = {
         **(request_hash_context or {}),
         "imagery_source_recipe": "canonical_cog_inference_v1",
@@ -1310,11 +1362,10 @@ def run_detection(
         duration_ms=validation_duration_ms,
         metadata={"valid": True, "estimated_tiles": prepared.tile_count_per_scene * 2},
     )
-    if settings.inference_backend == "mtgcdnet_s2looking_mps":
-        change_threshold = float(settings.default_change_threshold)
-    else:
-        change_threshold = float(request.change_threshold if request.change_threshold is not None else settings.default_change_threshold)
-    semantic_threshold = float(request.semantic_threshold if request.semantic_threshold is not None else settings.default_semantic_threshold)
+    runtime = resolve_inference_runtime(settings)
+    change_threshold = float(request.change_threshold if request.change_threshold is not None else runtime.change_threshold)
+    semantic_threshold = float(runtime.semantic_threshold)
+    threshold_source = "request_override" if request.change_threshold is not None else "backend_settings_env"
     old_building_mask_dilation_pixels = max(
         int(
             request.old_building_mask_dilation_pixels
@@ -1336,6 +1387,8 @@ def run_detection(
         model_backend=model_backend,
         request_hash=prepared.request_hash,
         change_threshold=change_threshold,
+        semantic_threshold=semantic_threshold,
+        threshold_source=threshold_source,
         request_hash_context=request_hash_context,
     )
     _log_effective_detection_identity(run_identity)
@@ -1367,9 +1420,17 @@ def run_detection(
         settings=settings,
     )
     run_warnings: list[str] = []
+    if semantic_threshold_override_supplied:
+        run_warnings.append(
+            "Request semantic_threshold override was ignored because current local backends do not apply it to final outputs."
+        )
     backend_diagnostics: dict[str, Any] = {
         "model_backend": model_backend,
         "effective_backend": settings.inference_backend,
+        "change_threshold": change_threshold,
+        "semantic_threshold": semantic_threshold,
+        "semantic_threshold_applied": False,
+        "threshold_source": threshold_source,
     }
     if model_backend == "bandon_mps":
         backend_diagnostics.update(
@@ -1377,7 +1438,11 @@ def run_detection(
                 "repo_dir": str(settings.bandon_repo_dir),
                 "env_prefix": str(settings.bandon_env_prefix),
                 "config_path": str(settings.bandon_config_path),
-                "checkpoint_path": str(settings.bandon_checkpoint_path),
+                **runtime.diagnostics(),
+                "change_threshold": change_threshold,
+                "semantic_threshold": semantic_threshold,
+                "threshold_source": threshold_source,
+                "checkpoint_path": str(runtime.checkpoint_path),
                 "device_requested": settings.bandon_device,
                 "allow_mps_fallback": settings.bandon_allow_mps_fallback,
             }
@@ -1411,10 +1476,10 @@ def run_detection(
             else None
         )
 
-        use_mapbox_t2 = prepared.latest_source == "mapbox_current"
         with timings.track("release_resolution"):
-            if use_mapbox_t2:
-                resolved_t1 = _resolve_release_for_aoi(
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                future_t1_resolution = executor.submit(
+                    _resolve_release_for_aoi,
                     settings,
                     release=prepared.t1_release,
                     aoi_bbox=aoi_bbox,
@@ -1423,48 +1488,18 @@ def run_detection(
                     stage_prefix="release_resolution.t1",
                     scene_role="t1",
                 )
-                resolved_t2 = ResolvedWaybackRelease(
+                future_t2_resolution = executor.submit(
+                    _resolve_release_for_aoi,
+                    settings,
                     release=prepared.t2_release,
-                    zoom=min(settings.mapbox_current_imagery_default_zoom, settings.mapbox_current_imagery_max_zoom),
-                    metadata=MetadataSummary(dominant_src_date=None, dominant_src_res_m=None),
-                    tilemap=None,
+                    aoi_bbox=aoi_bbox,
+                    normalized_aoi=prepared.normalized_aoi,
+                    timing=t2_timing,
+                    stage_prefix="release_resolution.t2",
+                    scene_role="t2",
                 )
-                _safe_add_timing_stage(
-                    t2_timing,
-                    "release_resolution.t2.total",
-                    duration_ms=0.0,
-                    metadata={
-                        "scene_role": "t2",
-                        "provider": "mapbox",
-                        "source_type": "current_basemap",
-                        "source_id": MAPBOX_SOURCE_ID,
-                        "capture_date_known": False,
-                    },
-                )
-            else:
-                with ThreadPoolExecutor(max_workers=2) as executor:
-                    future_t1_resolution = executor.submit(
-                        _resolve_release_for_aoi,
-                        settings,
-                        release=prepared.t1_release,
-                        aoi_bbox=aoi_bbox,
-                        normalized_aoi=prepared.normalized_aoi,
-                        timing=t1_timing,
-                        stage_prefix="release_resolution.t1",
-                        scene_role="t1",
-                    )
-                    future_t2_resolution = executor.submit(
-                        _resolve_release_for_aoi,
-                        settings,
-                        release=prepared.t2_release,
-                        aoi_bbox=aoi_bbox,
-                        normalized_aoi=prepared.normalized_aoi,
-                        timing=t2_timing,
-                        stage_prefix="release_resolution.t2",
-                        scene_role="t2",
-                    )
-                    resolved_t1 = future_t1_resolution.result()
-                    resolved_t2 = future_t2_resolution.result()
+                resolved_t1 = future_t1_resolution.result()
+                resolved_t2 = future_t2_resolution.result()
 
         if parent_timing is not None and t1_timing is not None and t2_timing is not None:
             parent_timing.merge_child_timings(t1_timing)
@@ -1475,8 +1510,6 @@ def run_detection(
         tilemap_t1 = resolved_t1.tilemap
         tilemap_t2 = resolved_t2.tilemap
         for label, resolved in (("T1", resolved_t1), ("T2", resolved_t2)):
-            if label == "T2" and use_mapbox_t2:
-                continue
             if resolved.zoom < settings.wayback_preferred_inference_zoom:
                 run_warnings.append(
                     f"{label} release {resolved.release.identifier} is being downloaded at z={resolved.zoom} because z={settings.wayback_preferred_inference_zoom} has no safe AOI coverage."
@@ -1484,7 +1517,7 @@ def run_detection(
 
         for label, release_identifier, metadata, tilemap in (
             ("T1", prepared.t1_release.identifier, scene_t1_metadata, tilemap_t1),
-            ("T2", MAPBOX_SOURCE_ID if use_mapbox_t2 else prepared.t2_release.identifier, scene_t2_metadata, tilemap_t2),
+            ("T2", prepared.t2_release.identifier, scene_t2_metadata, tilemap_t2),
         ):
             if metadata.mixed_capture_dates:
                 run_warnings.append(
@@ -1511,16 +1544,12 @@ def run_detection(
                 scene_t2_metadata=scene_t2_metadata,
                 t1_tilemap=tilemap_t1,
                 t2_tilemap=tilemap_t2,
-                t2_identifier=MAPBOX_SOURCE_ID if use_mapbox_t2 else None,
-                t2_release_date="current_basemap" if use_mapbox_t2 else None,
             )
 
         for tilemap, release_identifier, metadata, resolved_zoom in (
             (tilemap_t1, prepared.t1_release.identifier, scene_t1_metadata, resolved_t1.zoom),
             (tilemap_t2, prepared.t2_release.identifier, scene_t2_metadata, resolved_t2.zoom),
         ):
-            if use_mapbox_t2 and release_identifier == prepared.t2_release.identifier:
-                continue
             if tilemap is not None and tilemap.preflight_complete and tilemap.available_count == 0:
                 return RunResponse(
                     success=False,
@@ -1534,7 +1563,7 @@ def run_detection(
                     diagnostics=_build_failure_diagnostics(
                         timings=timings,
                         prepared=prepared,
-                        request=request,
+                        runtime=runtime,
                         min_new_building_pixels=min_pixels,
                         old_building_mask_dilation_pixels=old_building_mask_dilation_pixels,
                         new_building_core_distance_pixels=new_building_core_distance_pixels,
@@ -1549,7 +1578,7 @@ def run_detection(
                     ),
                 )
 
-        _report(progress, 0.18, "Downloading imagery" if use_mapbox_t2 else "Downloading Wayback imagery")
+        _report(progress, 0.18, "Downloading Wayback imagery")
         try:
             with timings.track("download"):
                 selected_tiles_t1 = _resolve_available_tiles_for_aoi(
@@ -1576,47 +1605,17 @@ def run_detection(
                         payload,
                     ),
                 )
-                if use_mapbox_t2:
-                    mapbox_start = time.perf_counter_ns()
-                    scene_t2 = MapboxCurrentProvider().download(
-                        aoi_bbox,
-                        settings=settings,
-                        zoom=resolved_t2.zoom,
-                        aoi_geojson=prepared.normalized_aoi,
-                    )
-                    _safe_add_timing_stage(
-                        timing,
-                        "mapbox_imagery_download_or_load",
-                        duration_ms=_elapsed_ms(mapbox_start),
-                        metadata={
-                            "provider": "mapbox",
-                            "cache_hit": bool((scene_t2.metadata or {}).get("cache_hit")),
-                            "tile_count": scene_t2.tile_count,
-                            "zoom": scene_t2.zoom,
-                        },
-                    )
-                    run_warnings.append(
-                        "The latest milestone uses Mapbox Satellite current basemap imagery. Exact capture date is not guaranteed."
-                    )
-                    backend_diagnostics["latest_source"] = {
-                        "provider": "mapbox",
-                        "source_type": "current_basemap",
-                        "source_id": MAPBOX_SOURCE_ID,
-                        "capture_date_known": False,
-                        "attribution": MAPBOX_ATTRIBUTION,
-                    }
-                else:
-                    selected_tiles_t2 = _resolve_available_tiles_for_aoi(
-                        prepared.normalized_aoi,
-                        bbox=aoi_bbox,
-                        zoom=resolved_t2.zoom,
-                        preflight_available_tiles=tilemap_t2.available_tiles
-                        if tilemap_t2 is not None and tilemap_t2.preflight_complete
-                        else None,
-                    )
-                    scene_t2 = get_or_create_inference_reference_imagery(
-                        release=prepared.t2_release,
-                        normalized_aoi=prepared.normalized_aoi,
+                selected_tiles_t2 = _resolve_available_tiles_for_aoi(
+                    prepared.normalized_aoi,
+                    bbox=aoi_bbox,
+                    zoom=resolved_t2.zoom,
+                    preflight_available_tiles=tilemap_t2.available_tiles
+                    if tilemap_t2 is not None and tilemap_t2.preflight_complete
+                    else None,
+                )
+                scene_t2 = get_or_create_inference_reference_imagery(
+                    release=prepared.t2_release,
+                    normalized_aoi=prepared.normalized_aoi,
                         bbox=aoi_bbox,
                         settings=settings,
                         zoom=resolved_t2.zoom,
@@ -1639,7 +1638,7 @@ def run_detection(
                 diagnostics=_build_failure_diagnostics(
                     timings=timings,
                     prepared=prepared,
-                    request=request,
+                    runtime=runtime,
                     min_new_building_pixels=min_pixels,
                     old_building_mask_dilation_pixels=old_building_mask_dilation_pixels,
                     new_building_core_distance_pixels=new_building_core_distance_pixels,
@@ -1661,7 +1660,7 @@ def run_detection(
                 diagnostics=_build_failure_diagnostics(
                     timings=timings,
                     prepared=prepared,
-                    request=request,
+                    runtime=runtime,
                     min_new_building_pixels=min_pixels,
                     old_building_mask_dilation_pixels=old_building_mask_dilation_pixels,
                     new_building_core_distance_pixels=new_building_core_distance_pixels,
@@ -1683,7 +1682,7 @@ def run_detection(
                 diagnostics=_build_failure_diagnostics(
                     timings=timings,
                     prepared=prepared,
-                    request=request,
+                    runtime=runtime,
                     min_new_building_pixels=min_pixels,
                     old_building_mask_dilation_pixels=old_building_mask_dilation_pixels,
                     new_building_core_distance_pixels=new_building_core_distance_pixels,
@@ -1716,7 +1715,7 @@ def run_detection(
             _report(
                 progress,
                 0.45,
-                "Running tiled local MTGCDNet change detection",
+                "Running tiled local BANDON change detection",
                 {
                     "stage": "tiled_inference",
                     "mode": "tiled",
@@ -1746,7 +1745,7 @@ def run_detection(
                         ),
                         aoi_geojson=prepared.normalized_aoi,
                         release_t1=prepared.t1_release.identifier,
-                        release_t2=MAPBOX_SOURCE_ID if use_mapbox_t2 else prepared.t2_release.identifier,
+                        release_t2=prepared.t2_release.identifier,
                         progress_callback=lambda payload: _report(
                             progress,
                             min(
@@ -1758,7 +1757,7 @@ def run_detection(
                                     / max(float(payload.get("total_tiles") or 1), 1.0)
                                 ),
                             ),
-                            "Running tiled local MTGCDNet change detection",
+                            "Running tiled local BANDON change detection",
                             payload,
                         ),
                     )
@@ -1770,7 +1769,7 @@ def run_detection(
                     diagnostics=_build_failure_diagnostics(
                         timings=timings,
                         prepared=prepared,
-                        request=request,
+                        runtime=runtime,
                         min_new_building_pixels=min_pixels,
                         old_building_mask_dilation_pixels=old_building_mask_dilation_pixels,
                         new_building_core_distance_pixels=new_building_core_distance_pixels,
@@ -1875,7 +1874,7 @@ def run_detection(
                     total_change_polygons=int(total_feature_count),
                     total_change_area_m2=round(total_change_area, 2),
                     release_date_t1=str(prepared.t1_release.release_date),
-                    release_date_t2="current_basemap" if use_mapbox_t2 else str(prepared.t2_release.release_date),
+                    release_date_t2=str(prepared.t2_release.release_date),
                     dominant_src_date_t1=scene_t1_metadata.dominant_src_date,
                     dominant_src_date_t2=scene_t2_metadata.dominant_src_date,
                     dominant_src_res_m_t1=scene_t1_metadata.dominant_src_res_m,
@@ -1907,7 +1906,7 @@ def run_detection(
                     coverage={
                         "t1": _coverage_entry(prepared.t1_release.identifier, resolved_t1.zoom, scene_t1_metadata, tilemap_t1),
                         "t2": _coverage_entry(
-                            MAPBOX_SOURCE_ID if use_mapbox_t2 else prepared.t2_release.identifier,
+                            prepared.t2_release.identifier,
                             resolved_t2.zoom,
                             scene_t2_metadata,
                             tilemap_t2,
@@ -1953,7 +1952,7 @@ def run_detection(
                 diagnostics=_build_failure_diagnostics(
                     timings=timings,
                     prepared=prepared,
-                    request=request,
+                    runtime=runtime,
                     min_new_building_pixels=min_pixels,
                     old_building_mask_dilation_pixels=old_building_mask_dilation_pixels,
                     new_building_core_distance_pixels=new_building_core_distance_pixels,
@@ -2001,7 +2000,7 @@ def run_detection(
 
         vector_context = VectorizationContext(
             release_t1=prepared.t1_release.identifier,
-            release_t2=MAPBOX_SOURCE_ID if use_mapbox_t2 else prepared.t2_release.identifier,
+            release_t2=prepared.t2_release.identifier,
             src_date_t1=scene_t1_metadata.dominant_src_date,
             src_date_t2=scene_t2_metadata.dominant_src_date,
         )
@@ -2126,7 +2125,7 @@ def run_detection(
                     diagnostics=_build_failure_diagnostics(
                         timings=timings,
                         prepared=prepared,
-                        request=request,
+                        runtime=runtime,
                         min_new_building_pixels=min_pixels,
                         old_building_mask_dilation_pixels=old_building_mask_dilation_pixels,
                         new_building_core_distance_pixels=new_building_core_distance_pixels,
@@ -2152,7 +2151,7 @@ def run_detection(
                     diagnostics=_build_failure_diagnostics(
                         timings=timings,
                         prepared=prepared,
-                        request=request,
+                        runtime=runtime,
                         min_new_building_pixels=min_pixels,
                         old_building_mask_dilation_pixels=old_building_mask_dilation_pixels,
                         new_building_core_distance_pixels=new_building_core_distance_pixels,
@@ -2203,9 +2202,27 @@ def run_detection(
 
             _report(progress, 0.72, "Applying post-processing")
             with timings.track("postprocessing"):
-                raw_change_mask = (
-                    bandon_result.change_probability >= change_threshold
-                ) & bandon_result.change_mask & valid_comparison_mask
+                raw_change_mask = threshold_change_probability(
+                    bandon_result.change_probability,
+                    change_threshold=change_threshold,
+                    valid_comparison_mask=valid_comparison_mask,
+                )
+                threshold_probability_stats = _probability_stats(
+                    bandon_result.change_probability,
+                    valid_comparison_mask,
+                )
+                LOGGER.info(
+                    "THRESHOLD_MASK_STATS runId=%s changeThreshold=%s probabilityMin=%s probabilityP05=%s "
+                    "probabilityP50=%s probabilityP95=%s probabilityMax=%s maskNonzeroPixels=%s",
+                    prepared.request_hash,
+                    change_threshold,
+                    threshold_probability_stats.get("min"),
+                    threshold_probability_stats.get("p05"),
+                    threshold_probability_stats.get("p50"),
+                    threshold_probability_stats.get("p95"),
+                    threshold_probability_stats.get("max"),
+                    int(np.count_nonzero(raw_change_mask)),
+                )
                 filtered_change_mask = suppress_edge_hugging_components(
                     raw_change_mask,
                     reference_mask=~valid_comparison_mask,
@@ -2301,6 +2318,13 @@ def run_detection(
                 )
 
             total_change_area = float(change_polygons_df["area_m2"].sum()) if not change_polygons_df.empty else 0.0
+            LOGGER.info(
+                "THRESHOLD_POLYGON_STATS runId=%s polygonCount=%s blockCount=%s totalAreaM2=%s",
+                prepared.request_hash,
+                len(change_polygons_geojson.get("features", [])),
+                len(change_blocks_geojson.get("features", [])),
+                round(total_change_area, 2),
+            )
             response = RunResponse(
                 success=True,
                 summary=SummaryStats(
@@ -2318,7 +2342,7 @@ def run_detection(
                     total_change_polygons=int(len(change_polygons_df)),
                     total_change_area_m2=round(total_change_area, 2),
                     release_date_t1=str(prepared.t1_release.release_date),
-                    release_date_t2="current_basemap" if use_mapbox_t2 else str(prepared.t2_release.release_date),
+                    release_date_t2=str(prepared.t2_release.release_date),
                     dominant_src_date_t1=scene_t1_metadata.dominant_src_date,
                     dominant_src_date_t2=scene_t2_metadata.dominant_src_date,
                     dominant_src_res_m_t1=scene_t1_metadata.dominant_src_res_m,
@@ -2357,7 +2381,7 @@ def run_detection(
                     warnings=run_warnings + alignment_warnings,
                     coverage={
                         "t1": _coverage_entry(prepared.t1_release.identifier, resolved_t1.zoom, scene_t1_metadata, tilemap_t1),
-                        "t2": _coverage_entry(MAPBOX_SOURCE_ID if use_mapbox_t2 else prepared.t2_release.identifier, resolved_t2.zoom, scene_t2_metadata, tilemap_t2),
+                        "t2": _coverage_entry(prepared.t2_release.identifier, resolved_t2.zoom, scene_t2_metadata, tilemap_t2),
                     },
                 ),
             )

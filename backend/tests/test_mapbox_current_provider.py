@@ -39,8 +39,6 @@ def _settings(tmp_path, *, token: str | None = "pk.test") -> Settings:
         runtime_cache_dir=tmp_path / "runtime",
         mapbox_access_token=token,
         mapbox_current_imagery_enabled=True,
-        mapbox_current_imagery_default_zoom=19,
-        mapbox_current_imagery_max_zoom=19,
         mapbox_current_imagery_max_tiles=4,
         download_workers=1,
     )
@@ -147,6 +145,10 @@ def test_mapbox_cache_miss_writes_georeferenced_tif_and_cache_hit_avoids_network
     assert first.source_type == "current_basemap"
     assert first.source_id == MAPBOX_SOURCE_ID
     assert first.capture_date_known is False
+    assert first.zoom == 18
+    assert first.metadata and first.metadata["zoom"] == 18
+    assert json.loads((first.shared_cache_dir / "metadata.json").read_text(encoding="utf-8"))["zoom"] == 18
+    assert "/18/0/0.jpg90" in calls[0]
     assert second.metadata and second.metadata["cache_hit"] is True
     assert len(calls) == 1
     with rasterio.open(first.geotiff_path) as src:

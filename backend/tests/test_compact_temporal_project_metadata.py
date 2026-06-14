@@ -85,7 +85,6 @@ def _make_project(runtime: Path, *, external_additions: bool = False) -> Path:
         "warnings": ["keep-project-warning"],
         "validation_blocking_errors": [],
         "download_bundle_path": str(request_dir / "export_bundle.zip"),
-        "latest_source": "esri_wayback",
         "milestones": [
             {
                 "release_identifier": "WB_2020_R04",

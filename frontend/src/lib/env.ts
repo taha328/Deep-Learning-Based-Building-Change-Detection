@@ -88,7 +88,7 @@ export function getFrontendRuntimeConfig(): FrontendRuntimeConfig {
       backendUrl,
       modeLabel: "Local frontend · Local backend",
       modeDescription:
-        "This frontend targets your local FastAPI backend and defaults to BANDON MTGCDNet on Apple Silicon MPS.",
+        "This frontend targets your local FastAPI backend and defaults to BANDON.",
       defaultModelBackend,
       showBackendSelector,
       supportsRequestBackendSelection,

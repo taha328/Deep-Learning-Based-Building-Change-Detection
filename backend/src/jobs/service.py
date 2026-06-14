@@ -21,7 +21,7 @@ from src.repositories.job_repository import (
     mark_job_failed,
     normalize_job_status,
 )
-from src.schemas import RunRequest
+from src.schemas import RunRequest, TemporalProjectRunRequest
 
 
 def _broker_url(settings: Settings) -> str:
@@ -79,7 +79,12 @@ def _job_response(job: JobRecord) -> JobResponse:
     )
 
 
-def start_temporal_project_job(project_id: str, *, settings: Settings) -> JobStartResponse:
+def start_temporal_project_job(
+    project_id: str,
+    *,
+    settings: Settings,
+    run_request: TemporalProjectRunRequest | None = None,
+) -> JobStartResponse:
     assert_redis_available(settings)
     enqueue_error: Exception | None = None
     job_id: str | None = None
@@ -96,14 +101,17 @@ def start_temporal_project_job(project_id: str, *, settings: Settings) -> JobSta
             session=session,
             project_db_id=project.id,
             project_id=project_id,
-            raw_request={"project_id": project_id},
+            raw_request={"project_id": project_id, **(run_request.model_dump(exclude_none=True) if run_request else {})},
         ).job_id
     assert job_id is not None
     try:
         async_result = celery_app.send_task(
             "building_change.run_temporal_project",
             args=[job_id, project_id],
-            kwargs={"settings_payload": None},
+            kwargs={
+                "settings_payload": None,
+                "run_request_payload": run_request.model_dump(exclude_none=True) if run_request else None,
+            },
             queue=settings.celery_task_default_queue,
         )
     except Exception as exc:  # noqa: BLE001

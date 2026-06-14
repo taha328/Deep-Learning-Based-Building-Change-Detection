@@ -60,7 +60,7 @@ import { WorkflowSectionCard } from "@/features/workspace/WorkflowSectionCard";
 import { WorkspaceShell } from "@/features/workspace/WorkspaceShell";
 import type { WorkflowSectionId } from "@/features/workspace/workflowSections";
 
-const DEFAULT_PROJECT_DIRECTORY = "/Users/tahaelouali/Developer/Building_change_app/backend/runtime_cache";
+const DEFAULT_PROJECT_DIRECTORY = "backend/runtime_cache";
 
 function resolveProjectDirectory(projectId: string, directory: string): string {
   const trimmedDirectory = directory.trim();
@@ -90,8 +90,6 @@ function buildRequest(
     t1_release: state.settings.t1Release,
     t2_release: state.settings.t2Release,
     mode: state.settings.mode,
-    change_threshold: state.settings.changeThreshold,
-    semantic_threshold: state.settings.semanticThreshold,
     merge_close_gap_m: state.settings.mergeCloseGapM,
     building_block_gap_m: state.settings.buildingBlockGapM,
     buffer_distances_m: parseBufferDistances(state.settings.bufferDistancesText),
@@ -415,7 +413,6 @@ function buildTemporalBootstrapProject(
     warnings: [],
     validation_blocking_errors: [],
     download_bundle_path: null,
-    latest_source: "esri_wayback",
     has_reference_layers: false,
     reference_layer_count: 0,
   };
@@ -627,7 +624,6 @@ export function SettingsPanel({
         warnings: [],
         validation_blocking_errors: [],
         download_bundle_path: null,
-        latest_source: "esri_wayback",
         has_reference_layers: false,
         reference_layer_count: 0,
       };

@@ -1,6 +1,24 @@
 import numpy as np
 
-from src.domain.change_products import derive_new_building_products
+from src.domain.change_products import derive_new_building_products, threshold_change_probability
+
+
+def test_extreme_change_thresholds_produce_different_mask_counts() -> None:
+    probability = np.array([[0.01, 0.10], [0.90, 0.99]], dtype=np.float32)
+
+    low = threshold_change_probability(probability, change_threshold=0.05)
+    high = threshold_change_probability(probability, change_threshold=0.95)
+
+    assert np.count_nonzero(low) == 3
+    assert np.count_nonzero(high) == 1
+
+
+def test_change_threshold_below_half_is_not_limited_by_argmax_mask() -> None:
+    probability = np.array([[0.35, 0.49], [0.50, 0.90]], dtype=np.float32)
+
+    mask = threshold_change_probability(probability, change_threshold=0.35)
+
+    assert np.array_equal(mask, np.ones((2, 2), dtype=bool))
 
 
 def test_new_building_mask_logic_matches_notebook() -> None:

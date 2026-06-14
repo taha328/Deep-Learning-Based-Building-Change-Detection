@@ -1,113 +1,103 @@
-frontend/node_modules/
-frontend/dist/
-frontend/.env.local
-backend/.env
-backend/.env.local
+# Local environment and secrets
 .env
-.env.local
-backend/.venv/
-backend/runtime_cache/
-.pytest_cache/
-.DS_Store
-**/__pycache__/
-*.pyc
+.env.*
+!.env.example
+!**/.env.example
+backend/.env
+frontend/.env
 
-# Local generated dependencies and geospatial/model artifacts
+# Python environments and caches
+.venv/
+venv/
+backend/.venv/
+**/.venv/
+vendor/**/.conda*/
+vendor/**/.venv/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
 .mypy_cache/
 .ruff_cache/
+coverage/
+.coverage
+htmlcov/
+
+# Frontend dependencies and generated output
+node_modules/
+frontend/node_modules/
+dist/
+frontend/dist/
+build/
+*.tsbuildinfo
+frontend/*.d.ts
+frontend/vite.config.js.timestamp-*.mjs
+
+# Runtime caches and generated outputs
 runtime_cache/
 backend/runtime_cache*/
-frontend/dist/
-*.pth
-*.pt
-*.ckpt
-*.onnx
-*.tif
-*.tiff
-*.geotiff
-*.cog.tif
-*.gpkg
-*.mbtiles
-*.zip
-*.pmtiles
-*.png
-*.jpg
-*.jpeg
-*.pdf
-*.pptx
-*.safetensors
-
-# Generated/runtime/cache
-.agents/
-Research-Paper-Writing-Skills/
-backend/runtime_cache/
-runtime_cache/
 backend/tmp/
 tmp/
 outputs/
 generated_assets/
+screenshots/
+frontend/browser_actions/
+frontend/tmp-verification/
+frontend/tmp-verify-*.png
+notebooks/
 notebooks/outputs/
-
-# Python/env/cache
-backend/.venv/
-.venv/
-**/.venv/
-**/__pycache__/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-
-# Frontend
-frontend/node_modules/
-node_modules/
-frontend/dist/
-
-# Vendor generated environments and nested Git metadata
-vendor/**/.conda*/
-vendor/**/.venv/
-vendor/**/__pycache__/
-vendor/**/.git/
 mps_verification/
 **/mps_verification/
+mtgcdnet_s2looking_outputs/
 
-# Model/checkpoint artifacts
+# Model checkpoints and generated model packages
+checkpoints/
 backend/checkpoints/
 vendor/**/checkpoints/
-mtgcdnet_s2looking_outputs/
-checkpoints/
+deploy/models/bandon/*.pth
+deploy/models/bandon/*.pt
+deploy/models/bandon/*.ckpt
+release/building-change-model-*.zip
+release/building-change-model-*.sha256
+release/building-change-model-*.MANIFEST.txt
+release/
+!deploy/models/bandon/.gitkeep
 *.safetensors
 *.pth
 *.pt
 *.ckpt
 *.onnx
 
-# Model checkpoints and generated model artifact packages
-deploy/models/bandon/*.pth
-deploy/models/bandon/*.pt
-deploy/models/bandon/*.ckpt
-vendor/BANDON-mps/checkpoints/*.pth
-vendor/BANDON-mps/checkpoints/*.pt
-vendor/BANDON-mps/checkpoints/*.ckpt
-release/building-change-model-*.zip
-release/building-change-model-*.sha256
-release/building-change-model-*.MANIFEST.txt
-!deploy/models/bandon/.gitkeep
-
-# Large generated geospatial/media artifacts
+# Generated geospatial, media, and archive artifacts
 *.tif
 *.tiff
 *.geotiff
 *.cog.tif
-*.png
-*.jpg
-*.jpeg
-*.zip
+*.geojson
 *.gpkg
 *.mbtiles
 *.pmtiles
-*.pptx
+*.zip
+*.png
+*.jpg
+*.jpeg
 *.pdf
+*.pptx
 
-# macOS / Office temp files
+# Local scratch documents and agent metadata
+/.agents/
+/Research-Paper-Writing-Skills/
+/.impeccable.md
+/AGENTS.md
+/RTK.md
+/skills-lock.json
+/*NOTES.md
+/*REPORT.md
+/*IMPLEMENTATION*.md
+/*GUIDE.md
+/*.tex
+/notebook_*.ipynb
+
+# Vendor nested metadata and operating-system files
+vendor/**/.git/
 .DS_Store
 ~$*

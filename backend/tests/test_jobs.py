@@ -15,7 +15,8 @@ from src.jobs import service as jobs_service
 from src.jobs.exceptions import JobsDisabledError
 from src.jobs.service import cancel_job, start_detection_job, start_temporal_project_job
 from src.repositories.job_repository import mark_job_completed
-from src.schemas import ArtifactEntry, DiagnosticMetadata, RunRequest, RunResponse, SummaryStats
+from src.schemas import ArtifactEntry, DiagnosticMetadata, RunRequest, RunResponse, SummaryStats, TemporalProjectRunRequest
+from src.jobs.tasks import _log_worker_effective_backend
 
 
 class _FakeQuery:
@@ -139,15 +140,26 @@ def test_start_temporal_job_requires_existing_project(monkeypatch, tmp_path) -> 
 
     monkeypatch.setattr(jobs_service, "assert_redis_available", lambda settings: None)
     monkeypatch.setattr(jobs_service, "session_scope", lambda *_args, **_kwargs: _job_session_scope(session))
-    monkeypatch.setattr(jobs_service.celery_app, "send_task", lambda *args, **kwargs: SimpleNamespace(id="celery-task-2"))
+    sent: dict[str, object] = {}
+    monkeypatch.setattr(
+        jobs_service.celery_app,
+        "send_task",
+        lambda *args, **kwargs: (sent.update(args=args, kwargs=kwargs) or SimpleNamespace(id="celery-task-2")),
+    )
 
-    response = start_temporal_project_job("temporal-test", settings=settings)
+    response = start_temporal_project_job(
+        "temporal-test",
+        settings=settings,
+        run_request=TemporalProjectRunRequest(change_threshold=0.6),
+    )
 
     assert response.job_id.startswith("job-")
     assert response.celery_task_id == "celery-task-2"
     assert session.job is not None
     assert session.job.project_id == "temporal-test"
     assert session.job.project_db_id == session.project.id
+    assert session.job.raw_request["change_threshold"] == 0.6
+    assert sent["kwargs"]["kwargs"]["run_request_payload"] == {"change_threshold": 0.6}
 
 
 def test_cancel_job_marks_request_and_revokes(monkeypatch, tmp_path) -> None:
@@ -309,3 +321,27 @@ def test_start_detection_job_raises_when_jobs_disabled(monkeypatch, tmp_path) ->
         start_detection_job(_sample_request(), settings=settings)
 
     assert exc_info.value.code == "jobs_disabled"
+
+
+def test_worker_effective_runtime_log_uses_selected_checkpoint_and_canonical_thresholds(
+    tmp_path,
+    caplog,
+) -> None:
+    bandon_checkpoint = tmp_path / "bandon.pth"
+    bandon_checkpoint.write_bytes(b"bandon")
+    settings = Settings(
+        runtime_cache_dir=tmp_path / "runtime",
+        inference_backend="bandon_mps",
+        bandon_checkpoint_path=bandon_checkpoint,
+        change_threshold=0.37,
+        semantic_threshold=0.42,
+    )
+
+    with caplog.at_level("INFO"):
+        _log_worker_effective_backend(job_id="job-1", job_kind="temporal_project", settings=settings)
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "backend=bandon_mps" in messages
+    assert "checkpointEnvVar=APP_BANDON_CHECKPOINT_PATH" in messages
+    assert f"checkpointPath={bandon_checkpoint.resolve()}" in messages
+    assert "thresholdsSource=backend_settings_env semantic=0.42 change=0.37" in messages

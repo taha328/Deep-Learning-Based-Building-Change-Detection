@@ -28,7 +28,6 @@ class PreparedRequest:
     tile_count_per_scene: int
     t1_release: WaybackRelease
     t2_release: WaybackRelease
-    latest_source: str
     mode_limits: ModeLimits
     request_hash: str
 
@@ -41,11 +40,8 @@ def _find_release(releases: list[WaybackRelease], identifier: str) -> WaybackRel
 
 
 def _validate_thresholds(request: ValidationRequest, settings: Settings) -> tuple[float, float]:
-    if settings.inference_backend == "mtgcdnet_s2looking_mps":
-        change_threshold = settings.default_change_threshold
-    else:
-        change_threshold = request.change_threshold or settings.default_change_threshold
-    semantic_threshold = request.semantic_threshold or settings.default_semantic_threshold
+    change_threshold = request.change_threshold if request.change_threshold is not None else settings.change_threshold
+    semantic_threshold = settings.semantic_threshold
     if not 0.0 <= change_threshold <= 1.0:
         raise ValueError("change_threshold must be between 0.0 and 1.0.")
     if not 0.0 <= semantic_threshold <= 1.0:
@@ -78,7 +74,7 @@ def _estimated_model_input_size_px(bbox: dict[str, float], settings: Settings) -
 
 def _requires_bandon_minimum_input_guard(request: ValidationRequest, settings: Settings) -> bool:
     backend = request.inference_backend or settings.inference_backend
-    return backend in {"bandon_mps", "mtgcdnet_s2looking_mps"}
+    return backend == "bandon_mps"
 
 
 def validate_request(
@@ -114,36 +110,19 @@ def validate_request(
 
     t1_release = _find_release(releases, request.t1_release)
     t2_release = _find_release(releases, request.t2_release)
-    latest_release = max(releases, key=lambda item: item.release_date)
-    uses_mapbox_current = request.latest_source == "mapbox_current"
-    if not uses_mapbox_current and t1_release.identifier == t2_release.identifier:
+    threshold_source = "request_override" if request.change_threshold is not None else "backend_settings_env"
+    if request.semantic_threshold is not None:
+        warnings.append(
+            "Request semantic_threshold override was ignored because current local backends do not apply it to final outputs."
+        )
+    if t1_release.identifier == t2_release.identifier:
         blocking_errors.append("t1_release and t2_release must be different.")
-    if not uses_mapbox_current and t1_release.release_date >= t2_release.release_date:
+    if t1_release.release_date >= t2_release.release_date:
         blocking_errors.append("t1_release must be chronologically earlier than t2_release.")
-    if uses_mapbox_current:
-        if t2_release.identifier != latest_release.identifier:
-            blocking_errors.append("Mapbox current imagery can only be used for the newest/latest milestone.")
-        if not settings.mapbox_current_imagery_enabled:
-            blocking_errors.append("Mapbox current imagery is not enabled.")
-        if settings.mapbox_current_imagery_enabled and not settings.mapbox_access_token:
-            blocking_errors.append("Mapbox current imagery is enabled but MAPBOX_ACCESS_TOKEN is not configured.")
 
     area_m2 = geodesic_area_m2(geometry)
     bbox = bounds_dict(geometry)
     tile_count = scene_tile_count(bbox, settings.wayback_preferred_inference_zoom)
-    mapbox_tile_count = tile_count
-    mapbox_zoom = min(settings.mapbox_current_imagery_default_zoom, settings.mapbox_current_imagery_max_zoom)
-    if uses_mapbox_current:
-        intersecting_tiles, bbox_tile_count = intersecting_tiles_for_aoi(normalized, bbox=bbox, zoom=mapbox_zoom)
-        if intersecting_tiles is not None:
-            mapbox_tile_count = len(intersecting_tiles)
-            LOGGER.info(
-                "MAPBOX_TILE_SELECTION bboxTileCount=%s intersectingTileCount=%s skippedOutsideAoiTileCount=%s zoom=%s",
-                bbox_tile_count,
-                mapbox_tile_count,
-                max(bbox_tile_count - mapbox_tile_count, 0),
-                mapbox_zoom,
-            )
     patch_count = _estimated_inference_patch_count(bbox, settings)
     estimated_input_height, estimated_input_width = _estimated_model_input_size_px(bbox, settings)
     total_tiles = tile_count * 2
@@ -163,20 +142,6 @@ def validate_request(
         warnings.append(
             f"AOI requires {tile_count} tiles per date, exceeding the {mode_limits.label} tile budget of {mode_limits.max_scene_tiles}."
             " The request remains allowed, but imagery download will be much heavier."
-        )
-    if uses_mapbox_current:
-        if mapbox_tile_count > settings.mapbox_max_tiles_per_request:
-            blocking_errors.append(
-                f"AOI would download {mapbox_tile_count} Mapbox tiles at z={mapbox_zoom}, exceeding the limit of "
-                f"{settings.mapbox_max_tiles_per_request}."
-            )
-        elif mapbox_tile_count > settings.full_limits.max_scene_tiles:
-            warnings.append(
-                f"AOI will download {mapbox_tile_count} Mapbox tiles at z={mapbox_zoom}. "
-                "This may take longer and consume more Mapbox quota."
-            )
-        warnings.append(
-            "The latest milestone uses Mapbox Satellite current basemap imagery. Exact capture date is not guaranteed."
         )
     if remote_patch_budget_enabled and patch_count > mode_limits.max_inference_patches_per_scene:
         warnings.append(
@@ -234,6 +199,9 @@ def validate_request(
             "heavy_batch": heavy_batch,
             "heavy_batch_tile_threshold": settings.wayback_heavy_batch_tile_threshold,
             "recommended_tile_concurrency": settings.wayback_tile_max_concurrency,
+            "change_threshold": change_threshold,
+            "semantic_threshold": semantic_threshold,
+            "threshold_source": threshold_source,
         },
     )
 
@@ -241,7 +209,7 @@ def validate_request(
         return response, None
 
     hash_payload = {
-        "pipeline": "building_change_pipeline_v3",
+        "pipeline": "building_change_pipeline_v4",
         "inference_backend": settings.inference_backend,
         "patch_size": settings.patch_size,
         "stride": settings.stride,
@@ -253,10 +221,9 @@ def validate_request(
         "aoi_geojson": normalized,
         "t1_release": t1_release.identifier,
         "t2_release": t2_release.identifier,
-        "latest_source": request.latest_source,
         "mode": request.mode,
         "change_threshold": change_threshold,
-        "semantic_threshold": semantic_threshold,
+        "threshold_source": threshold_source,
         "min_new_building_pixels": request.min_new_building_pixels,
         "min_new_building_area_m2": request.min_new_building_area_m2,
         "old_building_mask_dilation_pixels": request.old_building_mask_dilation_pixels
@@ -287,7 +254,6 @@ def validate_request(
         tile_count_per_scene=tile_count,
         t1_release=t1_release,
         t2_release=t2_release,
-        latest_source=request.latest_source,
         mode_limits=mode_limits,
         request_hash=build_request_hash(hash_payload),
     )

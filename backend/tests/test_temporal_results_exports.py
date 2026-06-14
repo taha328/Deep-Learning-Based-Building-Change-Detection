@@ -1,17 +1,32 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 import re
+import xml.etree.ElementTree as ET
 import zipfile
 
 from fastapi.testclient import TestClient
+import numpy as np
+import pytest
+import rasterio
+from rasterio.transform import from_bounds
+from rasterio.warp import transform_bounds
+from shapely.geometry import shape
 
 from src.api.deps import get_app_settings
 from src.api.main import app
 from src.config import Settings
 from src.schemas import TemporalMilestone, TemporalMilestoneMetrics, TemporalProject
-from src.services.temporal_exports import build_temporal_results_export_file
+from src.services.temporal_exports import (
+    _filesystem_safe_label,
+    _qgis_layer_style,
+    _qgis_project_extent,
+    _temporal_milestone_color_map,
+    _temporal_shapefile_export_layers,
+    build_temporal_results_export_file,
+)
 from src.services.temporal_projects import save_temporal_project
 
 
@@ -89,7 +104,29 @@ def _project() -> TemporalProject:
 
 def _save_project(tmp_path: Path) -> Settings:
     settings = _settings(tmp_path)
-    save_temporal_project(_project(), settings)
+    project = _project()
+    save_temporal_project(project, settings)
+    for index, milestone in enumerate(project.milestones):
+        raster_path = (
+            settings.temporal_projects_dir
+            / project.project_id
+            / "milestones"
+            / milestone.release_identifier
+            / "reference_imagery_cog.tif"
+        )
+        raster_path.parent.mkdir(parents=True, exist_ok=True)
+        with rasterio.open(
+            raster_path,
+            "w",
+            driver="GTiff",
+            width=16,
+            height=16,
+            count=3,
+            dtype="uint8",
+            crs="EPSG:3857",
+            transform=from_bounds(-779300, 3895300, -779100, 3895500, 16, 16),
+        ) as dataset:
+            dataset.write(np.full((3, 16, 16), 80 + index * 40, dtype=np.uint8))
     return settings
 
 
@@ -140,10 +177,128 @@ def test_temporal_results_export_formats_are_generated_under_project_exports(tmp
 
     with zipfile.ZipFile(paths["shapefile"]) as archive:
         names = archive.namelist()
-        assert any(name.endswith(".shp") for name in names)
-        assert any(name.endswith(".shx") for name in names)
-        assert any(name.endswith(".dbf") for name in names)
-        assert any(name.endswith(".prj") for name in names)
+        top_level_folders = {name.split("/", 1)[0] for name in names if "/" in name}
+        assert top_level_folders == {
+            "tous_les_nouveaux_batiments",
+            "batiments_ajoutes_par_date",
+            "buffer_10m",
+            "buffer_15m",
+            "buffer_20m",
+            "rasters",
+        }
+        assert len([name for name in names if name.endswith(".qgz") and "/" not in name]) == 1
+        assert "batiments_ajoutes_par_date/batiments_ajoutes_2024_Q1.shp" in names
+        assert "buffer_10m/buffer_10m_2024_Q1.shp" in names
+        assert "buffer_10m/buffer_10m_2022_Q1_2024_Q1.shp" in names
+        assert not any("2022_Q1.shp" in name and "2022_Q1_2024_Q1" not in name for name in names)
+        for shp_name in [name for name in names if name.endswith(".shp")]:
+            stem = shp_name.removesuffix(".shp")
+            for suffix in (".shx", ".dbf", ".prj", ".cpg"):
+                assert f"{stem}{suffix}" in names
+        qgz_name = next(name for name in names if name.endswith(".qgz"))
+        qgz_path = tmp_path / "results.qgz"
+        qgz_path.write_bytes(archive.read(qgz_name))
+        with zipfile.ZipFile(qgz_path) as qgz:
+            qgs_name = next(name for name in qgz.namelist() if name.endswith(".qgs"))
+            qgs = qgz.read(qgs_name).decode("utf-8")
+        assert "./batiments_ajoutes_par_date/batiments_ajoutes_2024_Q1.shp" in qgs
+        assert "./buffer_10m/buffer_10m_2022_Q1_2024_Q1.shp" in qgs
+        assert "./rasters/WB_2022_R03/reference_imagery_cog.tif" in qgs
+        assert "./rasters/WB_2024_R03/reference_imagery_cog.tif" in qgs
+        assert 'name="Bâtiments ajoutés par date"' in qgs
+        assert 'mutually-exclusive="1"' in qgs
+        assert "OpenStreetMap" not in qgs
+        assert "Fond de carte en ligne" not in qgs
+        assert 'name="Synthèse"' in qgs
+
+
+def test_temporal_shapefile_labels_baseline_exclusion_and_layer_order() -> None:
+    assert _filesystem_safe_label("2017 Q1") == "2017_Q1"
+    assert _filesystem_safe_label("2026 Q2") == "2026_Q2"
+    assert _filesystem_safe_label("Bâtiments ajoutés / test") == "Batiments_ajoutes_test"
+
+    fc = _feature_collection()
+    project = TemporalProject(
+        project_id="temporal-order",
+        name="Temporal order",
+        milestones=[
+            TemporalMilestone(release_identifier="WB_2017_R05", release_date="2017-03-01", status="complete"),
+            TemporalMilestone(
+                release_identifier="WB_2019_R03",
+                release_date="2019-03-01",
+                status="complete",
+                additions_geojson=fc,
+                buffer_layers_geojson={"10m": fc, "15m": fc, "20m": fc},
+                cumulative_union_geojson=fc,
+            ),
+            TemporalMilestone(
+                release_identifier="WB_2021_R04",
+                release_date="2021-03-01",
+                status="complete",
+                additions_geojson=fc,
+                buffer_layers_geojson={"10m": fc, "15m": fc, "20m": fc},
+                cumulative_union_geojson=fc,
+            ),
+        ],
+        created_at="2026-01-01T00:00:00Z",
+        updated_at="2026-01-01T00:00:00Z",
+    )
+
+    layers = _temporal_shapefile_export_layers(project)
+    additions = [layer.filename for layer in layers if layer.group_key == "batiments_ajoutes_par_date"]
+    buffer_10m = [layer.filename for layer in layers if layer.group_key == "buffer_10m"]
+
+    assert additions == ["batiments_ajoutes_2021_Q1", "batiments_ajoutes_2019_Q1"]
+    assert buffer_10m == [
+        "buffer_10m_2021_Q1",
+        "buffer_10m_2019_Q1",
+        "buffer_10m_2017_Q1_2021_Q1",
+    ]
+    assert not any(filename.endswith("2017_Q1") for filename in additions + buffer_10m)
+
+
+def test_qgis_temporal_styles_match_frontend_chronological_palette() -> None:
+    fc = _feature_collection()
+    project = TemporalProject(
+        project_id="temporal-colors",
+        name="Temporal colors",
+        milestones=[
+            TemporalMilestone(release_identifier="baseline", release_date="2017-03-01", status="complete"),
+            *[
+                TemporalMilestone(
+                    release_identifier=release,
+                    release_date=date_value,
+                    status="complete",
+                    additions_geojson=fc,
+                    buffer_layers_geojson={"10m": fc},
+                    cumulative_union_geojson=fc,
+                )
+                for release, date_value in (
+                    ("2019", "2019-03-01"),
+                    ("2021", "2021-03-01"),
+                    ("2023", "2023-03-01"),
+                    ("2025", "2025-03-01"),
+                    ("2026", "2026-06-01"),
+                )
+            ],
+        ],
+        created_at="2026-01-01T00:00:00Z",
+        updated_at="2026-01-01T00:00:00Z",
+    )
+    assert _temporal_milestone_color_map(project) == {
+        "2019": "#00B050",
+        "2021": "#FFD700",
+        "2023": "#0066FF",
+        "2025": "#E31A1C",
+        "2026": "#00C8C8",
+    }
+    layers = _temporal_shapefile_export_layers(project)
+    dated = {layer.release_identifier: _qgis_layer_style(project, layer)[0] for layer in layers if not layer.is_global}
+    assert dated["2019"] in {"0,176,80,72", "0,176,80,150"}
+    assert dated["2021"] in {"255,215,0,72", "255,215,0,150"}
+    assert dated["2023"] in {"0,102,255,72", "0,102,255,150"}
+    assert dated["2025"] in {"227,26,28,72", "227,26,28,150"}
+    assert dated["2026"] in {"0,200,200,72", "0,200,200,150"}
 
 
 def test_temporal_results_export_reuses_valid_cache(tmp_path: Path) -> None:
@@ -153,6 +308,206 @@ def test_temporal_results_export_reuses_valid_cache(tmp_path: Path) -> None:
     second = build_temporal_results_export_file("temporal-export-formats-test", "geojson", settings=settings)
     assert second == first
     assert second.stat().st_mtime_ns == first_mtime
+
+
+def test_temporal_results_shapefile_invalidates_legacy_cache_without_version_metadata(tmp_path: Path) -> None:
+    settings = _save_project(tmp_path)
+    export_dir = settings.temporal_projects_dir / "temporal-export-formats-test" / "exports"
+    export_dir.mkdir(parents=True, exist_ok=True)
+    legacy = export_dir / "results_shapefile.zip"
+    legacy.write_bytes(b"legacy-three-layer-export")
+
+    regenerated = build_temporal_results_export_file("temporal-export-formats-test", "shapefile", settings=settings)
+
+    assert regenerated.read_bytes().startswith(b"PK")
+    metadata = json.loads((export_dir / "results_shapefile.zip.metadata.json").read_text())
+    assert metadata["version"] == "zone-clipped-mutually-exclusive-qgz-v12"
+
+
+def test_temporal_results_qgz_has_valid_ids_extents_paths_groups_and_visibility(tmp_path: Path) -> None:
+    settings = _save_project(tmp_path)
+    path = build_temporal_results_export_file("temporal-export-formats-test", "shapefile", settings=settings)
+    extract_root = tmp_path / "extracted"
+    with zipfile.ZipFile(path) as archive:
+        archive.extractall(extract_root)
+    qgz_path = next(extract_root.glob("*.qgz"))
+    assert qgz_path.stat().st_size > 1024
+    with zipfile.ZipFile(qgz_path) as archive:
+        qgs_names = [name for name in archive.namelist() if name.endswith(".qgs")]
+        assert len(qgs_names) == 1
+        root = ET.fromstring(archive.read(qgs_names[0]))
+
+    maplayers = root.findall(".//projectlayers/maplayer")
+    tree_layers = root.findall(".//layer-tree-layer")
+    maplayer_ids = [layer.findtext("id") for layer in maplayers]
+    tree_ids = [layer.attrib["id"] for layer in tree_layers]
+    assert len(maplayer_ids) == len(set(maplayer_ids))
+    assert set(maplayer_ids) == set(tree_ids)
+
+    extents: dict[str, tuple[float, float, float, float]] = {}
+    for layer in maplayers:
+        layer_id = layer.findtext("id")
+        datasource = layer.findtext("datasource") or ""
+        assert datasource.startswith("./")
+        assert ".." not in Path(datasource).parts
+        assert not datasource.startswith("/")
+        expected_crs = "EPSG:3857" if layer.findtext("provider") == "gdal" else "EPSG:4326"
+        assert layer.findtext(".//authid") == expected_crs
+        extent = layer.find("extent")
+        assert extent is not None
+        bounds = tuple(float(extent.findtext(key)) for key in ("xmin", "ymin", "xmax", "ymax"))
+        assert all(math.isfinite(value) for value in bounds)
+        assert bounds[0] <= bounds[2]
+        assert bounds[1] <= bounds[3]
+        extents[layer_id] = bounds
+
+    canvas_extent = root.find(".//mapcanvas/extent")
+    assert canvas_extent is not None
+    canvas_bounds = tuple(float(canvas_extent.findtext(key)) for key in ("xmin", "ymin", "xmax", "ymax"))
+    assert all(math.isfinite(value) for value in canvas_bounds)
+    assert canvas_bounds[0] <= canvas_bounds[2]
+    assert canvas_bounds[1] <= canvas_bounds[3]
+    assert abs(canvas_bounds[0]) > 180
+    assert abs(canvas_bounds[1]) > 90
+    assert root.findtext(".//projectCrs/spatialrefsys/authid") == "EPSG:3857"
+    root_tags = [child.tag for child in root]
+    assert root_tags.index("projectCrs") < root_tags.index("layer-tree-group")
+    assert root.findtext(".//mapcanvas/srs/spatialrefsys/authid") == "EPSG:3857"
+    assert root.findtext(".//projectViewSettings/defaultViewExtent/srs/spatialrefsys/authid") == "EPSG:3857"
+    assert root.findtext("projectionsEnabled") == "1"
+    assert root.findtext("./properties/SpatialRefSys/ProjectionsEnabled") == "1"
+    expected_project_bounds = _qgis_project_extent((-7.0, 33.0, -6.999, 33.001))
+    assert canvas_bounds == pytest.approx(expected_project_bounds)
+
+    for group in root.findall(".//layer-tree-group/layer-tree-group"):
+        child_ids = [node.attrib["id"] for node in group.findall("layer-tree-layer")]
+        if not child_ids:
+            continue
+        child_bounds = [extents[layer_id] for layer_id in child_ids if layer_id in extents]
+        if not child_bounds:
+            continue
+        union = (
+            min(bounds[0] for bounds in child_bounds),
+            min(bounds[1] for bounds in child_bounds),
+            max(bounds[2] for bounds in child_bounds),
+            max(bounds[3] for bounds in child_bounds),
+        )
+        assert all(math.isfinite(value) for value in union)
+
+    layer_order = [node.attrib["id"] for node in root.findall("./layerorder/layer")]
+    raster_ids = [layer.findtext("id") for layer in maplayers if layer.findtext("provider") == "gdal"]
+    vector_ids = [layer.findtext("id") for layer in maplayers if layer.findtext("provider") == "ogr"]
+    assert layer_order == vector_ids + list(reversed(raster_ids))
+    assert root.find(".//renderer-v2[@type='categorizedSymbol'][@attr='release_id']") is not None
+    date_root = root.find(".//layer-tree-group[@name='Bâtiments ajoutés par date']")
+    assert date_root is not None
+    assert date_root.attrib["mutually-exclusive"] == "1"
+    assert date_root.attrib["mutually-exclusive-child"] == "0"
+    date_groups = {group.attrib["name"]: group for group in date_root.findall("layer-tree-group")}
+    assert date_groups["2024 Q1"].attrib["checked"] == "Qt::Checked"
+    assert date_groups["2022 Q1"].attrib["checked"] == "Qt::Unchecked"
+    latest_children = date_groups["2024 Q1"].findall("layer-tree-layer")
+    assert latest_children[0].attrib["name"] == "Bâtiments ajoutés 2024 Q1"
+    assert latest_children[-1].attrib["name"] == "Imagerie de référence – 2024 Q1"
+    assert {node.attrib["name"] for node in latest_children if node.attrib["checked"] == "Qt::Checked"} == {
+        "Bâtiments ajoutés 2024 Q1",
+        "Buffer 10m 2024 Q1",
+        "Imagerie de référence – 2024 Q1",
+    }
+
+
+def test_custom_perimeter_clips_geojson_and_adds_styled_qgis_export_zone(tmp_path: Path) -> None:
+    settings = _save_project(tmp_path)
+    custom_geometry = {
+        "type": "Polygon",
+        "coordinates": [[
+            [-7.0005, 32.9995],
+            [-6.9995, 32.9995],
+            [-6.9995, 33.0005],
+            [-7.0005, 33.0005],
+            [-7.0005, 32.9995],
+        ]],
+    }
+    perimeter = {"mode": "custom_geometry", "source": "drawn", "geometry": custom_geometry}
+
+    geojson_path = build_temporal_results_export_file(
+        "temporal-export-formats-test",
+        "geojson",
+        settings=settings,
+        perimeter=perimeter,
+    )
+    geojson = json.loads(geojson_path.read_text())
+    assert geojson["export_metadata"]["perimeter_mode"] == "custom_geometry"
+    assert geojson["export_metadata"]["perimeter_source"] == "drawn"
+    assert geojson["export_metadata"]["was_clipped_to_project_aoi"] is True
+    assert geojson["features"]
+    assert all(shape(feature["geometry"]).within(shape(_project().aoi_geojson)) for feature in geojson["features"])
+
+    shapefile_path = build_temporal_results_export_file(
+        "temporal-export-formats-test",
+        "shapefile",
+        settings=settings,
+        perimeter=perimeter,
+    )
+    with zipfile.ZipFile(shapefile_path) as archive:
+        assert "zone_export/zone_export.shp" in archive.namelist()
+        qgz_name = next(name for name in archive.namelist() if name.endswith(".qgz"))
+        qgz_path = tmp_path / "custom-results.qgz"
+        qgz_path.write_bytes(archive.read(qgz_name))
+    with zipfile.ZipFile(qgz_path) as qgz:
+        qgs = qgz.read(next(name for name in qgz.namelist() if name.endswith(".qgs"))).decode("utf-8")
+    root = ET.fromstring(qgs)
+    tree_names = [node.attrib["name"] for node in root.findall(".//layer-tree-layer")]
+    assert "OpenStreetMap" not in tree_names
+    assert "Google Satellite" not in tree_names
+    assert root.find(".//layer-tree-group[@name='Fond de carte en ligne']") is None
+    assert "Zone d’export" in tree_names
+    assert "0,176,80,150" in qgs
+    assert 'type="categorizedSymbol" attr="release_id"' in qgs
+    assert "245,158,11,112" in qgs
+    assert "0,176,80,72" in qgs
+    canvas_extent = root.find(".//mapcanvas/extent")
+    assert canvas_extent is not None
+    canvas_bounds = tuple(float(canvas_extent.findtext(key)) for key in ("xmin", "ymin", "xmax", "ymax"))
+    expected_custom_bounds = _qgis_project_extent(tuple(shape(custom_geometry).intersection(shape(_project().aoi_geojson)).bounds))
+    assert canvas_bounds == pytest.approx(expected_custom_bounds)
+    assert abs(canvas_bounds[0]) > 180
+    assert abs(canvas_bounds[1]) > 90
+    assert root.findtext(".//projectCrs/spatialrefsys/authid") == "EPSG:3857"
+    with zipfile.ZipFile(shapefile_path) as archive:
+        raster_names = [name for name in archive.namelist() if name.endswith("reference_imagery_export_zone.tif")]
+        assert len(raster_names) == 2
+        for raster_name in raster_names:
+            raster_path = tmp_path / Path(raster_name).name
+            raster_path.write_bytes(archive.read(raster_name))
+            with rasterio.open(raster_path) as dataset:
+                assert dataset.width < 16
+                assert dataset.height < 16
+                assert dataset.crs.to_string() == "EPSG:3857"
+                zone_bounds = transform_bounds("EPSG:4326", dataset.crs, *shape(custom_geometry).bounds)
+                assert dataset.bounds.left <= zone_bounds[2]
+                assert dataset.bounds.right >= zone_bounds[0]
+                assert dataset.bounds.bottom <= zone_bounds[3]
+                assert dataset.bounds.top >= zone_bounds[1]
+
+
+def test_custom_perimeter_outside_project_aoi_is_rejected(tmp_path: Path) -> None:
+    settings = _save_project(tmp_path)
+    perimeter = {
+        "mode": "custom_geometry",
+        "source": "imported",
+        "geometry": {
+            "type": "Polygon",
+            "coordinates": [[[1, 1], [2, 1], [2, 2], [1, 2], [1, 1]]],
+        },
+    }
+    with pytest.raises(ValueError, match="hors de l’AOI"):
+        build_temporal_results_export_file(
+            "temporal-export-formats-test",
+            "geojson",
+            settings=settings,
+            perimeter=perimeter,
+        )
 
 
 def test_temporal_results_topojson_is_clean_quantized_default(tmp_path: Path) -> None:
@@ -202,7 +557,7 @@ def test_temporal_results_topojson_is_clean_quantized_default(tmp_path: Path) ->
         "score",
     }
     layers = {geometry["properties"]["layer"] for geometry in geometries}
-    assert layers == {"additions", "buffer_10m", "cumulative_growth"}
+    assert layers == {"additions", "buffer_10m"}
     assert "diagnostics" not in layers
     assert "buffer_15m" not in layers
     assert "buffer_20m" not in layers
@@ -248,5 +603,45 @@ def test_temporal_results_export_route_headers_and_unsupported_format(tmp_path: 
         full_topojson = client.get("/api/temporal-projects/temporal-export-formats-test/exports/results.topojson?mode=full")
         assert full_topojson.status_code == 400
         assert full_topojson.json()["detail"]["code"] == "unsupported_export_mode"
+
+        custom = client.post(
+            "/api/temporal-projects/temporal-export-formats-test/exports/results",
+            json={
+                "format": "geojson",
+                "perimeter": {
+                    "mode": "custom_geometry",
+                    "source": "imported",
+                    "geometry": {
+                        "type": "Polygon",
+                        "coordinates": [[
+                            [-7.0005, 32.9995],
+                            [-6.9995, 32.9995],
+                            [-6.9995, 33.0005],
+                            [-7.0005, 33.0005],
+                            [-7.0005, 32.9995],
+                        ]],
+                    },
+                },
+            },
+        )
+        assert custom.status_code == 200
+        assert custom.json()["export_metadata"]["perimeter_source"] == "imported"
+
+        outside = client.post(
+            "/api/temporal-projects/temporal-export-formats-test/exports/results",
+            json={
+                "format": "geojson",
+                "perimeter": {
+                    "mode": "custom_geometry",
+                    "source": "drawn",
+                    "geometry": {
+                        "type": "Polygon",
+                        "coordinates": [[[1, 1], [2, 1], [2, 2], [1, 2], [1, 1]]],
+                    },
+                },
+            },
+        )
+        assert outside.status_code == 400
+        assert outside.json()["detail"]["code"] == "invalid_export_perimeter"
     finally:
         app.dependency_overrides.clear()

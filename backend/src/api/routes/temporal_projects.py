@@ -54,11 +54,13 @@ from src.schemas import (
     ReferenceLayerPreflightResponse,
     TemporalOverrideRequest,
     TemporalProject,
+    TemporalProjectRunRequest,
     TemporalProjectRunResponse,
     TemporalProjectSaveRequest,
     TemporalProjectSaveResponse,
     TemporalProjectValidationResponse,
     TemporalReferenceImagery,
+    TemporalResultsExportRequest,
 )
 
 
@@ -211,10 +213,16 @@ def validate_project(
 def run_project(
     project_id: str,
     request: Request,
+    body: TemporalProjectRunRequest | None = None,
     settings=Depends(get_app_settings),
 ) -> TemporalProjectRunResponse:
     try:
-        return run_temporal_project_api(project_id, settings=settings, x_ip_token=request.headers.get("x-ip-token"))
+        return run_temporal_project_api(
+            project_id,
+            settings=settings,
+            x_ip_token=request.headers.get("x-ip-token"),
+            run_request=body,
+        )
     except FileNotFoundError as exc:
         raise_api_error(status.HTTP_404_NOT_FOUND, "not_found", str(exc))
     except Exception as exc:  # noqa: BLE001
@@ -277,6 +285,34 @@ def export_project_results(
 @router.get("/{project_id}/exports/results_shapefile.zip")
 def export_project_results_shapefile(project_id: str, settings=Depends(get_app_settings)) -> FileResponse:
     return _export_project_results(project_id, "shapefile", settings)
+
+
+@router.post("/{project_id}/exports/results")
+def export_project_results_for_perimeter(
+    project_id: str,
+    body: TemporalResultsExportRequest,
+    settings=Depends(get_app_settings),
+) -> FileResponse:
+    try:
+        perimeter = body.perimeter.model_dump(mode="json")
+        path = build_temporal_results_export_file(
+            project_id,
+            body.format,
+            settings=settings,
+            perimeter=perimeter,
+        )
+    except FileNotFoundError as exc:
+        raise_api_error(status.HTTP_404_NOT_FOUND, "not_found", str(exc))
+    except ValueError as exc:
+        raise_api_error(status.HTTP_400_BAD_REQUEST, "invalid_export_perimeter", str(exc))
+    except Exception as exc:  # noqa: BLE001
+        raise_api_error(status.HTTP_500_INTERNAL_SERVER_ERROR, "export_failed", f"{type(exc).__name__}: {exc}")
+    filename = TEMPORAL_RESULTS_EXPORT_FILENAMES[body.format]
+    return FileResponse(
+        path,
+        media_type=TEMPORAL_RESULTS_EXPORT_MEDIA_TYPES[body.format],
+        filename=f"resultats_{project_id}_{filename}" if body.format == "shapefile" else f"resultats_{project_id}.{body.format}",
+    )
 
 
 @router.post("/{project_id}/milestones/{release_identifier}/override")
@@ -918,6 +954,9 @@ def export_bundle(project_id: str, settings=Depends(get_app_settings)) -> dict[s
         bundle_path = create_temporal_project_bundle(project_id, settings=settings)
     except FileNotFoundError as exc:
         raise_api_error(status.HTTP_404_NOT_FOUND, "not_found", str(exc))
+    except ValueError as exc:
+        logging.getLogger(__name__).exception("TEMPORAL_QGIS_EXPORT_FAILED projectId=%s error=%s", project_id, exc)
+        raise_api_error(status.HTTP_500_INTERNAL_SERVER_ERROR, "temporal_qgis_export_failed", str(exc))
     return {
         "path": str(bundle_path),
         "filename": bundle_path.name,
