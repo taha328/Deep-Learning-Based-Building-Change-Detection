@@ -85,13 +85,20 @@ Source development additionally requires Python 3, Node.js/npm, and system geosp
 
 The packaged deployment under `deploy/` runs the full stack: `postgres`, `redis`, `backend-api`, `celery-worker`, and `frontend`. CPU Docker is the supported default. The optional CUDA override is not production-certified and requires separate validation on a compatible NVIDIA host.
 
-When the latest GitHub Release includes `building-change-app.zip`, the full bundle, including the approved model checkpoint, can be installed and started without cloning the repository:
+When the repository and release assets are public, the full bundle, including the approved model checkpoint, can be installed and started without cloning the repository:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/taha328/Deep-Learning-Based-Building-Change-Detection/main/install.sh | bash
 ```
 
-The installer uses a versioned local directory and does not overwrite an existing installation. If the latest release does not contain `building-change-app.zip`, use the packaged deployment workflow below and install the model artifact separately.
+For a private repository, authorized users can run the installer through an authenticated GitHub CLI session:
+
+```bash
+gh api repos/taha328/Deep-Learning-Based-Building-Change-Detection/contents/install.sh \
+  --jq .content | base64 --decode | bash
+```
+
+The installer uses a versioned local directory, supports authenticated release downloads through `gh`, and does not overwrite an existing installation. If the latest release does not contain `building-change-app.zip`, use the packaged deployment workflow below and install the model artifact separately.
 
 ```bash
 git clone https://github.com/taha328/building_change_app.git

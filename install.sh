@@ -38,7 +38,19 @@ cleanup_failed_install() {
 trap cleanup_failed_install EXIT
 
 echo "Downloading latest Building Change Detection release..."
-curl --fail --silent --show-error --location "$DOWNLOAD_URL" --output "$ZIP_PATH"
+if ! curl --fail --silent --show-error --location "$DOWNLOAD_URL" --output "$ZIP_PATH"; then
+  rm -f "$ZIP_PATH"
+  if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+    echo "Public download unavailable; retrying with authenticated GitHub CLI access..."
+    gh release download \
+      --repo "$REPOSITORY" \
+      --pattern "$ASSET_NAME" \
+      --dir "$INSTALL_DIR"
+  else
+    echo "Release download failed. For a private repository, install and authenticate GitHub CLI first." >&2
+    exit 1
+  fi
+fi
 unzip -q "$ZIP_PATH" -d "$INSTALL_DIR"
 rm -f "$ZIP_PATH"
 
