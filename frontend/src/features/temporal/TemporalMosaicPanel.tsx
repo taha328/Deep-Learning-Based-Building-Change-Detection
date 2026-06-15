@@ -90,6 +90,7 @@ import type {
   TemporalLayerControlsPresentation,
   TemporalMapPresentation,
   TemporalOutputArtifactPresentation,
+  TemporalReferenceImageryPresentation,
 } from "@/features/temporal/types";
 import { SharedAoiSection } from "@/features/workspace/SharedAoiSection";
 import { WorkflowParametersPanel } from "@/features/workspace/WorkflowParametersPanel";
@@ -608,6 +609,38 @@ function hasValidRasterBounds(bounds: number[] | null | undefined): bounds is [n
   return Array.isArray(bounds) && bounds.length >= 4 && bounds.every((value) => Number.isFinite(value));
 }
 
+function toReferenceImageryPresentation(
+  backendUrl: string,
+  milestone: TemporalMilestone,
+): TemporalReferenceImageryPresentation {
+  const imagery = milestone.reference_imagery;
+  const storageStrategy =
+    imagery?.storage_strategy ??
+    (imagery?.tilejson_url || imagery?.tiles_url_template
+      ? "raster_tiles"
+      : imagery?.cog_url || imagery?.cog_path
+        ? "cog"
+        : "image_overlay");
+  return {
+    releaseIdentifier: milestone.release_identifier,
+    storageStrategy,
+    tilejsonUrl: resolveBackendUrl(backendUrl, imagery?.tilejson_url),
+    tilesUrlTemplate: resolveBackendUrl(backendUrl, imagery?.tiles_url_template),
+    cogUrl: imagery?.cog_url
+      ? resolveBackendUrl(backendUrl, imagery.cog_url)
+      : imagery?.cog_path
+        ? buildBackendFileUrl(backendUrl, imagery.cog_path)
+        : null,
+    imageUrl: imagery?.image_path
+      ? buildBackendFileUrl(backendUrl, imagery.image_path)
+      : imagery?.image_png_data_url ?? null,
+    bounds: hasValidRasterBounds(imagery?.raster_bounds_wgs84) ? imagery?.raster_bounds_wgs84 ?? null : null,
+    minzoom: imagery?.minzoom ?? null,
+    maxzoom: imagery?.maxzoom ?? null,
+    tileSize: imagery?.tile_size ?? 256,
+  };
+}
+
 function milestoneHasReferenceImageryPresentation(milestone: TemporalMilestone): boolean {
   const imagery = milestone.reference_imagery;
   if (!imagery) {
@@ -859,6 +892,19 @@ export function TemporalMosaicPanel({
       queueMicrotask(() => {
         hydratingAoiRef.current = false;
       });
+      const preferredReleaseIdentifier = preferredMilestoneId(hydratedProject);
+      const preferredMilestone =
+        hydratedProject.milestones.find((milestone) => milestone.release_identifier === preferredReleaseIdentifier) ?? null;
+      if (preferredMilestone?.reference_imagery) {
+        window.dispatchEvent(
+          new CustomEvent("building-change-temporal-reference-selection", {
+            detail: {
+              projectId: hydratedProject.project_id,
+              referenceImagery: toReferenceImageryPresentation(backendUrl, preferredMilestone),
+            },
+          }),
+        );
+      }
     },
   });
 
@@ -1467,34 +1513,6 @@ export function TemporalMosaicPanel({
     }
 
     const referenceImagery = selectedMilestone.reference_imagery;
-    const toReferenceImageryPresentation = (milestone: TemporalMilestone) => {
-      const imagery = milestone.reference_imagery;
-      const storageStrategy =
-        imagery?.storage_strategy ??
-        (imagery?.tilejson_url || imagery?.tiles_url_template
-          ? "raster_tiles"
-          : imagery?.cog_url || imagery?.cog_path
-            ? "cog"
-            : "image_overlay");
-      return {
-        releaseIdentifier: milestone.release_identifier,
-        storageStrategy,
-        tilejsonUrl: resolveBackendUrl(backendUrl, imagery?.tilejson_url),
-        tilesUrlTemplate: resolveBackendUrl(backendUrl, imagery?.tiles_url_template),
-        cogUrl: imagery?.cog_url
-          ? resolveBackendUrl(backendUrl, imagery.cog_url)
-          : imagery?.cog_path
-            ? buildBackendFileUrl(backendUrl, imagery.cog_path)
-            : null,
-        imageUrl: imagery?.image_path
-          ? buildBackendFileUrl(backendUrl, imagery.image_path)
-          : imagery?.image_png_data_url ?? null,
-        bounds: hasValidRasterBounds(imagery?.raster_bounds_wgs84) ? imagery?.raster_bounds_wgs84 ?? null : null,
-        minzoom: imagery?.minzoom ?? null,
-        maxzoom: imagery?.maxzoom ?? null,
-        tileSize: imagery?.tile_size ?? 256,
-      };
-    };
     const referenceImageryUrl = referenceImagery?.image_path
       ? buildBackendFileUrl(backendUrl, referenceImagery.image_path)
       : referenceImagery?.image_png_data_url
@@ -1510,8 +1528,11 @@ export function TemporalMosaicPanel({
       addedOverlayTimeline.find((item) => item.releaseIdentifier === selectedMilestone.release_identifier) ?? null;
     const referenceImageryTimeline = project.milestones
       .filter((milestone) => milestone.reference_imagery)
-      .map((milestone) => toReferenceImageryPresentation(milestone));
+      .map((milestone) => toReferenceImageryPresentation(backendUrl, milestone));
 
+    const selectedReferenceImagery = referenceImagery
+      ? toReferenceImageryPresentation(backendUrl, selectedMilestone)
+      : null;
     onMapPresentationChange({
       projectId: project.project_id,
       projectUpdatedAt: project.updated_at,
@@ -1531,7 +1552,7 @@ export function TemporalMosaicPanel({
       selectedMilestone,
       milestones: project.milestones,
       milestoneCount: project.milestones.length,
-      referenceImagery: referenceImagery ? toReferenceImageryPresentation(selectedMilestone) : null,
+      referenceImagery: selectedReferenceImagery,
       referenceImageryTimeline,
       addedOverlayTimeline,
       referenceImageryUrl,
@@ -1555,7 +1576,24 @@ export function TemporalMosaicPanel({
       manualOverride: ensureFeatureCollection(selectedMilestone.manual_override_geojson),
       referenceLayers: referenceLayerPresentation,
     });
-  }, [activePanel, addedOverlayTimeline, backendUrl, project, selectedMilestone, onMapPresentationChange, referenceLayerPresentation, runProjectMutation.isPending]);
+    window.dispatchEvent(
+      new CustomEvent("building-change-temporal-reference-selection", {
+        detail: {
+          projectId: project.project_id,
+          referenceImagery: selectedReferenceImagery,
+        },
+      }),
+    );
+  }, [
+    activePanel,
+    addedOverlayTimeline,
+    backendUrl,
+    onMapPresentationChange,
+    project,
+    referenceLayerPresentation,
+    runProjectMutation.isPending,
+    selectedMilestone,
+  ]);
 
   const releasesById = useMemo(
     () => new Map(releases.map((release) => [release.identifier, release])),

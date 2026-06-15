@@ -146,7 +146,7 @@ class ReferenceTileCacheResult:
 
 
 _REFERENCE_IMAGERY_METADATA_CACHE: dict[tuple[str, str, str, int, int], _ReferenceImageryMetadataCacheEntry] = {}
-_TILEJSON_PAYLOAD_CACHE: dict[tuple[str, str, str, int, int], _TilejsonPayloadCacheEntry] = {}
+_TILEJSON_PAYLOAD_CACHE: dict[tuple[str, str, str, str, str], _TilejsonPayloadCacheEntry] = {}
 _TILE_RESPONSE_CACHE: OrderedDict[tuple[object, ...], tuple[bytes, dict[str, object]]] = OrderedDict()
 _TILE_RESPONSE_CACHE_MAX_ENTRIES = 512
 
@@ -1123,7 +1123,13 @@ def build_reference_tilejson_payload_cached(
     tiles_url: str,
 ) -> tuple[dict[str, object], bool]:
     stat = cog_info.cog_path.stat()
-    cache_key = (project_id, release_identifier, str(cog_info.cog_path), reference_imagery_version_token(cog_info))
+    cache_key = (
+        project_id,
+        release_identifier,
+        str(cog_info.cog_path),
+        reference_imagery_version_token(cog_info),
+        tiles_url,
+    )
     cached = _TILEJSON_PAYLOAD_CACHE.get(cache_key)
     if cached:
         return cached.payload, True

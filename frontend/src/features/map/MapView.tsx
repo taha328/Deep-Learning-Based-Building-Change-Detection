@@ -322,6 +322,22 @@ declare global {
       history: TemporalRuntimeDebugSnapshot[];
       getLatest: () => TemporalRuntimeDebugSnapshot | null;
     };
+    __BUILDING_CHANGE_REFERENCE_DEBUG__?: {
+      getState: () => {
+        sources: string[];
+        layers: Array<{ id: string; visibility: string | null; opacity: unknown; orderIndex: number }>;
+        context: {
+          workflowMode: WorkflowMode;
+          projectId: string | null;
+          selectedReleaseIdentifier: string | null;
+          referenceImagery: TemporalReferenceImageryPresentation | null;
+          referenceImageryAvailable: boolean;
+          referenceLayerEnabled: boolean;
+          mapStyleRevision: number;
+          mapStyleLoaded: boolean;
+        };
+      };
+    };
   }
 }
 
@@ -3787,6 +3803,23 @@ export function MapView({
   const committedTemporalReferenceSwitchKeysRef = useRef<Set<string>>(new Set());
   const loggedTemporalReferenceDuplicateSkipKeysRef = useRef<Set<string>>(new Set());
   const pendingTemporalReferenceReadyCleanupRef = useRef<(() => void) | null>(null);
+  const temporalReferenceDebugContextRef = useRef<{
+    workflowMode: WorkflowMode;
+    projectId: string | null;
+    selectedReleaseIdentifier: string | null;
+    referenceImagery: TemporalReferenceImageryPresentation | null;
+    referenceImageryAvailable: boolean;
+    referenceLayerEnabled: boolean;
+    mapStyleRevision: number;
+  }>({
+    workflowMode,
+    projectId: null,
+    selectedReleaseIdentifier: null,
+    referenceImagery: null,
+    referenceImageryAvailable: false,
+    referenceLayerEnabled: false,
+    mapStyleRevision: 0,
+  });
   const latestPresentationRef = useRef<{
     aoi: Polygon | null;
     exportGeometry: Polygon | null;
@@ -5206,6 +5239,16 @@ export function MapView({
     temporalHydratingProject,
   ]);
 
+  temporalReferenceDebugContextRef.current = {
+    workflowMode,
+    projectId: temporalProjectId,
+    selectedReleaseIdentifier: temporalPresentation?.selectedReleaseIdentifier ?? null,
+    referenceImagery: temporalReferenceImagery,
+    referenceImageryAvailable: temporalReferenceImageryAvailable,
+    referenceLayerEnabled: layerState.temporalReferenceImagery,
+    mapStyleRevision,
+  };
+
   useEffect(() => {
     const map = mapRef.current;
     const projectId = temporalProjectId;
@@ -5826,6 +5869,80 @@ export function MapView({
         latestPresentationRef.current?.layerState ?? defaultLayerState(workflowMode, Boolean(result?.success)),
       setLayerState: (updater) => updateLayerState(updater),
     };
+    window.__BUILDING_CHANGE_REFERENCE_DEBUG__ = {
+      getState: () => {
+        const layers = map.getStyle()?.layers ?? [];
+        return {
+          sources: Object.keys(map.getStyle()?.sources ?? {}).filter((sourceId) => sourceId.startsWith("temporal-reference-source-")),
+          layers: layers
+            .filter((layer) => layer.id.startsWith("temporal-reference-layer-"))
+            .map((layer) => ({
+              id: layer.id,
+              visibility: (map.getLayoutProperty(layer.id, "visibility") as string | null) ?? null,
+              opacity: map.getPaintProperty(layer.id, "raster-opacity"),
+              orderIndex: layers.findIndex((candidate) => candidate.id === layer.id),
+            })),
+          context: {
+            ...temporalReferenceDebugContextRef.current,
+            mapStyleLoaded: Boolean(map.isStyleLoaded()),
+          },
+        };
+      },
+    };
+    const onTemporalReferenceSelection = (
+      event: Event,
+    ) => {
+      const detail = (
+        event as CustomEvent<{
+          projectId?: string | null;
+          referenceImagery?: TemporalReferenceImageryPresentation | null;
+        }>
+      ).detail;
+      const projectId = detail?.projectId ?? null;
+      const imagery = detail?.referenceImagery ?? null;
+      if (!projectId || !imagery) {
+        return;
+      }
+
+      const registerSelectedReference = () => {
+        if (!map.isStyleLoaded()) {
+          return;
+        }
+        try {
+          const lifecycle =
+            imagery.storageStrategy === "image_overlay" && imagery.imageUrl && imagery.bounds
+              ? ensureTemporalReferenceImageLayer(map, imagery, {
+                  projectId,
+                  sourceSignatures: temporalReferenceSourceSignaturesRef.current,
+                })
+              : ensureTemporalReferenceRasterLayer(map, imagery, {
+                  projectId,
+                  sourceSignatures: temporalReferenceSourceSignaturesRef.current,
+                });
+          temporalReferenceLayerIdsRef.current.add(lifecycle.layerId);
+          temporalReferenceSourceIdsRef.current.add(lifecycle.sourceId);
+          for (const layerId of temporalReferenceLayerIdsRef.current) {
+            setTemporalReferenceLayerVisibility(map, layerId, layerId === lifecycle.layerId);
+          }
+          activeTemporalReferenceLayerIdRef.current = lifecycle.layerId;
+          activeTemporalReferenceReleaseIdentifierRef.current = imagery.releaseIdentifier;
+          moveReferenceOverlaysAboveTemporalImagery(
+            map,
+            lifecycle.layerId,
+            latestPresentationRef.current?.referenceLayers ?? [],
+          );
+        } catch (error) {
+          console.warn("Failed to register temporal reference selection event", imagery.releaseIdentifier, error);
+        }
+      };
+
+      if (map.isStyleLoaded()) {
+        registerSelectedReference();
+      } else {
+        map.once("load", registerSelectedReference);
+      }
+    };
+    window.addEventListener("building-change-temporal-reference-selection", onTemporalReferenceSelection);
     const onValidationMapJump = (event: Event) => {
       if (!import.meta.env.DEV) {
         return;
@@ -5844,10 +5961,12 @@ export function MapView({
     window.addEventListener("building-change-validation-map-jump", onValidationMapJump);
 
     mapRef.current = map;
+    setMapStyleRevision((revision) => revision + 1);
     return () => {
       markersRef.current.forEach((marker) => marker.remove());
       markersRef.current = [];
       window.removeEventListener("building-change-validation-map-jump", onValidationMapJump);
+      window.removeEventListener("building-change-temporal-reference-selection", onTemporalReferenceSelection);
       map.remove();
       delete (window as Window & { __buildingChangeMap?: MapLibreMap }).__buildingChangeMap;
       delete (
@@ -5858,6 +5977,7 @@ export function MapView({
           };
         }
       ).__buildingChangeMapDebug;
+      delete window.__BUILDING_CHANGE_REFERENCE_DEBUG__;
       mapRef.current = null;
     };
   }, [apiKey]);

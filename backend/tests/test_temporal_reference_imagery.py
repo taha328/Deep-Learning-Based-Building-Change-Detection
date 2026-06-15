@@ -1158,6 +1158,44 @@ def test_tilejson_payload_cache_hits_on_second_request(tmp_path: Path) -> None:
     assert first_payload == second_payload
 
 
+def test_tilejson_payload_cache_is_scoped_by_public_tile_url(tmp_path: Path) -> None:
+    source_raster_path = tmp_path / "source.tif"
+    _write_rgb_raster(source_raster_path)
+    imagery = build_temporal_reference_imagery(
+        project_id="temporal-demo",
+        project_dir=tmp_path / "project",
+        release_identifier="WB_2024_R01",
+        source=TemporalReferenceSource(
+            image_path=None,
+            image_png_data_url=None,
+            raster_bounds_wgs84=None,
+            source_raster_path=str(source_raster_path),
+        ),
+    )
+    cog_info = resolve_temporal_reference_cog(imagery)
+    assert cog_info is not None
+
+    clear_reference_tilejson_cache()
+    first_payload, first_hit = build_reference_tilejson_payload_cached(
+        project_id="temporal-demo",
+        release_identifier="WB_2024_R01",
+        cog_info=cog_info,
+        name="temporal-demo:WB_2024_R01",
+        tiles_url="http://127.0.0.1:8000/tiles/{z}/{x}/{y}.png?v=123",
+    )
+    second_payload, second_hit = build_reference_tilejson_payload_cached(
+        project_id="temporal-demo",
+        release_identifier="WB_2024_R01",
+        cog_info=cog_info,
+        name="temporal-demo:WB_2024_R01",
+        tiles_url="http://127.0.0.1:8080/tiles/{z}/{x}/{y}.png?v=123",
+    )
+
+    assert first_hit is False
+    assert second_hit is False
+    assert first_payload["tiles"] != second_payload["tiles"]
+
+
 def test_tilejson_payload_cache_key_changes_when_cog_mtime_changes(tmp_path: Path) -> None:
     source_raster_path = tmp_path / "source.tif"
     _write_rgb_raster(source_raster_path)

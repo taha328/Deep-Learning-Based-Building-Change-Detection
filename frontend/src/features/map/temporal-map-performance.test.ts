@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import {
@@ -76,4 +77,14 @@ test("reference registration can be skipped when signature and map objects are u
 test("disabled hidden layers skip post-visibility style and order work", () => {
   assert.equal(shouldSkipPostVisibilityLayerWork(false), true);
   assert.equal(shouldSkipPostVisibilityLayerWork(true), false);
+});
+
+test("selected milestone imagery has event-driven registration and live diagnostics", () => {
+  const mapView = readFileSync(new URL("./MapView.tsx", import.meta.url), "utf8");
+  const temporalPanel = readFileSync(new URL("../temporal/TemporalMosaicPanel.tsx", import.meta.url), "utf8");
+  assert.match(mapView, /building-change-temporal-reference-selection/);
+  assert.match(mapView, /ensureTemporalReferenceRasterLayer/);
+  assert.match(mapView, /__BUILDING_CHANGE_REFERENCE_DEBUG__/);
+  assert.match(mapView, /setTemporalReferenceLayerVisibility\(/);
+  assert.match(temporalPanel, /new CustomEvent\("building-change-temporal-reference-selection"/);
 });
