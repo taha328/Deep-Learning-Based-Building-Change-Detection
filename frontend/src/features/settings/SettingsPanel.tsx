@@ -1109,7 +1109,6 @@ export function SettingsPanel({
                   sectionTitle={t("temporal.draw_aoi")}
                   readyText={t("temporal.aoi_ready")}
                   emptyText={t("temporal.no_aoi_yet")}
-                  helpText={t("temporal.aoi_help")}
                   drawingSubMode={state.drawingSubMode}
                   drawingMode={state.drawingMode}
                   aoiReady={Boolean(state.aoi)}

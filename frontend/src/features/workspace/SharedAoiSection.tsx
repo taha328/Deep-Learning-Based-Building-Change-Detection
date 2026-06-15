@@ -9,7 +9,6 @@ export function SharedAoiSection({
   sectionTitle,
   readyText,
   emptyText,
-  helpText,
   drawingSubMode,
   drawingMode,
   aoiReady,
@@ -24,7 +23,6 @@ export function SharedAoiSection({
   sectionTitle: string;
   readyText: string;
   emptyText: string;
-  helpText: string;
   drawingSubMode: "polygon" | "rectangle";
   drawingMode: "idle" | "drawing" | "editing";
   aoiReady: boolean;
@@ -101,10 +99,6 @@ export function SharedAoiSection({
             <p className="label-xs">{t("aoi.vertices_label")}</p>
             <p className="mt-3 text-heading-sm text-foreground">{vertexCount}</p>
           </div>
-        </div>
-
-        <div className="rounded border border-sidebar-border bg-surface px-4 py-4 text-sm leading-6 text-muted-foreground">
-          {helpText}
         </div>
       </div>
     </div>

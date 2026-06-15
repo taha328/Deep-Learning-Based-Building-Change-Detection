@@ -2119,7 +2119,6 @@ export function TemporalMosaicPanel({
             sectionTitle={t("temporal.draw_aoi")}
             readyText={t("temporal.aoi_ready")}
             emptyText={t("temporal.no_aoi_yet")}
-            helpText={t("temporal.aoi_help")}
             drawingSubMode={drawingSubMode}
             drawingMode={drawingMode}
             aoiReady={Boolean(aoi)}

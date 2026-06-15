@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -67,6 +68,29 @@ test("polygon preview line includes the current cursor coordinate", () => {
   const preview = drawingPreviewFeatureCollection("polygon", [[0, 0], [1, 0]], [1, 1]);
   const line = preview.features.find((feature) => feature.properties?.role === "drawing-preview-line");
   assert.deepEqual(line?.geometry, { type: "LineString", coordinates: [[0, 0], [1, 0], [1, 1]] });
+});
+
+test("rectangle preview expands from its fixed corner to the current cursor coordinate", () => {
+  const preview = drawingPreviewFeatureCollection("rectangle", [[2, 3]], [5, 7]);
+  assert.deepEqual(preview.features[0]?.geometry, {
+    type: "Polygon",
+    coordinates: [[[2, 3], [5, 3], [5, 7], [2, 7], [2, 3]]],
+  });
+});
+
+test("drawing preview clears when fixed vertices are cleared", () => {
+  assert.deepEqual(drawingPreviewFeatureCollection("polygon", [], [1, 1]).features, []);
+  assert.deepEqual(drawingPreviewFeatureCollection("rectangle", [], [1, 1]).features, []);
+});
+
+test("AOI panels do not render the removed raw temporal help key", () => {
+  for (const relativePath of [
+    "../workspace/SharedAoiSection.tsx",
+    "../temporal/TemporalMosaicPanel.tsx",
+    "../settings/SettingsPanel.tsx",
+  ]) {
+    assert.doesNotMatch(readFileSync(new URL(relativePath, import.meta.url), "utf8"), /temporal\.aoi_help/);
+  }
 });
 
 test("polygon preview includes a closed transparent fill geometry after three points", () => {

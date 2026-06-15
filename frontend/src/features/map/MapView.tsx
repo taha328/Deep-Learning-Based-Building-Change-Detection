@@ -3748,7 +3748,6 @@ export function MapView({
   const [searchError, setSearchError] = useState<string | null>(null);
   const [highlightedResultIndex, setHighlightedResultIndex] = useState(-1);
   const [drawingInstruction, setDrawingInstruction] = useState<string | null>(null);
-  const [liveRectanglePreview, setLiveRectanglePreview] = useState<[number, number] | null>(null);
   const [drawingPointer, setDrawingPointer] = useState<[number, number] | null>(null);
   const [drawingCursorCoordinate, setDrawingCursorCoordinate] = useState<[number, number] | null>(null);
   const [firstVertexCloseTarget, setFirstVertexCloseTarget] = useState(false);
@@ -5192,6 +5191,7 @@ export function MapView({
   }, [
     layerState,
     layerState.temporalReferenceImagery,
+    mapStyleRevision,
     getTemporalOutputSyncLayerState,
     referenceLayers,
     temporalPresentation,
@@ -5882,14 +5882,17 @@ export function MapView({
         return;
       }
 
+      const state = useAppStore.getState();
+      const currentDraftVertices = state.draftVertices;
+      const currentDrawingSubMode = state.drawingSubMode;
       const vertex: [number, number] = [event.lngLat.lng, event.lngLat.lat];
-      const firstPoint = draftVertices[0] ? map.project(draftVertices[0]) : null;
+      const firstPoint = currentDraftVertices[0] ? map.project(currentDraftVertices[0]) : null;
       const nearFirst =
-        drawingSubMode === "polygon" &&
-        draftVertices.length >= 3 &&
+        currentDrawingSubMode === "polygon" &&
+        currentDraftVertices.length >= 3 &&
         firstPoint !== null &&
         isNearFirstVertex([event.point.x, event.point.y], [firstPoint.x, firstPoint.y]);
-      const result = resolveDrawingClick(drawingSubMode, draftVertices, vertex, nearFirst);
+      const result = resolveDrawingClick(currentDrawingSubMode, currentDraftVertices, vertex, nearFirst);
       if (result.complete) {
         setDrawingInstruction("Zone enregistrée");
         completeDrawing(result.vertices);
@@ -5899,7 +5902,7 @@ export function MapView({
     };
 
     const onContextMenu = (event: maplibregl.MapMouseEvent) => {
-      if (drawingMode !== "drawing" || draftVertices.length < 3) {
+      if (drawingMode !== "drawing" || useAppStore.getState().draftVertices.length < 3) {
         return;
       }
       event.preventDefault();
@@ -5923,19 +5926,7 @@ export function MapView({
       let closeTarget = false;
 
       if (subMode === "rectangle") {
-        // Show crosshair cursor for drawing
         map.getCanvas().style.cursor = "crosshair";
-
-        if (state.draftVertices.length === 0) {
-          // Before first click
-          setLiveRectanglePreview(null);
-        } else if (state.draftVertices.length === 1) {
-          // After first click - show live preview
-          const [lng1, lat1] = state.draftVertices[0];
-          const [lng2, lat2] = [event.lngLat.lng, event.lngLat.lat];
-
-          setLiveRectanglePreview([lng2, lat2]);
-        }
       } else {
         map.getCanvas().style.cursor = "crosshair";
         const firstPoint = state.draftVertices[0] ? map.project(state.draftVertices[0]) : null;
@@ -5967,7 +5958,7 @@ export function MapView({
       map.off("mouseleave", onMouseLeave);
       map.getCanvas().style.cursor = "";
     };
-  }, [completeDrawing, draftVertices, drawingMode, drawingSubMode, finishDrawing, mapError, setDraftVertices]);
+  }, [completeDrawing, drawingMode, finishDrawing, mapError, setDraftVertices]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -5982,7 +5973,7 @@ export function MapView({
         : EMPTY_FEATURE_COLLECTION,
     );
     moveDrawingLayersToTop(map);
-  }, [drawingCursorCoordinate, drawingMode, drawingSubMode, draftVertices]);
+  }, [drawingCursorCoordinate, drawingMode, drawingSubMode, draftVertices, mapStyleRevision]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -6000,62 +5991,7 @@ export function MapView({
           }))
         : [],
     });
-  }, [draftVertices, drawingMode, firstVertexCloseTarget]);
-
-  // Update rectangle preview layers in real-time
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!map || !map.isStyleLoaded() || drawingMode !== "drawing") {
-      if (map && map.isStyleLoaded()) {
-        const source = map.getSource("rectangle-preview") as GeoJSONSource | undefined;
-        if (source) {
-          source.setData(EMPTY_FEATURE_COLLECTION);
-        }
-      }
-      return;
-    }
-
-    const drawingSubMode = useAppStore.getState().drawingSubMode;
-    if (drawingSubMode !== "rectangle" || draftVertices.length !== 1 || !liveRectanglePreview) {
-      return;
-    }
-
-    // Show live rectangle preview
-    const [lng1, lat1] = draftVertices[0];
-    const [lng2, lat2] = liveRectanglePreview;
-
-    const minLng = Math.min(lng1, lng2);
-    const maxLng = Math.max(lng1, lng2);
-    const minLat = Math.min(lat1, lat2);
-    const maxLat = Math.max(lat1, lat2);
-
-    const rectanglePolygon: Polygon = {
-      type: "Polygon",
-      coordinates: [
-        [
-          [minLng, minLat],
-          [maxLng, minLat],
-          [maxLng, maxLat],
-          [minLng, maxLat],
-          [minLng, minLat],
-        ],
-      ],
-    };
-
-    const source = map.getSource("rectangle-preview") as GeoJSONSource | undefined;
-    if (source) {
-      source.setData({
-        type: "FeatureCollection",
-        features: [
-          {
-            type: "Feature",
-            geometry: rectanglePolygon,
-            properties: {},
-          },
-        ],
-      });
-    }
-  }, [drawingMode, draftVertices, liveRectanglePreview]);
+  }, [draftVertices, drawingMode, firstVertexCloseTarget, mapStyleRevision]);
 
   // Show vertex markers during rectangle drawing
   useEffect(() => {
