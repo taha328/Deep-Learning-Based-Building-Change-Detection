@@ -1,0 +1,61 @@
+name: Validate installers
+
+on:
+  pull_request:
+    paths:
+      - "install.ps1"
+      - "install.sh"
+      - "scripts/validate-install-ps1.ps1"
+      - "README.md"
+      - ".github/workflows/validate-installers.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "install.ps1"
+      - "install.sh"
+      - "scripts/validate-install-ps1.ps1"
+      - "README.md"
+      - ".github/workflows/validate-installers.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows PowerShell installer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate installer syntax and dry run
+        shell: powershell
+        run: |
+          $tokens = $null
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path .\install.ps1),
+            [ref]$tokens,
+            [ref]$errors
+          )
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Error $_.Message }
+            exit 1
+          }
+          .\install.ps1 -DryRun -InstallDir "$env:RUNNER_TEMP\building-change-dry-run"
+          .\scripts\validate-install-ps1.ps1
+
+  ubuntu:
+    name: Bash installer and documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate Bash installer
+        run: bash -n install.sh
+
+      - name: Validate documented installer commands
+        run: |
+          grep -F "irm https://raw.githubusercontent.com/taha328/Deep-Learning-Based-Building-Change-Detection/main/install.ps1 | iex" README.md
+          grep -F "curl -fsSL https://raw.githubusercontent.com/taha328/Deep-Learning-Based-Building-Change-Detection/main/install.sh | bash" README.md
