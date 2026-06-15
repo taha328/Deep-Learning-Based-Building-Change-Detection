@@ -4,7 +4,7 @@ This pipeline detects and measures building changes across historical Esri Wayba
 
 ## Install
 
-Normal users should install the packaged GitHub release rather than clone and manually configure the repository:
+You can install the packaged GitHub release rather than clone and manually configure the repository:
 
 ### Windows PowerShell
 
@@ -12,7 +12,7 @@ Normal users should install the packaged GitHub release rather than clone and ma
 irm https://raw.githubusercontent.com/taha328/Deep-Learning-Based-Building-Change-Detection/main/install.ps1 | iex
 ```
 
-Requires Windows 10/11 64-bit, internet access, and Docker Desktop installed and running with Docker Compose. WSL2, Ubuntu, Git Bash, and MSYS2 are not required. At least 16 GB RAM is required; 24 GB is recommended for larger AOIs. Ensure sufficient disk space for Docker images, model assets, imagery caches, PostgreSQL data, and outputs.
+Requires Windows 10/11 64-bit, internet access, and Docker Desktop installed and running with Docker Compose.
 
 ### macOS / Linux
 
