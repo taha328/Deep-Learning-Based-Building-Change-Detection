@@ -91,6 +91,7 @@ try {
 } finally {
   Remove-Item function:\global:docker -ErrorAction SilentlyContinue
   Remove-Variable FakeDockerMode -Scope Global -ErrorAction SilentlyContinue
+  $global:LASTEXITCODE = 0
 }
 
 Write-Host "install.ps1 validation passed: $script:Passed assertions."
