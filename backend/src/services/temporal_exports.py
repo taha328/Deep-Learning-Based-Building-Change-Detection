@@ -78,7 +78,7 @@ TEMPORAL_RESULTS_EXPORT_LABELS = {
 
 TOPOJSON_DEFAULT_QUANTIZATION = 1_000_000
 TOPOJSON_EXPORT_VERSION = "clean-quantized-v3"
-SHAPEFILE_EXPORT_VERSION = "zone-clipped-mutually-exclusive-qgz-v12"
+SHAPEFILE_EXPORT_VERSION = "zone-clipped-mutually-exclusive-qgz-v13"
 QGIS_PROJECT_CRS = "EPSG:3857"
 QGIS_VECTOR_CRS = "EPSG:4326"
 QGIS_PROJECT_EXTENT_PADDING_RATIO = 0.075
@@ -1454,20 +1454,76 @@ def _feature_collection_with_export_metadata(
     return {"type": "FeatureCollection", "features": features}
 
 
+def _dissolved_feature_collection_with_export_metadata(
+    payload: dict[str, Any],
+    *,
+    release_identifier: str,
+    period_label: str,
+) -> dict[str, Any]:
+    geometries: list[BaseGeometry] = []
+    area_m2 = 0.0
+    score_values: list[float] = []
+    for feature in _features(payload):
+        if not isinstance(feature, dict):
+            continue
+        geometry_payload = feature.get("geometry")
+        if not isinstance(geometry_payload, dict):
+            continue
+        try:
+            geometry = _polygonal_geometry(shape(geometry_payload))
+        except Exception:
+            continue
+        if geometry.is_empty:
+            continue
+        geometries.append(geometry)
+        properties = feature.get("properties") if isinstance(feature.get("properties"), dict) else {}
+        area_value = _float(properties.get("area_m2"))
+        if area_value is not None:
+            area_m2 += area_value
+        score_value = _float(properties.get("score"))
+        if score_value is not None:
+            score_values.append(score_value)
+    if not geometries:
+        return {"type": "FeatureCollection", "features": []}
+    dissolved = _polygonal_geometry(unary_union(geometries))
+    if dissolved.is_empty:
+        return {"type": "FeatureCollection", "features": []}
+    properties: dict[str, Any] = {
+        "release_id": release_identifier,
+        "period": period_label,
+        "source_feature_count": len(geometries),
+    }
+    if area_m2 > 0:
+        properties["area_m2"] = area_m2
+    if score_values:
+        properties["score"] = sum(score_values) / len(score_values)
+    return {
+        "type": "FeatureCollection",
+        "features": [{
+            "type": "Feature",
+            "properties": properties,
+            "geometry": mapping(dissolved),
+        }],
+    }
+
+
 def _merged_feature_collection(
     milestones: list[TemporalMilestone],
     *,
     payload_getter,
+    dissolve_each_milestone: bool = False,
 ) -> dict[str, Any]:
     features: list[dict[str, Any]] = []
     for milestone in milestones:
         payload = payload_getter(milestone)
         if not _features(payload):
             continue
-        enriched = _feature_collection_with_export_metadata(
+        period_label = _milestone_quarter_label(milestone)
+        builder = _dissolved_feature_collection_with_export_metadata if dissolve_each_milestone else _feature_collection_with_export_metadata
+        enriched = builder(
             payload,
             release_identifier=milestone.release_identifier,
-            period_label=_milestone_quarter_label(milestone),
+            period_label=period_label,
         )
         features.extend(enriched["features"])
     return {"type": "FeatureCollection", "features": features}
@@ -1539,7 +1595,7 @@ def _temporal_shapefile_export_layers(project: TemporalProject) -> list[Temporal
                     display_name=f"Buffer {distance} {period}",
                     artifact_key=f"building_change_buffer_{distance}",
                     release_identifier=milestone.release_identifier,
-                    feature_collection=_feature_collection_with_export_metadata(
+                    feature_collection=_dissolved_feature_collection_with_export_metadata(
                         payload or {"type": "FeatureCollection", "features": []},
                         release_identifier=milestone.release_identifier,
                         period_label=period,
@@ -1550,6 +1606,7 @@ def _temporal_shapefile_export_layers(project: TemporalProject) -> list[Temporal
             non_baseline,
             payload_getter=lambda milestone, key=distance: milestone.buffer_layers_geojson.get(key)
             or milestone.buffer_layers_geojson.get(key.removesuffix("m")),
+            dissolve_each_milestone=True,
         )
         if _features(merged):
             layers.append(
@@ -1610,7 +1667,7 @@ def _qgis_layer_style(project: TemporalProject, layer: TemporalShapefileLayer) -
         return _hex_rgba("#F59E0B", 36), _hex_rgba("#D97706", 255), "0.5"
     if layer.is_global and layer.group_key == "tous_les_nouveaux_batiments":
         return _hex_rgba("#00C8C8", 128), _hex_rgba("#0E7490", 245), "0.4"
-    if layer.is_global:
+    if layer.is_global and not layer.group_key.startswith("buffer_"):
         return _hex_rgba("#F59E0B", 112), _hex_rgba("#C2410C", 245), "0.35"
     color = _temporal_milestone_color_map(project).get(layer.release_identifier, "#64748B")
     alpha = 72 if layer.group_key.startswith("buffer_") else 150
@@ -1804,8 +1861,10 @@ def _qgis_project_extent(vector_extent_wgs84: Bounds) -> Bounds:
 def _default_visible_layer_names(layers: list[TemporalShapefileLayer]) -> set[str]:
     visible: set[str] = set()
     newest_additions = next((layer for layer in layers if layer.group_key == "batiments_ajoutes_par_date"), None)
+    synthesis_additions = next((layer for layer in layers if layer.is_global and layer.group_key == "tous_les_nouveaux_batiments"), None)
+    synthesis_buffer_10m = next((layer for layer in layers if layer.is_global and layer.group_key == "buffer_10m"), None)
     zone = next((layer for layer in layers if layer.group_key == "zone_export"), None)
-    for layer in (newest_additions, zone):
+    for layer in (newest_additions, synthesis_additions, synthesis_buffer_10m, zone):
         if layer is not None:
             visible.add(layer.display_name)
     return visible
@@ -1918,7 +1977,7 @@ def _copy_qgis_reference_rasters(
     return rasters
 
 
-def _categorized_renderer_xml(project: TemporalProject, indent: str = "      ") -> list[str]:
+def _categorized_renderer_xml(project: TemporalProject, indent: str = "      ", *, fill_alpha: int = 150) -> list[str]:
     colors = _temporal_milestone_color_map(project)
     categories: list[str] = []
     symbols: list[str] = []
@@ -1928,7 +1987,7 @@ def _categorized_renderer_xml(project: TemporalProject, indent: str = "      ") 
             f'{indent}    <category value="{html.escape(milestone.release_identifier)}" symbol="{index}" label="{html.escape(_milestone_quarter_label(milestone))}" render="true"/>'
         )
         symbols.append(
-            f'{indent}    <symbol type="fill" name="{index}" alpha="1" clip_to_extent="1" force_rhr="0"><layer class="SimpleFill" enabled="1" pass="0" locked="0"><Option type="Map"><Option name="color" value="{_hex_rgba(color, 150)}" type="QString"/><Option name="outline_color" value="{_hex_rgba(color, 245)}" type="QString"/><Option name="outline_width" value="0.35" type="QString"/><Option name="outline_width_unit" value="Pixel" type="QString"/><Option name="style" value="solid" type="QString"/></Option></layer></symbol>'
+            f'{indent}    <symbol type="fill" name="{index}" alpha="1" clip_to_extent="1" force_rhr="0"><layer class="SimpleFill" enabled="1" pass="0" locked="0"><Option type="Map"><Option name="color" value="{_hex_rgba(color, fill_alpha)}" type="QString"/><Option name="outline_color" value="{_hex_rgba(color, 245)}" type="QString"/><Option name="outline_width" value="0.35" type="QString"/><Option name="outline_width_unit" value="Pixel" type="QString"/><Option name="style" value="solid" type="QString"/></Option></layer></symbol>'
         )
     return [
         f'{indent}<renderer-v2 type="categorizedSymbol" attr="release_id" symbollevels="0" forceraster="0" enableorderby="0" referencescale="-1">',
@@ -1956,6 +2015,7 @@ def _temporal_shapefile_qgs_xml(
     completed = [milestone for milestone in project.milestones if milestone.status == "complete"]
     latest_release = completed[-1].release_identifier if completed else None
     raster_by_release = {raster.release_identifier: raster for raster in rasters}
+    latest_raster = raster_by_release.get(latest_release) if latest_release else None
     lines = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         '<qgis projectname="" version="3.40.0">',
@@ -1984,7 +2044,7 @@ def _temporal_shapefile_qgs_xml(
             lines.append(
                 f'        <layer-tree-layer id="{layer_ids[layer.filename]}" name="{html.escape(layer.display_name)}" checked="{layer_checked}" expanded="0" providerKey="ogr" source="{html.escape(validation_by_name[layer.display_name].relative_path)}"/>'
             )
-        if raster is not None:
+        if raster is not None and raster.release_identifier != latest_release:
             lines.append(
                 f'        <layer-tree-layer id="{raster.layer_id}" name="{html.escape(raster.display_name)}" checked="Qt::Checked" expanded="0" providerKey="gdal" source="{html.escape(raster.relative_path)}"/>'
             )
@@ -1995,6 +2055,10 @@ def _temporal_shapefile_qgs_xml(
         checked = "Qt::Checked" if layer.display_name in visible_names else "Qt::Unchecked"
         lines.append(
             f'      <layer-tree-layer id="{layer_ids[layer.filename]}" name="{html.escape(layer.display_name)}" checked="{checked}" expanded="0" providerKey="ogr" source="{html.escape(validation_by_name[layer.display_name].relative_path)}"/>'
+        )
+    if latest_raster is not None:
+        lines.append(
+            f'      <layer-tree-layer id="{latest_raster.layer_id}" name="{html.escape(latest_raster.display_name)}" checked="Qt::Checked" expanded="0" providerKey="gdal" source="{html.escape(latest_raster.relative_path)}"/>'
         )
     lines.append("    </layer-tree-group>")
     lines.extend(["  </layer-tree-group>", "  <layerorder>"])
@@ -2028,6 +2092,8 @@ def _temporal_shapefile_qgs_xml(
         lines.extend(_qgis_srs_xml(QGIS_VECTOR_CRS))
         if layer.group_key == "tous_les_nouveaux_batiments":
             lines.extend(_categorized_renderer_xml(project))
+        elif layer.is_global and layer.group_key.startswith("buffer_"):
+            lines.extend(_categorized_renderer_xml(project, fill_alpha=72))
         else:
             lines.extend(
                 [

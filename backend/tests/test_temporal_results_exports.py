@@ -8,6 +8,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 
 from fastapi.testclient import TestClient
+import geopandas as gpd
 import numpy as np
 import pytest
 import rasterio
@@ -61,6 +62,29 @@ def _feature_collection() -> dict:
     }
 
 
+def _feature_collection_from_bounds(*bounds_items: tuple[float, float, float, float]) -> dict:
+    return {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {"area_m2": 100.0 + index, "score": 0.9},
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [[
+                        [bounds[0], bounds[1]],
+                        [bounds[2], bounds[1]],
+                        [bounds[2], bounds[3]],
+                        [bounds[0], bounds[3]],
+                        [bounds[0], bounds[1]],
+                    ]],
+                },
+            }
+            for index, bounds in enumerate(bounds_items)
+        ],
+    }
+
+
 def _settings(tmp_path: Path) -> Settings:
     return Settings(runtime_cache_dir=tmp_path)
 
@@ -105,6 +129,11 @@ def _project() -> TemporalProject:
 def _save_project(tmp_path: Path) -> Settings:
     settings = _settings(tmp_path)
     project = _project()
+    _save_project_payload(settings, project)
+    return settings
+
+
+def _save_project_payload(settings: Settings, project: TemporalProject) -> None:
     save_temporal_project(project, settings)
     for index, milestone in enumerate(project.milestones):
         raster_path = (
@@ -127,7 +156,50 @@ def _save_project(tmp_path: Path) -> Settings:
             transform=from_bounds(-779300, 3895300, -779100, 3895500, 16, 16),
         ) as dataset:
             dataset.write(np.full((3, 16, 16), 80 + index * 40, dtype=np.uint8))
-    return settings
+
+
+def _three_milestone_project() -> TemporalProject:
+    additions_2020 = _feature_collection_from_bounds((-7.0000, 33.0000, -6.9998, 33.0002))
+    additions_2022 = _feature_collection_from_bounds((-6.9996, 33.0000, -6.9994, 33.0002))
+    buffers_2020 = _feature_collection_from_bounds(
+        (-7.00000, 33.00000, -6.99970, 33.00030),
+        (-6.99985, 33.00000, -6.99955, 33.00030),
+    )
+    buffers_2022 = _feature_collection_from_bounds(
+        (-6.99960, 33.00000, -6.99930, 33.00030),
+        (-6.99945, 33.00000, -6.99915, 33.00030),
+    )
+    return TemporalProject(
+        project_id="temporal-export-three-milestones",
+        name="Three Milestones",
+        aoi_geojson=_feature_collection_from_bounds((-7.001, 32.999, -6.998, 33.002))["features"][0]["geometry"],
+        milestones=[
+            TemporalMilestone(
+                release_identifier="WB_2018_R01",
+                release_date="2018-01-15",
+                status="complete",
+                metrics=TemporalMilestoneMetrics(total_area_m2=1000.0),
+            ),
+            TemporalMilestone(
+                release_identifier="WB_2020_R01",
+                release_date="2020-01-15",
+                status="complete",
+                additions_geojson=additions_2020,
+                buffer_layers_geojson={"10m": buffers_2020, "15m": buffers_2020, "20m": buffers_2020},
+                metrics=TemporalMilestoneMetrics(added_area_m2=100.0, total_area_m2=1100.0, additions_feature_count=1),
+            ),
+            TemporalMilestone(
+                release_identifier="WB_2022_R01",
+                release_date="2022-01-15",
+                status="complete",
+                additions_geojson=additions_2022,
+                buffer_layers_geojson={"10m": buffers_2022, "15m": buffers_2022, "20m": buffers_2022},
+                metrics=TemporalMilestoneMetrics(added_area_m2=100.0, total_area_m2=1200.0, additions_feature_count=1),
+            ),
+        ],
+        created_at="2026-05-19T00:00:00Z",
+        updated_at="2026-05-19T00:00:00Z",
+    )
 
 
 def test_temporal_results_export_formats_are_generated_under_project_exports(tmp_path: Path) -> None:
@@ -321,7 +393,7 @@ def test_temporal_results_shapefile_invalidates_legacy_cache_without_version_met
 
     assert regenerated.read_bytes().startswith(b"PK")
     metadata = json.loads((export_dir / "results_shapefile.zip.metadata.json").read_text())
-    assert metadata["version"] == "zone-clipped-mutually-exclusive-qgz-v12"
+    assert metadata["version"] == "zone-clipped-mutually-exclusive-qgz-v13"
 
 
 def test_temporal_results_qgz_has_valid_ids_extents_paths_groups_and_visibility(tmp_path: Path) -> None:
@@ -408,12 +480,93 @@ def test_temporal_results_qgz_has_valid_ids_extents_paths_groups_and_visibility(
     assert date_groups["2022 Q1"].attrib["checked"] == "Qt::Unchecked"
     latest_children = date_groups["2024 Q1"].findall("layer-tree-layer")
     assert latest_children[0].attrib["name"] == "Bâtiments ajoutés 2024 Q1"
-    assert latest_children[-1].attrib["name"] == "Imagerie de référence – 2024 Q1"
+    assert "Imagerie de référence – 2024 Q1" not in {node.attrib["name"] for node in latest_children}
     assert {node.attrib["name"] for node in latest_children if node.attrib["checked"] == "Qt::Checked"} == {
         "Bâtiments ajoutés 2024 Q1",
         "Buffer 10m 2024 Q1",
-        "Imagerie de référence – 2024 Q1",
     }
+    synthesis = root.find(".//layer-tree-group[@name='Synthèse']")
+    assert synthesis is not None
+    synthesis_children = synthesis.findall("layer-tree-layer")
+    synthesis_names = [node.attrib["name"] for node in synthesis_children]
+    assert synthesis_names == [
+        "Tous les nouveaux bâtiments 2022 Q1 → 2024 Q1",
+        "Buffer 10m 2022 Q1 → 2024 Q1",
+        "Buffer 15m 2022 Q1 → 2024 Q1",
+        "Buffer 20m 2022 Q1 → 2024 Q1",
+        "Imagerie de référence – 2024 Q1",
+    ]
+    assert {node.attrib["name"]: node.attrib["checked"] for node in synthesis_children} == {
+        "Tous les nouveaux bâtiments 2022 Q1 → 2024 Q1": "Qt::Checked",
+        "Buffer 10m 2022 Q1 → 2024 Q1": "Qt::Checked",
+        "Buffer 15m 2022 Q1 → 2024 Q1": "Qt::Unchecked",
+        "Buffer 20m 2022 Q1 → 2024 Q1": "Qt::Unchecked",
+        "Imagerie de référence – 2024 Q1": "Qt::Checked",
+    }
+
+
+def test_temporal_results_qgz_synthesis_visibility_imagery_order_colors_and_dissolved_buffers(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    project = _three_milestone_project()
+    _save_project_payload(settings, project)
+
+    layers = _temporal_shapefile_export_layers(project)
+    buffer_10m_layers = [layer for layer in layers if layer.group_key == "buffer_10m"]
+    assert {layer.display_name: len(layer.feature_collection["features"]) for layer in buffer_10m_layers} == {
+        "Buffer 10m 2022 Q1": 1,
+        "Buffer 10m 2020 Q1": 1,
+        "Buffer 10m 2018 Q1 → 2022 Q1": 2,
+    }
+
+    path = build_temporal_results_export_file(project.project_id, "shapefile", settings=settings)
+    extract_root = tmp_path / "three-extracted"
+    with zipfile.ZipFile(path) as archive:
+        archive.extractall(extract_root)
+    qgz_path = next(extract_root.glob("*.qgz"))
+    with zipfile.ZipFile(qgz_path) as archive:
+        root = ET.fromstring(archive.read(next(name for name in archive.namelist() if name.endswith(".qgs"))))
+
+    synthesis = root.find(".//layer-tree-group[@name='Synthèse']")
+    assert synthesis is not None
+    synthesis_children = synthesis.findall("layer-tree-layer")
+    synthesis_names = [node.attrib["name"] for node in synthesis_children]
+    assert synthesis_names == [
+        "Tous les nouveaux bâtiments 2018 Q1 → 2022 Q1",
+        "Buffer 10m 2018 Q1 → 2022 Q1",
+        "Buffer 15m 2018 Q1 → 2022 Q1",
+        "Buffer 20m 2018 Q1 → 2022 Q1",
+        "Imagerie de référence – 2022 Q1",
+    ]
+    assert {node.attrib["name"]: node.attrib["checked"] for node in synthesis_children} == {
+        "Tous les nouveaux bâtiments 2018 Q1 → 2022 Q1": "Qt::Checked",
+        "Buffer 10m 2018 Q1 → 2022 Q1": "Qt::Checked",
+        "Buffer 15m 2018 Q1 → 2022 Q1": "Qt::Unchecked",
+        "Buffer 20m 2018 Q1 → 2022 Q1": "Qt::Unchecked",
+        "Imagerie de référence – 2022 Q1": "Qt::Checked",
+    }
+    assert root.find(".//layer-tree-group[@name='2022 Q1']/layer-tree-layer[@name='Imagerie de référence – 2022 Q1']") is None
+
+    maplayers_by_name = {layer.attrib["name"]: layer for layer in root.findall(".//projectlayers/maplayer")}
+    buffer_renderer = maplayers_by_name["Buffer 10m 2018 Q1 → 2022 Q1"].find("renderer-v2")
+    assert buffer_renderer is not None
+    assert buffer_renderer.attrib["type"] == "categorizedSymbol"
+    assert buffer_renderer.attrib["attr"] == "release_id"
+    buffer_qgs = ET.tostring(maplayers_by_name["Buffer 10m 2018 Q1 → 2022 Q1"], encoding="unicode")
+    assert "0,176,80,72" in buffer_qgs
+    assert "255,215,0,72" in buffer_qgs
+    assert "245,158,11,112" not in buffer_qgs
+
+    additions_qgs = ET.tostring(maplayers_by_name["Tous les nouveaux bâtiments 2018 Q1 → 2022 Q1"], encoding="unicode")
+    assert "0,176,80,150" in additions_qgs
+    assert "255,215,0,150" in additions_qgs
+
+    per_milestone_2022 = gpd.read_file(extract_root / "buffer_10m" / "buffer_10m_2022_Q1.shp", engine="pyogrio")
+    per_milestone_2020 = gpd.read_file(extract_root / "buffer_10m" / "buffer_10m_2020_Q1.shp", engine="pyogrio")
+    synthesis_buffer = gpd.read_file(extract_root / "buffer_10m" / "buffer_10m_2018_Q1_2022_Q1.shp", engine="pyogrio")
+    assert len(per_milestone_2022) == 1
+    assert len(per_milestone_2020) == 1
+    assert len(synthesis_buffer) == 2
+    assert set(synthesis_buffer["release_id"]) == {"WB_2020_R01", "WB_2022_R01"}
 
 
 def test_custom_perimeter_clips_geojson_and_adds_styled_qgis_export_zone(tmp_path: Path) -> None:
@@ -464,7 +617,7 @@ def test_custom_perimeter_clips_geojson_and_adds_styled_qgis_export_zone(tmp_pat
     assert "Zone d’export" in tree_names
     assert "0,176,80,150" in qgs
     assert 'type="categorizedSymbol" attr="release_id"' in qgs
-    assert "245,158,11,112" in qgs
+    assert "245,158,11,36" in qgs
     assert "0,176,80,72" in qgs
     canvas_extent = root.find(".//mapcanvas/extent")
     assert canvas_extent is not None

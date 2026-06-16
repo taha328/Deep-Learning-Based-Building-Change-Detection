@@ -1500,7 +1500,7 @@ def test_tilejson_includes_version_token_and_is_revalidatable(tmp_path: Path) ->
     payload = response.json()
     assert len(payload["tiles"]) == 1
     assert "?v=" in payload["tiles"][0]
-    assert "renderer2" in payload["tiles"][0]
+    assert "renderer3" in payload["tiles"][0]
 
 
 def test_build_temporal_reference_imagery_uses_canonical_cache_with_project_compatibility_path(tmp_path: Path) -> None:
