@@ -9,6 +9,7 @@ from src.config import Settings, get_settings
 from src.execution_profiles import resolve_inference_runtime
 from src.core_api import run_detection_api, run_temporal_project_api
 from src.db.session import session_scope
+from src.domain.wayback_tile_preflight_cache import cleanup_wayback_preflight_locks
 from src.jobs.celery_app import celery_app
 from src.jobs.progress import update_progress
 from src.jobs.service import mark_job_execution_failed
@@ -56,19 +57,27 @@ def _resolve_settings(settings_payload: dict[str, Any] | None = None) -> Setting
     return get_settings()
 
 
-def _log_worker_effective_backend(*, job_id: str, job_kind: str, settings: Settings) -> None:
+def _log_worker_effective_backend(
+    *,
+    job_id: str,
+    job_kind: str,
+    settings: Settings,
+    change_threshold_override: float | None = None,
+    threshold_source: str = "backend_settings_env",
+) -> None:
     runtime = resolve_inference_runtime(settings)
     checkpoint_path = runtime.checkpoint_path
-    threshold = settings.change_threshold
+    threshold = change_threshold_override if change_threshold_override is not None else settings.change_threshold
     LOGGER.info("CELERY_PROCESS_PID=%s jobId=%s jobKind=%s", os.getpid(), job_id, job_kind)
     LOGGER.info("CELERY_EFFECTIVE_INFERENCE_BACKEND=%s jobId=%s jobKind=%s", settings.inference_backend, job_id, job_kind)
     LOGGER.info("CELERY_EFFECTIVE_CHECKPOINT_PATH=%s jobId=%s jobKind=%s", checkpoint_path, job_id, job_kind)
     LOGGER.info("CELERY_EFFECTIVE_CHECKPOINT_ENV=%s jobId=%s jobKind=%s", runtime.checkpoint_env_var, job_id, job_kind)
     LOGGER.info("CELERY_EFFECTIVE_THRESHOLD=%s jobId=%s jobKind=%s", threshold, job_id, job_kind)
     LOGGER.info(
-        "CELERY_EFFECTIVE_THRESHOLDS source=backend_settings_env semantic=%s change=%s jobId=%s jobKind=%s",
+        "CELERY_EFFECTIVE_THRESHOLDS source=%s semantic=%s change=%s jobId=%s jobKind=%s",
+        threshold_source,
         runtime.semantic_threshold,
-        runtime.change_threshold,
+        threshold,
         job_id,
         job_kind,
     )
@@ -78,9 +87,9 @@ def _log_worker_effective_backend(*, job_id: str, job_kind: str, settings: Setti
         runtime.backend,
         runtime.checkpoint_env_var,
         runtime.checkpoint_path,
-        runtime.threshold_source,
+        threshold_source,
         runtime.semantic_threshold,
-        runtime.change_threshold,
+        threshold,
         job_id,
         job_kind,
     )
@@ -215,12 +224,29 @@ def run_temporal_project_job(
         ",".join(str(path) for path in temporal_project_file_candidates(settings, project_id)),
     )
     LOGGER.info(
-        "TEMPORAL_RUN_REQUEST_THRESHOLD projectId=%s changeThreshold=%s source=%s",
+        "TEMPORAL_RUN_REQUEST_THRESHOLD projectId=%s jobId=%s changeThreshold=%s source=%s",
         project_id,
+        job_id,
         run_request_payload.get("change_threshold") if run_request_payload else settings.change_threshold,
         "request_override" if run_request_payload and run_request_payload.get("change_threshold") is not None else "backend_settings_env",
     )
-    _log_worker_effective_backend(job_id=job_id, job_kind="temporal_project", settings=settings)
+    change_threshold_override = (
+        float(run_request_payload["change_threshold"])
+        if run_request_payload and run_request_payload.get("change_threshold") is not None
+        else None
+    )
+    _log_worker_effective_backend(
+        job_id=job_id,
+        job_kind="temporal_project",
+        settings=settings,
+        change_threshold_override=change_threshold_override,
+        threshold_source="request_override" if change_threshold_override is not None else "backend_settings_env",
+    )
+    cleanup_wayback_preflight_locks(
+        "temporal_project_celery_task_start",
+        settings=settings,
+        source="celery_task",
+    )
     timer = StageTimer()
     try:
         skipped_result = _prepare_job_for_execution(job_id, settings)
@@ -256,6 +282,7 @@ def run_temporal_project_job(
             progress_callback=progress_callback,
             x_ip_token=None,
             run_request=TemporalProjectRunRequest.model_validate(run_request_payload) if run_request_payload else None,
+            job_id=job_id,
         )
         timer.mark("processing")
         _publish_progress(self, job_id, 90, "saving_artifacts", "Saving temporal outputs and generated artifacts.", settings)

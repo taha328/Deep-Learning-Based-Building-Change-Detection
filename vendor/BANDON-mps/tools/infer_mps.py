@@ -11,6 +11,8 @@ from pathlib import Path
 import time
 from typing import Any
 
+PROCESS_START = time.perf_counter()
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -83,6 +85,7 @@ def parse_args() -> argparse.Namespace:
 ARGS = parse_args()
 if ARGS.allow_mps_fallback:
     os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+TIMING_ENABLED = os.environ.get("APP_INFERENCE_TIMING_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 BACKEND_ROOT = Path(__file__).resolve().parents[3] / "backend"
@@ -105,6 +108,10 @@ from src.domain.stage_timing import sanitize_metadata_value  # noqa: E402
 
 def _duration_ms(start_ns: int, end_ns: int) -> float:
     return round((end_ns - start_ns) / 1_000_000, 2)
+
+
+def _elapsed_ms(start: float) -> float:
+    return round((time.perf_counter() - start) * 1000.0, 3)
 
 
 def _safe_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
@@ -667,6 +674,10 @@ def save_overlay(path: Path, image_b_path: Path, mask: np.ndarray) -> None:
 
 
 def main() -> int:
+    main_started = time.perf_counter()
+    child_timing_ms: dict[str, float | bool | str | None] = {}
+    if TIMING_ENABLED:
+        child_timing_ms["child_startup_to_main_ms"] = round((main_started - PROCESS_START) * 1000.0, 3)
     timings = ChildStageRecorder()
     repo_root = REPO_ROOT
     with timings.stage("runner_startup", **_runner_metadata(requested_device=ARGS.device)):
@@ -692,10 +703,17 @@ def main() -> int:
         **_device_memory_metadata(device),
         ),
     ):
+        config_started = time.perf_counter()
         cfg = prepare_config(config_path)
         mps_test_cfg = apply_mps_safe_test_cfg(cfg, device)
         mps_test_cfg["ablation_stride_override"] = apply_bandon_ablation_stride_override(cfg)
+        if TIMING_ENABLED:
+            child_timing_ms["config_load_ms"] = _elapsed_ms(config_started)
+        model_build_started = time.perf_counter()
         model = build_segmentor(cfg.model, test_cfg=cfg.get("test_cfg"))
+        if TIMING_ENABLED:
+            child_timing_ms["model_build_ms"] = _elapsed_ms(model_build_started)
+        checkpoint_started = time.perf_counter()
         checkpoint_obj = torch.load(str(checkpoint_path), map_location="cpu")
         checkpoint_compatibility = build_checkpoint_compatibility_diagnostics(
             checkpoint_path=checkpoint_path,
@@ -721,14 +739,22 @@ def main() -> int:
             missing_after_load = []
             unexpected_after_load = []
             checkpoint_loader = "mmcv_load_checkpoint"
+        if TIMING_ENABLED:
+            child_timing_ms["checkpoint_load_ms"] = _elapsed_ms(checkpoint_started)
         checkpoint_meta = checkpoint.get("meta", {}) or {}
         classes = checkpoint_meta.get("CLASSES") or ["unchange", "change"]
         palette = checkpoint_meta.get("PALETTE") or [[0, 0, 0], [255, 255, 255]]
         model.CLASSES = classes
         model.PALETTE = palette
         model.cfg = cfg
+        model_to_device_started = time.perf_counter()
         model.to(device)
+        if TIMING_ENABLED:
+            child_timing_ms["model_to_device_ms"] = _elapsed_ms(model_to_device_started)
+        model_eval_started = time.perf_counter()
         model.eval()
+        if TIMING_ENABLED:
+            child_timing_ms["model_eval_ms"] = _elapsed_ms(model_eval_started)
         model_load_metadata = build_model_load_diagnostics(
             model=model,
             device=device,
@@ -772,11 +798,37 @@ def main() -> int:
             input_order="t1_then_t2",
         ),
     ):
-        image_a = load_and_normalize_rgb(image_a_path, normalization=ARGS.normalization)
-        image_b = load_and_normalize_rgb(image_b_path, normalization=ARGS.normalization)
+        input_read_started = time.perf_counter()
+        raw_image_a = mmcv.imread(str(image_a_path), flag="color", backend="cv2")
+        raw_image_b = mmcv.imread(str(image_b_path), flag="color", backend="cv2")
+        if raw_image_a is None:
+            raise RuntimeError(f"Failed to read image: {image_a_path}")
+        if raw_image_b is None:
+            raise RuntimeError(f"Failed to read image: {image_b_path}")
+        if TIMING_ENABLED:
+            child_timing_ms["input_read_ms"] = _elapsed_ms(input_read_started)
+        input_preprocess_started = time.perf_counter()
+        norm_cfg = normalization_config(ARGS.normalization)
+        image_a = mmcv.imnormalize(
+            raw_image_a,
+            mean=np.array(norm_cfg["mean"], dtype=np.float32),
+            std=np.array(norm_cfg["std"], dtype=np.float32),
+            to_rgb=bool(norm_cfg["to_rgb"]),
+        ).astype(np.float32)
+        image_b = mmcv.imnormalize(
+            raw_image_b,
+            mean=np.array(norm_cfg["mean"], dtype=np.float32),
+            std=np.array(norm_cfg["std"], dtype=np.float32),
+            to_rgb=bool(norm_cfg["to_rgb"]),
+        ).astype(np.float32)
         input_tensor = build_input_tensor(image_a, image_b, device)
         img_metas = build_img_meta(image_a.shape, image_a_path, image_b_path, normalization=ARGS.normalization)
+        if TIMING_ENABLED:
+            child_timing_ms["input_preprocess_ms"] = _elapsed_ms(input_preprocess_started)
+        mask_read_started = time.perf_counter()
         crop_skip_masks = load_crop_skip_masks((int(image_a.shape[0]), int(image_a.shape[1])))
+        if TIMING_ENABLED:
+            child_timing_ms["mask_read_ms"] = _elapsed_ms(mask_read_started)
         if crop_skip_masks is not None:
             t1_valid_mask_for_skip, t2_valid_mask_for_skip, aoi_mask_for_skip = crop_skip_masks
             valid_pair_mask_for_skip = t1_valid_mask_for_skip & t2_valid_mask_for_skip
@@ -824,6 +876,16 @@ def main() -> int:
         crop_count_forwarded = 0
         crop_count_skipped_before_forward = 0
         crop_skip_reason_counts: dict[str, int] = {}
+        mps_synchronize_ms = 0.0
+
+        def sync_and_measure() -> None:
+            nonlocal mps_synchronize_ms
+            if device.type not in {"cuda", "mps"}:
+                return
+            sync_started = time.perf_counter()
+            _maybe_sync_device(device)
+            if device.type == "mps" and TIMING_ENABLED:
+                mps_synchronize_ms += _elapsed_ms(sync_started)
 
         def traced_encode_decode(img, img_metas):
             nonlocal crop_count_forwarded, crop_count_skipped_before_forward, previous_bounds
@@ -844,8 +906,7 @@ def main() -> int:
                     skip_outside_aoi=ARGS.skip_outside_aoi_crops,
                     skip_nodata=ARGS.skip_nodata_crops,
                 )
-            if device.type in {"cuda", "mps"}:
-                _maybe_sync_device(device)
+            sync_and_measure()
             start_ns = time.perf_counter_ns()
             if decision is not None and decision.skip:
                 output = zero_change_output_like(img)
@@ -855,8 +916,7 @@ def main() -> int:
             else:
                 output = orig_encode_decode(img, img_metas)
                 crop_count_forwarded += 1
-            if device.type in {"cuda", "mps"}:
-                _maybe_sync_device(device)
+            sync_and_measure()
             duration_ms = _duration_ms(start_ns, time.perf_counter_ns())
             coverage_before_pixels = int(np.count_nonzero(coverage_counts[y0:y1, x0:x1]))
             crop_summary = build_crop_summary(
@@ -892,11 +952,18 @@ def main() -> int:
 
         model.encode_decode = traced_encode_decode
         try:
-            _maybe_sync_device(device)
+            forward_total_started = time.perf_counter()
+            sync_and_measure()
+            forward_model_started = time.perf_counter()
             with torch.no_grad():
                 forward_mode_flags = current_torch_mode_flags()
                 result = model(return_loss=False, img=[input_tensor], img_metas=img_metas, rescale=True)
-            _maybe_sync_device(device)
+            if TIMING_ENABLED:
+                child_timing_ms["forward_model_ms"] = _elapsed_ms(forward_model_started)
+            sync_and_measure()
+            if TIMING_ENABLED:
+                child_timing_ms["forward_total_ms"] = _elapsed_ms(forward_total_started)
+                child_timing_ms["mps_synchronize_ms"] = round(mps_synchronize_ms, 3)
             forward_metadata = build_forward_diagnostics(
                 input_tensor=input_tensor,
                 model=model,
@@ -943,6 +1010,7 @@ def main() -> int:
             model.encode_decode = orig_encode_decode
     _merge_stage_metadata(timings, "forward", forward_metadata)
 
+    output_decode_started = time.perf_counter()
     with timings.stage("output_decode", **_runner_metadata(device=str(device), decode_method="simple_test_softmax_channel_1")):
         if not isinstance(result, list) or not result or not isinstance(result[0], list) or not result[0]:
             raise RuntimeError(f"Unexpected inference output structure: {type(result)}")
@@ -958,6 +1026,8 @@ def main() -> int:
         probability_stats = array_stats(change_probability)
         probability_stats_inside_aoi = array_stats(change_probability, mask=aoi_mask_for_skip) if aoi_mask_for_skip is not None else None
         output_channel_stats = channel_stats(prediction.astype(np.float32))
+    if TIMING_ENABLED:
+        child_timing_ms["output_decode_ms"] = _elapsed_ms(output_decode_started)
     _merge_stage_metadata(
         timings,
         "output_decode",
@@ -974,11 +1044,14 @@ def main() -> int:
     overlay_png = outdir / "change_overlay.png"
     metadata_json = outdir / "run_metadata.json"
 
+    output_write_started = time.perf_counter()
     with timings.stage("mask_or_raster_write", **_runner_metadata(device=str(device))):
         np.save(probability_npy, change_probability)
         save_probability_png(probability_png, change_probability)
         save_mask_png(mask_png, change_mask)
         save_overlay(overlay_png, image_b_path, change_mask)
+    if TIMING_ENABLED:
+        child_timing_ms["output_write_ms"] = _elapsed_ms(output_write_started)
 
     metadata = {
         "repo_root": str(repo_root),
@@ -1033,7 +1106,48 @@ def main() -> int:
     }
     with timings.stage("cleanup", **_runner_metadata(device=str(device))):
         metadata["stage_timings"] = timings.to_dict()
-        metadata_json.write_text(json.dumps(metadata, indent=2))
+        if TIMING_ENABLED:
+            child_timing_ms.update(
+                {
+                    "child_total_wall_ms": _elapsed_ms(PROCESS_START),
+                    "model_cached_or_reused": False,
+                    "model_reload_count_this_invocation": 1,
+                    "model_load_count_this_prediction": 1,
+                    "model_load_count_total": 1,
+                    "model_reused": False,
+                    "model_reused_numeric": 0,
+                    "device_resolved": str(device),
+                    "mps_available": _mps_is_available(),
+                    "mps_built": bool(hasattr(torch.backends, "mps") and torch.backends.mps.is_built()),
+                    "pytorch_enable_mps_fallback": os.environ.get("PYTORCH_ENABLE_MPS_FALLBACK"),
+                    "allow_mps_fallback": bool(ARGS.allow_mps_fallback),
+                }
+            )
+            for key in (
+                "config_load_ms",
+                "model_build_ms",
+                "checkpoint_load_ms",
+                "model_to_device_ms",
+                "model_eval_ms",
+                "input_read_ms",
+                "input_preprocess_ms",
+                "mask_read_ms",
+                "forward_total_ms",
+                "forward_model_ms",
+                "mps_synchronize_ms",
+                "output_decode_ms",
+                "output_write_ms",
+            ):
+                child_timing_ms.setdefault(key, 0.0)
+            child_timing_ms["metadata_write_ms"] = 0.0
+            metadata["child_timing_ms"] = child_timing_ms
+        if TIMING_ENABLED:
+            metadata_write_started = time.perf_counter()
+            metadata_json.write_text(json.dumps(metadata, indent=2))
+            metadata["child_timing_ms"]["metadata_write_ms"] = _elapsed_ms(metadata_write_started)
+            metadata_json.write_text(json.dumps(metadata, indent=2))
+        else:
+            metadata_json.write_text(json.dumps(metadata, indent=2))
 
     print(json.dumps(metadata, indent=2))
     return 0

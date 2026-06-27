@@ -18,6 +18,17 @@ export interface WaybackTileProgressDetails {
   etaSeconds: number | null;
 }
 
+export interface TemporalPairProgressDetails {
+  currentPairIndex: number | null;
+  totalPairCount: number | null;
+  pairFraction: number | null;
+  pairStage: string | null;
+  fromReleaseIdentifier: string | null;
+  toReleaseIdentifier: string | null;
+  fromReleaseDate: string | null;
+  toReleaseDate: string | null;
+}
+
 export interface RunProgressState {
   phase: RunPhase;
   percent: number;
@@ -29,6 +40,7 @@ export interface RunProgressState {
   rawEvent: string | null;
   updatedAt: number | null;
   tileDetails: WaybackTileProgressDetails | null;
+  temporalPairDetails: TemporalPairProgressDetails | null;
 }
 
 export interface PipelineStage {
@@ -91,6 +103,7 @@ export function createIdleRunProgress(): RunProgressState {
     rawEvent: null,
     updatedAt: null,
     tileDetails: null,
+    temporalPairDetails: null,
   };
 }
 
@@ -106,6 +119,7 @@ export function createActiveRunProgress(): RunProgressState {
     rawEvent: null,
     updatedAt: Date.now(),
     tileDetails: null,
+    temporalPairDetails: null,
   };
 }
 
@@ -121,6 +135,7 @@ export function createCompletedRunProgress(): RunProgressState {
     rawEvent: "process_completed",
     updatedAt: Date.now(),
     tileDetails: null,
+    temporalPairDetails: null,
   };
 }
 
@@ -136,7 +151,77 @@ export function createErrorRunProgress(message: string): RunProgressState {
     rawEvent: "error",
     updatedAt: Date.now(),
     tileDetails: null,
+    temporalPairDetails: null,
   };
+}
+
+export function formatArchiveDateDmy(value: string | null | undefined): string | null {
+  if (!value) {
+    return null;
+  }
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!match) {
+    return null;
+  }
+  return `${match[3]}/${match[2]}/${match[1]}`;
+}
+
+export function buildTemporalPeriodLabel(details: TemporalPairProgressDetails | null): string {
+  if (!details) {
+    return "Période en cours non disponible";
+  }
+  const fromDate = formatArchiveDateDmy(details.fromReleaseDate);
+  const toDate = formatArchiveDateDmy(details.toReleaseDate);
+  if (fromDate && toDate) {
+    return `Période en cours : ${fromDate} → ${toDate}`;
+  }
+  if (fromDate || toDate) {
+    return `Période en cours : ${fromDate ?? "Date non disponible"} → ${toDate ?? "Date non disponible"}`;
+  }
+  if (details.fromReleaseIdentifier && details.toReleaseIdentifier) {
+    return `Période en cours : ${details.fromReleaseIdentifier} → ${details.toReleaseIdentifier}`;
+  }
+  return "Période en cours non disponible";
+}
+
+export function temporalPairProgressPercent(details: TemporalPairProgressDetails | null): number | null {
+  if (!details || details.pairFraction === null) {
+    return null;
+  }
+  return clampPercent(details.pairFraction * 100);
+}
+
+export function temporalGlobalProgressPercent(details: TemporalPairProgressDetails | null): number | null {
+  if (
+    !details ||
+    details.currentPairIndex === null ||
+    details.totalPairCount === null ||
+    details.totalPairCount <= 0 ||
+    details.pairFraction === null
+  ) {
+    return null;
+  }
+  return clampPercent(((details.currentPairIndex - 1 + details.pairFraction) / details.totalPairCount) * 100);
+}
+
+export function friendlyTemporalStageLabel(stage: string | null | undefined): string {
+  const normalized = (stage ?? "").toLowerCase();
+  if (/saving|persist|publication|final|complete|completed/.test(normalized)) {
+    return "Finalisation";
+  }
+  if (/preflight|validat|metadata|availability|resolving|checking|starting|prépar/.test(normalized)) {
+    return "Préparation des images";
+  }
+  if (/download|imagery|mosaic|wayback|reference|fetch/.test(normalized)) {
+    return "Téléchargement des images";
+  }
+  if (/inference|bandon|detection|tiled|change detection|analyse/.test(normalized)) {
+    return "Analyse des changements";
+  }
+  if (/vector|buffer|post-process|postprocess|generation|génération|result|exporting artifacts/.test(normalized)) {
+    return "Génération des résultats";
+  }
+  return "Traitement en cours";
 }
 
 function isCompletedStatus(value: string | null | undefined): boolean {

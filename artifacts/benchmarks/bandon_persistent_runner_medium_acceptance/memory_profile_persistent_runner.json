@@ -1,0 +1,3243 @@
+{
+  "memory_growth_detected": false,
+  "persistent_runner_repeat_count": 2,
+  "rss_end_mb": 1121.375,
+  "rss_max_minus_min_mb": 55.016000000000076,
+  "rss_min_mb": 1070.25,
+  "rss_peak_mb": 1125.266,
+  "rss_slope_mb_per_100_tiles": 7.221132,
+  "rss_start_mb": 1070.25,
+  "runs": [
+    {
+      "memory_growth_detected": false,
+      "mode": "persistent_runner",
+      "repeat_index": 1,
+      "rss_end_mb": 1121.297,
+      "rss_max_minus_min_mb": 51.047000000000025,
+      "rss_min_mb": 1070.25,
+      "rss_peak_mb": 1121.297,
+      "rss_slope_mb_per_100_tiles": 23.182356,
+      "rss_start_mb": 1070.25,
+      "sample_count": 200,
+      "samples": [
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 1,
+          "repeat_index": 1,
+          "rss_mb": 1070.25,
+          "tile_id": 0,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 2,
+          "repeat_index": 1,
+          "rss_mb": 1070.391,
+          "tile_id": 1,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 3,
+          "repeat_index": 1,
+          "rss_mb": 1070.469,
+          "tile_id": 2,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 4,
+          "repeat_index": 1,
+          "rss_mb": 1078.469,
+          "tile_id": 3,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 5,
+          "repeat_index": 1,
+          "rss_mb": 1078.5,
+          "tile_id": 4,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 6,
+          "repeat_index": 1,
+          "rss_mb": 1078.547,
+          "tile_id": 5,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 7,
+          "repeat_index": 1,
+          "rss_mb": 1078.578,
+          "tile_id": 6,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 8,
+          "repeat_index": 1,
+          "rss_mb": 1078.594,
+          "tile_id": 7,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 9,
+          "repeat_index": 1,
+          "rss_mb": 1078.609,
+          "tile_id": 8,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 10,
+          "repeat_index": 1,
+          "rss_mb": 1078.625,
+          "tile_id": 9,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 11,
+          "repeat_index": 1,
+          "rss_mb": 1078.641,
+          "tile_id": 10,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 12,
+          "repeat_index": 1,
+          "rss_mb": 1078.656,
+          "tile_id": 11,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 13,
+          "repeat_index": 1,
+          "rss_mb": 1078.656,
+          "tile_id": 12,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 14,
+          "repeat_index": 1,
+          "rss_mb": 1078.656,
+          "tile_id": 13,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 15,
+          "repeat_index": 1,
+          "rss_mb": 1078.672,
+          "tile_id": 14,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 16,
+          "repeat_index": 1,
+          "rss_mb": 1078.688,
+          "tile_id": 15,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 17,
+          "repeat_index": 1,
+          "rss_mb": 1078.75,
+          "tile_id": 16,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 18,
+          "repeat_index": 1,
+          "rss_mb": 1086.766,
+          "tile_id": 17,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 19,
+          "repeat_index": 1,
+          "rss_mb": 1086.766,
+          "tile_id": 18,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 20,
+          "repeat_index": 1,
+          "rss_mb": 1086.766,
+          "tile_id": 19,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 21,
+          "repeat_index": 1,
+          "rss_mb": 1094.781,
+          "tile_id": 20,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 22,
+          "repeat_index": 1,
+          "rss_mb": 1094.781,
+          "tile_id": 21,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 23,
+          "repeat_index": 1,
+          "rss_mb": 1094.797,
+          "tile_id": 22,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 24,
+          "repeat_index": 1,
+          "rss_mb": 1094.812,
+          "tile_id": 23,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 25,
+          "repeat_index": 1,
+          "rss_mb": 1094.812,
+          "tile_id": 24,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 26,
+          "repeat_index": 1,
+          "rss_mb": 1094.812,
+          "tile_id": 25,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 27,
+          "repeat_index": 1,
+          "rss_mb": 1094.859,
+          "tile_id": 26,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 28,
+          "repeat_index": 1,
+          "rss_mb": 1094.859,
+          "tile_id": 27,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 29,
+          "repeat_index": 1,
+          "rss_mb": 1094.859,
+          "tile_id": 28,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 30,
+          "repeat_index": 1,
+          "rss_mb": 1094.875,
+          "tile_id": 29,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 31,
+          "repeat_index": 1,
+          "rss_mb": 1094.891,
+          "tile_id": 30,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 32,
+          "repeat_index": 1,
+          "rss_mb": 1094.891,
+          "tile_id": 31,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 33,
+          "repeat_index": 1,
+          "rss_mb": 1094.906,
+          "tile_id": 32,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 34,
+          "repeat_index": 1,
+          "rss_mb": 1094.906,
+          "tile_id": 33,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 35,
+          "repeat_index": 1,
+          "rss_mb": 1094.922,
+          "tile_id": 34,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 36,
+          "repeat_index": 1,
+          "rss_mb": 1094.938,
+          "tile_id": 35,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 37,
+          "repeat_index": 1,
+          "rss_mb": 1094.938,
+          "tile_id": 36,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 38,
+          "repeat_index": 1,
+          "rss_mb": 1094.953,
+          "tile_id": 37,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 39,
+          "repeat_index": 1,
+          "rss_mb": 1094.953,
+          "tile_id": 38,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 40,
+          "repeat_index": 1,
+          "rss_mb": 1094.969,
+          "tile_id": 39,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 41,
+          "repeat_index": 1,
+          "rss_mb": 1094.969,
+          "tile_id": 40,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 42,
+          "repeat_index": 1,
+          "rss_mb": 1094.969,
+          "tile_id": 41,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 43,
+          "repeat_index": 1,
+          "rss_mb": 1094.984,
+          "tile_id": 42,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 44,
+          "repeat_index": 1,
+          "rss_mb": 1095.016,
+          "tile_id": 43,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 45,
+          "repeat_index": 1,
+          "rss_mb": 1095.016,
+          "tile_id": 44,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 46,
+          "repeat_index": 1,
+          "rss_mb": 1095.047,
+          "tile_id": 45,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 47,
+          "repeat_index": 1,
+          "rss_mb": 1095.078,
+          "tile_id": 46,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 48,
+          "repeat_index": 1,
+          "rss_mb": 1095.078,
+          "tile_id": 47,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 49,
+          "repeat_index": 1,
+          "rss_mb": 1095.078,
+          "tile_id": 48,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 50,
+          "repeat_index": 1,
+          "rss_mb": 1095.094,
+          "tile_id": 49,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 51,
+          "repeat_index": 1,
+          "rss_mb": 1095.109,
+          "tile_id": 50,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 52,
+          "repeat_index": 1,
+          "rss_mb": 1095.109,
+          "tile_id": 51,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 53,
+          "repeat_index": 1,
+          "rss_mb": 1095.109,
+          "tile_id": 52,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 54,
+          "repeat_index": 1,
+          "rss_mb": 1095.109,
+          "tile_id": 53,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 55,
+          "repeat_index": 1,
+          "rss_mb": 1095.141,
+          "tile_id": 54,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 56,
+          "repeat_index": 1,
+          "rss_mb": 1095.141,
+          "tile_id": 55,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 57,
+          "repeat_index": 1,
+          "rss_mb": 1095.141,
+          "tile_id": 56,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 58,
+          "repeat_index": 1,
+          "rss_mb": 1095.156,
+          "tile_id": 57,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 59,
+          "repeat_index": 1,
+          "rss_mb": 1095.156,
+          "tile_id": 58,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 60,
+          "repeat_index": 1,
+          "rss_mb": 1095.156,
+          "tile_id": 59,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 61,
+          "repeat_index": 1,
+          "rss_mb": 1095.156,
+          "tile_id": 60,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 62,
+          "repeat_index": 1,
+          "rss_mb": 1095.172,
+          "tile_id": 61,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 63,
+          "repeat_index": 1,
+          "rss_mb": 1095.188,
+          "tile_id": 62,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 64,
+          "repeat_index": 1,
+          "rss_mb": 1095.219,
+          "tile_id": 63,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 65,
+          "repeat_index": 1,
+          "rss_mb": 1095.234,
+          "tile_id": 64,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 66,
+          "repeat_index": 1,
+          "rss_mb": 1095.266,
+          "tile_id": 65,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 67,
+          "repeat_index": 1,
+          "rss_mb": 1095.266,
+          "tile_id": 66,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 68,
+          "repeat_index": 1,
+          "rss_mb": 1095.266,
+          "tile_id": 67,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 69,
+          "repeat_index": 1,
+          "rss_mb": 1095.281,
+          "tile_id": 68,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 70,
+          "repeat_index": 1,
+          "rss_mb": 1095.281,
+          "tile_id": 69,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 71,
+          "repeat_index": 1,
+          "rss_mb": 1095.312,
+          "tile_id": 70,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 72,
+          "repeat_index": 1,
+          "rss_mb": 1095.312,
+          "tile_id": 71,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 73,
+          "repeat_index": 1,
+          "rss_mb": 1095.312,
+          "tile_id": 72,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 74,
+          "repeat_index": 1,
+          "rss_mb": 1095.312,
+          "tile_id": 73,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 75,
+          "repeat_index": 1,
+          "rss_mb": 1095.359,
+          "tile_id": 74,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 76,
+          "repeat_index": 1,
+          "rss_mb": 1095.391,
+          "tile_id": 75,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 77,
+          "repeat_index": 1,
+          "rss_mb": 1095.391,
+          "tile_id": 76,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 78,
+          "repeat_index": 1,
+          "rss_mb": 1095.391,
+          "tile_id": 77,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 79,
+          "repeat_index": 1,
+          "rss_mb": 1095.406,
+          "tile_id": 78,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 80,
+          "repeat_index": 1,
+          "rss_mb": 1095.406,
+          "tile_id": 79,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 81,
+          "repeat_index": 1,
+          "rss_mb": 1095.406,
+          "tile_id": 80,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 82,
+          "repeat_index": 1,
+          "rss_mb": 1095.422,
+          "tile_id": 81,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 83,
+          "repeat_index": 1,
+          "rss_mb": 1095.438,
+          "tile_id": 82,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 84,
+          "repeat_index": 1,
+          "rss_mb": 1095.438,
+          "tile_id": 83,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 85,
+          "repeat_index": 1,
+          "rss_mb": 1095.453,
+          "tile_id": 84,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 86,
+          "repeat_index": 1,
+          "rss_mb": 1095.469,
+          "tile_id": 85,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 87,
+          "repeat_index": 1,
+          "rss_mb": 1095.469,
+          "tile_id": 86,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 88,
+          "repeat_index": 1,
+          "rss_mb": 1095.469,
+          "tile_id": 87,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 89,
+          "repeat_index": 1,
+          "rss_mb": 1103.562,
+          "tile_id": 88,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 90,
+          "repeat_index": 1,
+          "rss_mb": 1106.641,
+          "tile_id": 89,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 91,
+          "repeat_index": 1,
+          "rss_mb": 1106.656,
+          "tile_id": 90,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 92,
+          "repeat_index": 1,
+          "rss_mb": 1106.656,
+          "tile_id": 91,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 93,
+          "repeat_index": 1,
+          "rss_mb": 1106.672,
+          "tile_id": 92,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 94,
+          "repeat_index": 1,
+          "rss_mb": 1106.688,
+          "tile_id": 93,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 95,
+          "repeat_index": 1,
+          "rss_mb": 1106.688,
+          "tile_id": 94,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 96,
+          "repeat_index": 1,
+          "rss_mb": 1106.734,
+          "tile_id": 95,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 97,
+          "repeat_index": 1,
+          "rss_mb": 1106.781,
+          "tile_id": 96,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 98,
+          "repeat_index": 1,
+          "rss_mb": 1106.797,
+          "tile_id": 97,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 99,
+          "repeat_index": 1,
+          "rss_mb": 1106.797,
+          "tile_id": 98,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 100,
+          "repeat_index": 1,
+          "rss_mb": 1106.812,
+          "tile_id": 99,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 101,
+          "repeat_index": 1,
+          "rss_mb": 1106.828,
+          "tile_id": 100,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 102,
+          "repeat_index": 1,
+          "rss_mb": 1106.828,
+          "tile_id": 101,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 103,
+          "repeat_index": 1,
+          "rss_mb": 1104.344,
+          "tile_id": 102,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 104,
+          "repeat_index": 1,
+          "rss_mb": 1104.344,
+          "tile_id": 103,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 105,
+          "repeat_index": 1,
+          "rss_mb": 1104.344,
+          "tile_id": 104,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 106,
+          "repeat_index": 1,
+          "rss_mb": 1104.359,
+          "tile_id": 105,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 107,
+          "repeat_index": 1,
+          "rss_mb": 1104.359,
+          "tile_id": 106,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 108,
+          "repeat_index": 1,
+          "rss_mb": 1104.375,
+          "tile_id": 107,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 109,
+          "repeat_index": 1,
+          "rss_mb": 1112.391,
+          "tile_id": 108,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 110,
+          "repeat_index": 1,
+          "rss_mb": 1112.391,
+          "tile_id": 109,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 111,
+          "repeat_index": 1,
+          "rss_mb": 1112.422,
+          "tile_id": 110,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 112,
+          "repeat_index": 1,
+          "rss_mb": 1112.438,
+          "tile_id": 111,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 113,
+          "repeat_index": 1,
+          "rss_mb": 1112.453,
+          "tile_id": 112,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 114,
+          "repeat_index": 1,
+          "rss_mb": 1112.484,
+          "tile_id": 113,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 115,
+          "repeat_index": 1,
+          "rss_mb": 1112.484,
+          "tile_id": 114,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 116,
+          "repeat_index": 1,
+          "rss_mb": 1112.484,
+          "tile_id": 115,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 117,
+          "repeat_index": 1,
+          "rss_mb": 1112.5,
+          "tile_id": 116,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 118,
+          "repeat_index": 1,
+          "rss_mb": 1112.5,
+          "tile_id": 117,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 119,
+          "repeat_index": 1,
+          "rss_mb": 1112.5,
+          "tile_id": 118,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 120,
+          "repeat_index": 1,
+          "rss_mb": 1112.5,
+          "tile_id": 119,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 121,
+          "repeat_index": 1,
+          "rss_mb": 1112.531,
+          "tile_id": 120,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 122,
+          "repeat_index": 1,
+          "rss_mb": 1112.547,
+          "tile_id": 121,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 123,
+          "repeat_index": 1,
+          "rss_mb": 1112.547,
+          "tile_id": 122,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 124,
+          "repeat_index": 1,
+          "rss_mb": 1112.562,
+          "tile_id": 123,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 125,
+          "repeat_index": 1,
+          "rss_mb": 1112.562,
+          "tile_id": 124,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 126,
+          "repeat_index": 1,
+          "rss_mb": 1112.562,
+          "tile_id": 125,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 127,
+          "repeat_index": 1,
+          "rss_mb": 1112.578,
+          "tile_id": 126,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 128,
+          "repeat_index": 1,
+          "rss_mb": 1112.578,
+          "tile_id": 127,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 129,
+          "repeat_index": 1,
+          "rss_mb": 1112.578,
+          "tile_id": 128,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 130,
+          "repeat_index": 1,
+          "rss_mb": 1112.594,
+          "tile_id": 129,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 131,
+          "repeat_index": 1,
+          "rss_mb": 1112.609,
+          "tile_id": 130,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 132,
+          "repeat_index": 1,
+          "rss_mb": 1112.625,
+          "tile_id": 131,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 133,
+          "repeat_index": 1,
+          "rss_mb": 1120.641,
+          "tile_id": 132,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 134,
+          "repeat_index": 1,
+          "rss_mb": 1120.656,
+          "tile_id": 133,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 135,
+          "repeat_index": 1,
+          "rss_mb": 1120.656,
+          "tile_id": 134,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 136,
+          "repeat_index": 1,
+          "rss_mb": 1120.656,
+          "tile_id": 135,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 137,
+          "repeat_index": 1,
+          "rss_mb": 1120.656,
+          "tile_id": 136,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 138,
+          "repeat_index": 1,
+          "rss_mb": 1120.672,
+          "tile_id": 137,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 139,
+          "repeat_index": 1,
+          "rss_mb": 1120.672,
+          "tile_id": 138,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 140,
+          "repeat_index": 1,
+          "rss_mb": 1120.672,
+          "tile_id": 139,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 141,
+          "repeat_index": 1,
+          "rss_mb": 1120.688,
+          "tile_id": 140,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 142,
+          "repeat_index": 1,
+          "rss_mb": 1120.703,
+          "tile_id": 141,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 143,
+          "repeat_index": 1,
+          "rss_mb": 1120.703,
+          "tile_id": 142,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 144,
+          "repeat_index": 1,
+          "rss_mb": 1120.703,
+          "tile_id": 143,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 145,
+          "repeat_index": 1,
+          "rss_mb": 1120.703,
+          "tile_id": 144,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 146,
+          "repeat_index": 1,
+          "rss_mb": 1120.719,
+          "tile_id": 145,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 147,
+          "repeat_index": 1,
+          "rss_mb": 1120.734,
+          "tile_id": 146,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 148,
+          "repeat_index": 1,
+          "rss_mb": 1120.75,
+          "tile_id": 147,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 149,
+          "repeat_index": 1,
+          "rss_mb": 1120.766,
+          "tile_id": 148,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 150,
+          "repeat_index": 1,
+          "rss_mb": 1120.812,
+          "tile_id": 149,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 151,
+          "repeat_index": 1,
+          "rss_mb": 1120.828,
+          "tile_id": 150,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 152,
+          "repeat_index": 1,
+          "rss_mb": 1120.844,
+          "tile_id": 151,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 153,
+          "repeat_index": 1,
+          "rss_mb": 1120.859,
+          "tile_id": 152,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 154,
+          "repeat_index": 1,
+          "rss_mb": 1120.859,
+          "tile_id": 153,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 155,
+          "repeat_index": 1,
+          "rss_mb": 1120.859,
+          "tile_id": 154,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 156,
+          "repeat_index": 1,
+          "rss_mb": 1120.875,
+          "tile_id": 155,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 157,
+          "repeat_index": 1,
+          "rss_mb": 1120.875,
+          "tile_id": 156,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 158,
+          "repeat_index": 1,
+          "rss_mb": 1120.906,
+          "tile_id": 157,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 159,
+          "repeat_index": 1,
+          "rss_mb": 1120.906,
+          "tile_id": 158,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 160,
+          "repeat_index": 1,
+          "rss_mb": 1120.906,
+          "tile_id": 159,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 161,
+          "repeat_index": 1,
+          "rss_mb": 1120.938,
+          "tile_id": 160,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 162,
+          "repeat_index": 1,
+          "rss_mb": 1120.953,
+          "tile_id": 161,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 163,
+          "repeat_index": 1,
+          "rss_mb": 1120.953,
+          "tile_id": 162,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 164,
+          "repeat_index": 1,
+          "rss_mb": 1120.953,
+          "tile_id": 163,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 165,
+          "repeat_index": 1,
+          "rss_mb": 1120.969,
+          "tile_id": 164,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 166,
+          "repeat_index": 1,
+          "rss_mb": 1120.969,
+          "tile_id": 165,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 167,
+          "repeat_index": 1,
+          "rss_mb": 1120.984,
+          "tile_id": 166,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 168,
+          "repeat_index": 1,
+          "rss_mb": 1120.984,
+          "tile_id": 167,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 169,
+          "repeat_index": 1,
+          "rss_mb": 1120.984,
+          "tile_id": 168,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 170,
+          "repeat_index": 1,
+          "rss_mb": 1121.016,
+          "tile_id": 169,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 171,
+          "repeat_index": 1,
+          "rss_mb": 1121.016,
+          "tile_id": 170,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 172,
+          "repeat_index": 1,
+          "rss_mb": 1121.016,
+          "tile_id": 171,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 173,
+          "repeat_index": 1,
+          "rss_mb": 1121.031,
+          "tile_id": 172,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 174,
+          "repeat_index": 1,
+          "rss_mb": 1121.047,
+          "tile_id": 173,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 175,
+          "repeat_index": 1,
+          "rss_mb": 1121.047,
+          "tile_id": 174,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 176,
+          "repeat_index": 1,
+          "rss_mb": 1121.047,
+          "tile_id": 175,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 177,
+          "repeat_index": 1,
+          "rss_mb": 1121.062,
+          "tile_id": 176,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 178,
+          "repeat_index": 1,
+          "rss_mb": 1121.078,
+          "tile_id": 177,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 179,
+          "repeat_index": 1,
+          "rss_mb": 1121.078,
+          "tile_id": 178,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 180,
+          "repeat_index": 1,
+          "rss_mb": 1121.109,
+          "tile_id": 179,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 181,
+          "repeat_index": 1,
+          "rss_mb": 1121.109,
+          "tile_id": 180,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 182,
+          "repeat_index": 1,
+          "rss_mb": 1121.109,
+          "tile_id": 181,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 183,
+          "repeat_index": 1,
+          "rss_mb": 1121.141,
+          "tile_id": 182,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 184,
+          "repeat_index": 1,
+          "rss_mb": 1121.141,
+          "tile_id": 183,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 185,
+          "repeat_index": 1,
+          "rss_mb": 1121.172,
+          "tile_id": 184,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 186,
+          "repeat_index": 1,
+          "rss_mb": 1121.172,
+          "tile_id": 185,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 187,
+          "repeat_index": 1,
+          "rss_mb": 1121.172,
+          "tile_id": 186,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 188,
+          "repeat_index": 1,
+          "rss_mb": 1121.203,
+          "tile_id": 187,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 189,
+          "repeat_index": 1,
+          "rss_mb": 1121.203,
+          "tile_id": 188,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 190,
+          "repeat_index": 1,
+          "rss_mb": 1121.203,
+          "tile_id": 189,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 191,
+          "repeat_index": 1,
+          "rss_mb": 1121.203,
+          "tile_id": 190,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 192,
+          "repeat_index": 1,
+          "rss_mb": 1121.234,
+          "tile_id": 191,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 193,
+          "repeat_index": 1,
+          "rss_mb": 1121.234,
+          "tile_id": 192,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 194,
+          "repeat_index": 1,
+          "rss_mb": 1121.266,
+          "tile_id": 193,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 195,
+          "repeat_index": 1,
+          "rss_mb": 1121.266,
+          "tile_id": 194,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 196,
+          "repeat_index": 1,
+          "rss_mb": 1121.266,
+          "tile_id": 195,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 197,
+          "repeat_index": 1,
+          "rss_mb": 1121.266,
+          "tile_id": 196,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 198,
+          "repeat_index": 1,
+          "rss_mb": 1121.297,
+          "tile_id": 197,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 199,
+          "repeat_index": 1,
+          "rss_mb": 1121.297,
+          "tile_id": 198,
+          "worker_pid": 88687
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 200,
+          "repeat_index": 1,
+          "rss_mb": 1121.297,
+          "tile_id": 199,
+          "worker_pid": 88687
+        }
+      ],
+      "worker_crash": false
+    },
+    {
+      "memory_growth_detected": false,
+      "mode": "persistent_runner",
+      "repeat_index": 2,
+      "rss_end_mb": 1121.375,
+      "rss_max_minus_min_mb": 44.45400000000018,
+      "rss_min_mb": 1080.812,
+      "rss_peak_mb": 1125.266,
+      "rss_slope_mb_per_100_tiles": 6.272621,
+      "rss_start_mb": 1080.812,
+      "sample_count": 200,
+      "samples": [
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 1,
+          "repeat_index": 2,
+          "rss_mb": 1080.812,
+          "tile_id": 0,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 2,
+          "repeat_index": 2,
+          "rss_mb": 1088.922,
+          "tile_id": 1,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 3,
+          "repeat_index": 2,
+          "rss_mb": 1097.016,
+          "tile_id": 2,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 4,
+          "repeat_index": 2,
+          "rss_mb": 1097.016,
+          "tile_id": 3,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 5,
+          "repeat_index": 2,
+          "rss_mb": 1109.062,
+          "tile_id": 4,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 6,
+          "repeat_index": 2,
+          "rss_mb": 1109.125,
+          "tile_id": 5,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 7,
+          "repeat_index": 2,
+          "rss_mb": 1109.141,
+          "tile_id": 6,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 8,
+          "repeat_index": 2,
+          "rss_mb": 1117.141,
+          "tile_id": 7,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 9,
+          "repeat_index": 2,
+          "rss_mb": 1117.156,
+          "tile_id": 8,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 10,
+          "repeat_index": 2,
+          "rss_mb": 1125.156,
+          "tile_id": 9,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 11,
+          "repeat_index": 2,
+          "rss_mb": 1125.172,
+          "tile_id": 10,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 12,
+          "repeat_index": 2,
+          "rss_mb": 1125.203,
+          "tile_id": 11,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 13,
+          "repeat_index": 2,
+          "rss_mb": 1125.203,
+          "tile_id": 12,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 14,
+          "repeat_index": 2,
+          "rss_mb": 1125.203,
+          "tile_id": 13,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 15,
+          "repeat_index": 2,
+          "rss_mb": 1125.266,
+          "tile_id": 14,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 16,
+          "repeat_index": 2,
+          "rss_mb": 1120.391,
+          "tile_id": 15,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 17,
+          "repeat_index": 2,
+          "rss_mb": 1120.453,
+          "tile_id": 16,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 18,
+          "repeat_index": 2,
+          "rss_mb": 1120.469,
+          "tile_id": 17,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 19,
+          "repeat_index": 2,
+          "rss_mb": 1120.484,
+          "tile_id": 18,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 20,
+          "repeat_index": 2,
+          "rss_mb": 1120.484,
+          "tile_id": 19,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 21,
+          "repeat_index": 2,
+          "rss_mb": 1120.516,
+          "tile_id": 20,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 22,
+          "repeat_index": 2,
+          "rss_mb": 1120.516,
+          "tile_id": 21,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 23,
+          "repeat_index": 2,
+          "rss_mb": 1120.516,
+          "tile_id": 22,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 24,
+          "repeat_index": 2,
+          "rss_mb": 1120.516,
+          "tile_id": 23,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 25,
+          "repeat_index": 2,
+          "rss_mb": 1120.531,
+          "tile_id": 24,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 26,
+          "repeat_index": 2,
+          "rss_mb": 1120.531,
+          "tile_id": 25,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 27,
+          "repeat_index": 2,
+          "rss_mb": 1120.547,
+          "tile_id": 26,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 28,
+          "repeat_index": 2,
+          "rss_mb": 1120.547,
+          "tile_id": 27,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 29,
+          "repeat_index": 2,
+          "rss_mb": 1120.562,
+          "tile_id": 28,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 30,
+          "repeat_index": 2,
+          "rss_mb": 1118.375,
+          "tile_id": 29,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 31,
+          "repeat_index": 2,
+          "rss_mb": 1118.391,
+          "tile_id": 30,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 32,
+          "repeat_index": 2,
+          "rss_mb": 1118.391,
+          "tile_id": 31,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 33,
+          "repeat_index": 2,
+          "rss_mb": 1118.406,
+          "tile_id": 32,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 34,
+          "repeat_index": 2,
+          "rss_mb": 1117.188,
+          "tile_id": 33,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 35,
+          "repeat_index": 2,
+          "rss_mb": 1117.188,
+          "tile_id": 34,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 36,
+          "repeat_index": 2,
+          "rss_mb": 1117.219,
+          "tile_id": 35,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 37,
+          "repeat_index": 2,
+          "rss_mb": 1117.281,
+          "tile_id": 36,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 38,
+          "repeat_index": 2,
+          "rss_mb": 1117.328,
+          "tile_id": 37,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 39,
+          "repeat_index": 2,
+          "rss_mb": 1117.328,
+          "tile_id": 38,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 40,
+          "repeat_index": 2,
+          "rss_mb": 1117.344,
+          "tile_id": 39,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 41,
+          "repeat_index": 2,
+          "rss_mb": 1117.359,
+          "tile_id": 40,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 42,
+          "repeat_index": 2,
+          "rss_mb": 1117.359,
+          "tile_id": 41,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 43,
+          "repeat_index": 2,
+          "rss_mb": 1117.375,
+          "tile_id": 42,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 44,
+          "repeat_index": 2,
+          "rss_mb": 1117.375,
+          "tile_id": 43,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 45,
+          "repeat_index": 2,
+          "rss_mb": 1124.656,
+          "tile_id": 44,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 46,
+          "repeat_index": 2,
+          "rss_mb": 1124.609,
+          "tile_id": 45,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 47,
+          "repeat_index": 2,
+          "rss_mb": 1124.609,
+          "tile_id": 46,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 48,
+          "repeat_index": 2,
+          "rss_mb": 1124.609,
+          "tile_id": 47,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 49,
+          "repeat_index": 2,
+          "rss_mb": 1096.0,
+          "tile_id": 48,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 50,
+          "repeat_index": 2,
+          "rss_mb": 1096.0,
+          "tile_id": 49,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 51,
+          "repeat_index": 2,
+          "rss_mb": 1096.0,
+          "tile_id": 50,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 52,
+          "repeat_index": 2,
+          "rss_mb": 1096.016,
+          "tile_id": 51,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 53,
+          "repeat_index": 2,
+          "rss_mb": 1096.031,
+          "tile_id": 52,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 54,
+          "repeat_index": 2,
+          "rss_mb": 1096.031,
+          "tile_id": 53,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 55,
+          "repeat_index": 2,
+          "rss_mb": 1096.031,
+          "tile_id": 54,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 56,
+          "repeat_index": 2,
+          "rss_mb": 1096.031,
+          "tile_id": 55,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 57,
+          "repeat_index": 2,
+          "rss_mb": 1096.047,
+          "tile_id": 56,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 58,
+          "repeat_index": 2,
+          "rss_mb": 1096.078,
+          "tile_id": 57,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 59,
+          "repeat_index": 2,
+          "rss_mb": 1104.078,
+          "tile_id": 58,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 60,
+          "repeat_index": 2,
+          "rss_mb": 1104.094,
+          "tile_id": 59,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 61,
+          "repeat_index": 2,
+          "rss_mb": 1104.094,
+          "tile_id": 60,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 62,
+          "repeat_index": 2,
+          "rss_mb": 1104.109,
+          "tile_id": 61,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 63,
+          "repeat_index": 2,
+          "rss_mb": 1104.125,
+          "tile_id": 62,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 64,
+          "repeat_index": 2,
+          "rss_mb": 1104.125,
+          "tile_id": 63,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 65,
+          "repeat_index": 2,
+          "rss_mb": 1104.125,
+          "tile_id": 64,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 66,
+          "repeat_index": 2,
+          "rss_mb": 1104.172,
+          "tile_id": 65,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 67,
+          "repeat_index": 2,
+          "rss_mb": 1104.188,
+          "tile_id": 66,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 68,
+          "repeat_index": 2,
+          "rss_mb": 1104.188,
+          "tile_id": 67,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 69,
+          "repeat_index": 2,
+          "rss_mb": 1104.188,
+          "tile_id": 68,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 70,
+          "repeat_index": 2,
+          "rss_mb": 1104.203,
+          "tile_id": 69,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 71,
+          "repeat_index": 2,
+          "rss_mb": 1104.203,
+          "tile_id": 70,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 72,
+          "repeat_index": 2,
+          "rss_mb": 1104.203,
+          "tile_id": 71,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 73,
+          "repeat_index": 2,
+          "rss_mb": 1104.219,
+          "tile_id": 72,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 74,
+          "repeat_index": 2,
+          "rss_mb": 1104.234,
+          "tile_id": 73,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 75,
+          "repeat_index": 2,
+          "rss_mb": 1104.234,
+          "tile_id": 74,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 76,
+          "repeat_index": 2,
+          "rss_mb": 1104.25,
+          "tile_id": 75,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 77,
+          "repeat_index": 2,
+          "rss_mb": 1104.266,
+          "tile_id": 76,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 78,
+          "repeat_index": 2,
+          "rss_mb": 1104.266,
+          "tile_id": 77,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 79,
+          "repeat_index": 2,
+          "rss_mb": 1104.266,
+          "tile_id": 78,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 80,
+          "repeat_index": 2,
+          "rss_mb": 1104.266,
+          "tile_id": 79,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 81,
+          "repeat_index": 2,
+          "rss_mb": 1104.281,
+          "tile_id": 80,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 82,
+          "repeat_index": 2,
+          "rss_mb": 1104.297,
+          "tile_id": 81,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 83,
+          "repeat_index": 2,
+          "rss_mb": 1104.312,
+          "tile_id": 82,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 84,
+          "repeat_index": 2,
+          "rss_mb": 1104.312,
+          "tile_id": 83,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 85,
+          "repeat_index": 2,
+          "rss_mb": 1104.328,
+          "tile_id": 84,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 86,
+          "repeat_index": 2,
+          "rss_mb": 1104.359,
+          "tile_id": 85,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 87,
+          "repeat_index": 2,
+          "rss_mb": 1104.375,
+          "tile_id": 86,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 88,
+          "repeat_index": 2,
+          "rss_mb": 1104.391,
+          "tile_id": 87,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 89,
+          "repeat_index": 2,
+          "rss_mb": 1104.391,
+          "tile_id": 88,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 90,
+          "repeat_index": 2,
+          "rss_mb": 1104.391,
+          "tile_id": 89,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 91,
+          "repeat_index": 2,
+          "rss_mb": 1104.406,
+          "tile_id": 90,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 92,
+          "repeat_index": 2,
+          "rss_mb": 1104.406,
+          "tile_id": 91,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 93,
+          "repeat_index": 2,
+          "rss_mb": 1112.422,
+          "tile_id": 92,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 94,
+          "repeat_index": 2,
+          "rss_mb": 1112.516,
+          "tile_id": 93,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 95,
+          "repeat_index": 2,
+          "rss_mb": 1112.547,
+          "tile_id": 94,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 96,
+          "repeat_index": 2,
+          "rss_mb": 1112.578,
+          "tile_id": 95,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 97,
+          "repeat_index": 2,
+          "rss_mb": 1112.578,
+          "tile_id": 96,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 98,
+          "repeat_index": 2,
+          "rss_mb": 1112.594,
+          "tile_id": 97,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 99,
+          "repeat_index": 2,
+          "rss_mb": 1112.594,
+          "tile_id": 98,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 100,
+          "repeat_index": 2,
+          "rss_mb": 1112.609,
+          "tile_id": 99,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 101,
+          "repeat_index": 2,
+          "rss_mb": 1112.609,
+          "tile_id": 100,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 102,
+          "repeat_index": 2,
+          "rss_mb": 1112.625,
+          "tile_id": 101,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 103,
+          "repeat_index": 2,
+          "rss_mb": 1112.625,
+          "tile_id": 102,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 104,
+          "repeat_index": 2,
+          "rss_mb": 1112.641,
+          "tile_id": 103,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 105,
+          "repeat_index": 2,
+          "rss_mb": 1112.656,
+          "tile_id": 104,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 106,
+          "repeat_index": 2,
+          "rss_mb": 1112.656,
+          "tile_id": 105,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 107,
+          "repeat_index": 2,
+          "rss_mb": 1112.656,
+          "tile_id": 106,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 108,
+          "repeat_index": 2,
+          "rss_mb": 1112.656,
+          "tile_id": 107,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 109,
+          "repeat_index": 2,
+          "rss_mb": 1112.672,
+          "tile_id": 108,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 110,
+          "repeat_index": 2,
+          "rss_mb": 1112.703,
+          "tile_id": 109,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 111,
+          "repeat_index": 2,
+          "rss_mb": 1112.703,
+          "tile_id": 110,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 112,
+          "repeat_index": 2,
+          "rss_mb": 1112.703,
+          "tile_id": 111,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 113,
+          "repeat_index": 2,
+          "rss_mb": 1112.703,
+          "tile_id": 112,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 114,
+          "repeat_index": 2,
+          "rss_mb": 1112.719,
+          "tile_id": 113,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 115,
+          "repeat_index": 2,
+          "rss_mb": 1112.578,
+          "tile_id": 114,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 116,
+          "repeat_index": 2,
+          "rss_mb": 1112.578,
+          "tile_id": 115,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 117,
+          "repeat_index": 2,
+          "rss_mb": 1112.594,
+          "tile_id": 116,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 118,
+          "repeat_index": 2,
+          "rss_mb": 1112.594,
+          "tile_id": 117,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 119,
+          "repeat_index": 2,
+          "rss_mb": 1112.594,
+          "tile_id": 118,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 120,
+          "repeat_index": 2,
+          "rss_mb": 1120.594,
+          "tile_id": 119,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 121,
+          "repeat_index": 2,
+          "rss_mb": 1120.625,
+          "tile_id": 120,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 122,
+          "repeat_index": 2,
+          "rss_mb": 1120.641,
+          "tile_id": 121,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 123,
+          "repeat_index": 2,
+          "rss_mb": 1120.641,
+          "tile_id": 122,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 124,
+          "repeat_index": 2,
+          "rss_mb": 1120.641,
+          "tile_id": 123,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 125,
+          "repeat_index": 2,
+          "rss_mb": 1120.656,
+          "tile_id": 124,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 126,
+          "repeat_index": 2,
+          "rss_mb": 1120.703,
+          "tile_id": 125,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 127,
+          "repeat_index": 2,
+          "rss_mb": 1120.703,
+          "tile_id": 126,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 128,
+          "repeat_index": 2,
+          "rss_mb": 1120.703,
+          "tile_id": 127,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 129,
+          "repeat_index": 2,
+          "rss_mb": 1120.719,
+          "tile_id": 128,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 130,
+          "repeat_index": 2,
+          "rss_mb": 1120.719,
+          "tile_id": 129,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 131,
+          "repeat_index": 2,
+          "rss_mb": 1120.719,
+          "tile_id": 130,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 132,
+          "repeat_index": 2,
+          "rss_mb": 1120.734,
+          "tile_id": 131,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 133,
+          "repeat_index": 2,
+          "rss_mb": 1120.734,
+          "tile_id": 132,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 134,
+          "repeat_index": 2,
+          "rss_mb": 1120.75,
+          "tile_id": 133,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 135,
+          "repeat_index": 2,
+          "rss_mb": 1120.75,
+          "tile_id": 134,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 136,
+          "repeat_index": 2,
+          "rss_mb": 1120.75,
+          "tile_id": 135,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 137,
+          "repeat_index": 2,
+          "rss_mb": 1120.781,
+          "tile_id": 136,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 138,
+          "repeat_index": 2,
+          "rss_mb": 1120.781,
+          "tile_id": 137,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 139,
+          "repeat_index": 2,
+          "rss_mb": 1120.781,
+          "tile_id": 138,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 140,
+          "repeat_index": 2,
+          "rss_mb": 1120.781,
+          "tile_id": 139,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 141,
+          "repeat_index": 2,
+          "rss_mb": 1120.812,
+          "tile_id": 140,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 142,
+          "repeat_index": 2,
+          "rss_mb": 1120.812,
+          "tile_id": 141,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 143,
+          "repeat_index": 2,
+          "rss_mb": 1120.828,
+          "tile_id": 142,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 144,
+          "repeat_index": 2,
+          "rss_mb": 1120.828,
+          "tile_id": 143,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 145,
+          "repeat_index": 2,
+          "rss_mb": 1120.844,
+          "tile_id": 144,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 146,
+          "repeat_index": 2,
+          "rss_mb": 1120.859,
+          "tile_id": 145,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 147,
+          "repeat_index": 2,
+          "rss_mb": 1120.875,
+          "tile_id": 146,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 148,
+          "repeat_index": 2,
+          "rss_mb": 1120.875,
+          "tile_id": 147,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 149,
+          "repeat_index": 2,
+          "rss_mb": 1120.891,
+          "tile_id": 148,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 150,
+          "repeat_index": 2,
+          "rss_mb": 1120.891,
+          "tile_id": 149,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 151,
+          "repeat_index": 2,
+          "rss_mb": 1120.891,
+          "tile_id": 150,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 152,
+          "repeat_index": 2,
+          "rss_mb": 1120.938,
+          "tile_id": 151,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 153,
+          "repeat_index": 2,
+          "rss_mb": 1120.938,
+          "tile_id": 152,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 154,
+          "repeat_index": 2,
+          "rss_mb": 1120.938,
+          "tile_id": 153,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 155,
+          "repeat_index": 2,
+          "rss_mb": 1120.938,
+          "tile_id": 154,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 156,
+          "repeat_index": 2,
+          "rss_mb": 1120.953,
+          "tile_id": 155,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 157,
+          "repeat_index": 2,
+          "rss_mb": 1120.969,
+          "tile_id": 156,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 158,
+          "repeat_index": 2,
+          "rss_mb": 1120.984,
+          "tile_id": 157,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 159,
+          "repeat_index": 2,
+          "rss_mb": 1120.984,
+          "tile_id": 158,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 160,
+          "repeat_index": 2,
+          "rss_mb": 1120.984,
+          "tile_id": 159,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 161,
+          "repeat_index": 2,
+          "rss_mb": 1121.0,
+          "tile_id": 160,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 162,
+          "repeat_index": 2,
+          "rss_mb": 1121.016,
+          "tile_id": 161,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 163,
+          "repeat_index": 2,
+          "rss_mb": 1121.016,
+          "tile_id": 162,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 164,
+          "repeat_index": 2,
+          "rss_mb": 1121.016,
+          "tile_id": 163,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 165,
+          "repeat_index": 2,
+          "rss_mb": 1121.031,
+          "tile_id": 164,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 166,
+          "repeat_index": 2,
+          "rss_mb": 1121.047,
+          "tile_id": 165,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 167,
+          "repeat_index": 2,
+          "rss_mb": 1121.062,
+          "tile_id": 166,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 168,
+          "repeat_index": 2,
+          "rss_mb": 1121.078,
+          "tile_id": 167,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 169,
+          "repeat_index": 2,
+          "rss_mb": 1121.078,
+          "tile_id": 168,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 170,
+          "repeat_index": 2,
+          "rss_mb": 1121.094,
+          "tile_id": 169,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 171,
+          "repeat_index": 2,
+          "rss_mb": 1121.094,
+          "tile_id": 170,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 172,
+          "repeat_index": 2,
+          "rss_mb": 1121.109,
+          "tile_id": 171,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 173,
+          "repeat_index": 2,
+          "rss_mb": 1121.125,
+          "tile_id": 172,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 174,
+          "repeat_index": 2,
+          "rss_mb": 1121.141,
+          "tile_id": 173,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 175,
+          "repeat_index": 2,
+          "rss_mb": 1121.156,
+          "tile_id": 174,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 176,
+          "repeat_index": 2,
+          "rss_mb": 1121.156,
+          "tile_id": 175,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 177,
+          "repeat_index": 2,
+          "rss_mb": 1121.156,
+          "tile_id": 176,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 178,
+          "repeat_index": 2,
+          "rss_mb": 1121.172,
+          "tile_id": 177,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 179,
+          "repeat_index": 2,
+          "rss_mb": 1121.172,
+          "tile_id": 178,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 180,
+          "repeat_index": 2,
+          "rss_mb": 1121.188,
+          "tile_id": 179,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 181,
+          "repeat_index": 2,
+          "rss_mb": 1121.188,
+          "tile_id": 180,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 182,
+          "repeat_index": 2,
+          "rss_mb": 1121.203,
+          "tile_id": 181,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 183,
+          "repeat_index": 2,
+          "rss_mb": 1121.203,
+          "tile_id": 182,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 184,
+          "repeat_index": 2,
+          "rss_mb": 1121.203,
+          "tile_id": 183,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 185,
+          "repeat_index": 2,
+          "rss_mb": 1121.219,
+          "tile_id": 184,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 186,
+          "repeat_index": 2,
+          "rss_mb": 1121.219,
+          "tile_id": 185,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 187,
+          "repeat_index": 2,
+          "rss_mb": 1121.234,
+          "tile_id": 186,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 188,
+          "repeat_index": 2,
+          "rss_mb": 1121.25,
+          "tile_id": 187,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 189,
+          "repeat_index": 2,
+          "rss_mb": 1121.25,
+          "tile_id": 188,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 190,
+          "repeat_index": 2,
+          "rss_mb": 1121.25,
+          "tile_id": 189,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 191,
+          "repeat_index": 2,
+          "rss_mb": 1121.266,
+          "tile_id": 190,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 192,
+          "repeat_index": 2,
+          "rss_mb": 1121.312,
+          "tile_id": 191,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 193,
+          "repeat_index": 2,
+          "rss_mb": 1121.312,
+          "tile_id": 192,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 194,
+          "repeat_index": 2,
+          "rss_mb": 1121.328,
+          "tile_id": 193,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 195,
+          "repeat_index": 2,
+          "rss_mb": 1121.344,
+          "tile_id": 194,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 196,
+          "repeat_index": 2,
+          "rss_mb": 1121.344,
+          "tile_id": 195,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 197,
+          "repeat_index": 2,
+          "rss_mb": 1121.344,
+          "tile_id": 196,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 198,
+          "repeat_index": 2,
+          "rss_mb": 1121.359,
+          "tile_id": 197,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 199,
+          "repeat_index": 2,
+          "rss_mb": 1121.375,
+          "tile_id": 198,
+          "worker_pid": 90844
+        },
+        {
+          "mode": "persistent_runner",
+          "processed_tile_ordinal": 200,
+          "repeat_index": 2,
+          "rss_mb": 1121.375,
+          "tile_id": 199,
+          "worker_pid": 90844
+        }
+      ],
+      "worker_crash": false
+    }
+  ],
+  "swap_or_memory_pressure_observation_if_available": null
+}

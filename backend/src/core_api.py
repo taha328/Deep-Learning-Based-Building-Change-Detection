@@ -4,6 +4,7 @@ import logging
 from typing import Callable
 
 from src.config import Settings, get_settings
+from src.domain.wayback_tile_preflight_cache import cleanup_wayback_preflight_locks
 from src.execution_profiles import (
     BackendAvailability,
     PipelineExecutionConfig,
@@ -52,6 +53,55 @@ def _request_hash_context_with_threshold(backend, settings: Settings, change_thr
 
 def _resolve_settings(settings: Settings | None) -> Settings:
     return settings or get_settings()
+
+
+def _release_date_lookup(project: TemporalProject, settings: Settings) -> dict[str, str]:
+    dates = {
+        milestone.release_identifier: milestone.release_date
+        for milestone in project.milestones
+        if milestone.release_date
+    }
+    try:
+        for release in list_releases(settings):
+            dates.setdefault(release.identifier, str(release.release_date))
+    except Exception:
+        LOGGER.debug("Unable to enrich temporal progress release dates from Wayback releases.", exc_info=True)
+    return dates
+
+
+def _temporal_pair_positions(project: TemporalProject) -> dict[tuple[str, str], int]:
+    return {
+        (project.milestones[index - 1].release_identifier, project.milestones[index].release_identifier): index
+        for index in range(1, len(project.milestones))
+    }
+
+
+def _temporal_pair_progress_details(
+    *,
+    details: dict[str, object] | None,
+    pair_fraction: float,
+    pair_stage: str,
+    current_pair_index: int,
+    total_pair_count: int,
+    from_release_identifier: str,
+    to_release_identifier: str,
+    release_dates: dict[str, str],
+) -> dict[str, object]:
+    enriched: dict[str, object] = dict(details or {})
+    enriched.update(
+        {
+            "temporal_progress_kind": "active_pair",
+            "current_pair_index": current_pair_index,
+            "total_pair_count": total_pair_count,
+            "pair_fraction": max(0.0, min(1.0, pair_fraction)),
+            "pair_stage": pair_stage,
+            "from_release_identifier": from_release_identifier,
+            "to_release_identifier": to_release_identifier,
+            "from_release_date": release_dates.get(from_release_identifier),
+            "to_release_date": release_dates.get(to_release_identifier),
+        }
+    )
+    return enriched
 
 
 def list_releases_api(*, settings: Settings | None = None) -> ReleaseListResponse:
@@ -181,9 +231,15 @@ def run_temporal_project_api(
     progress_callback: ProgressCallback | None = None,
     x_ip_token: str | None = None,
     run_request: TemporalProjectRunRequest | None = None,
+    job_id: str | None = None,
 ) -> TemporalProjectRunResponse:
     resolved_settings = _resolve_settings(settings)
     project = get_temporal_project(project_id, resolved_settings)
+    cleanup_wayback_preflight_locks(
+        "temporal_project_processing_start",
+        settings=resolved_settings,
+        source="core_api",
+    )
     del execution_config
     resolved_execution_config = resolve_configured_inference_execution_config(resolved_settings)
     backend = resolve_backend(resolved_execution_config, settings=resolved_settings)
@@ -200,18 +256,48 @@ def run_temporal_project_api(
     if change_threshold is not None:
         configured_settings = configured_settings.model_copy(update={"change_threshold": change_threshold})
     request_hash_context = _request_hash_context_with_threshold(backend, configured_settings, change_threshold)
+    release_dates = _release_date_lookup(project, configured_settings)
+    pair_positions = _temporal_pair_positions(project)
+    total_pair_count = max(len(project.milestones) - 1, 0)
+    fallback_pair_counter = 0
     LOGGER.info(
-        "TEMPORAL_RUN_REQUEST_THRESHOLD projectId=%s changeThreshold=%s source=%s",
+        "TEMPORAL_RUN_REQUEST_THRESHOLD projectId=%s jobId=%s changeThreshold=%s source=%s",
         project_id,
+        job_id,
         configured_settings.change_threshold,
         "request_override" if change_threshold is not None else "backend_settings_env",
     )
 
     def _pair_runner(request: RunRequest) -> RunResponse:
+        nonlocal fallback_pair_counter
+        fallback_pair_counter += 1
+        current_pair_index = pair_positions.get(
+            (request.t1_release, request.t2_release),
+            min(fallback_pair_counter, total_pair_count) if total_pair_count else fallback_pair_counter,
+        )
+
+        def _progress(fraction: float, message: str, details: dict[str, object] | None = None) -> None:
+            if progress_callback is None:
+                return
+            progress_callback(
+                fraction,
+                message,
+                _temporal_pair_progress_details(
+                    details=details,
+                    pair_fraction=fraction,
+                    pair_stage=message,
+                    current_pair_index=current_pair_index,
+                    total_pair_count=total_pair_count,
+                    from_release_identifier=request.t1_release,
+                    to_release_identifier=request.t2_release,
+                    release_dates=release_dates,
+                ),
+            )
+
         return run_detection(
             request,
             settings=configured_settings,
-            progress=progress_callback,
+            progress=_progress if progress_callback is not None else None,
             x_ip_token=x_ip_token,
             inference_runner=backend.create_inference_runner(configured_settings),
             model_backend=backend.model_backend,

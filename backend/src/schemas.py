@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 from src.execution_profiles import PipelineExecutionConfig
 
 
@@ -492,7 +492,12 @@ class TemporalProjectRunResponse(BaseModel):
 class TemporalProjectRunRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    change_threshold: float | None = Field(default=None, ge=0.01, le=0.99)
+    change_threshold: float | None = Field(
+        default=None,
+        ge=0.01,
+        le=0.99,
+        validation_alias=AliasChoices("change_threshold", "changeThreshold"),
+    )
 
 
 class TemporalProjectReference(BaseModel):

@@ -9,6 +9,7 @@ import pytest
 
 from src.api.routes.health import jobs_health, redis_health
 from src.config import Settings
+from src.core_api import _temporal_pair_progress_details
 from src.db.models import JobRecord, ProjectRecord
 from src.jobs import tasks as job_tasks
 from src.jobs import service as jobs_service
@@ -17,6 +18,40 @@ from src.jobs.service import cancel_job, start_detection_job, start_temporal_pro
 from src.repositories.job_repository import mark_job_completed, mark_job_failed
 from src.schemas import ArtifactEntry, DiagnosticMetadata, RunRequest, RunResponse, SummaryStats, TemporalProjectRunRequest
 from src.jobs.tasks import _log_worker_effective_backend
+
+
+def test_temporal_pair_progress_details_adds_dates_and_preserves_tile_fields() -> None:
+    details = _temporal_pair_progress_details(
+        details={
+            "processed_tiles": 36,
+            "total_tiles": 100,
+            "processed_tile_count": 12,
+            "total_tile_count": 20,
+        },
+        pair_fraction=0.36,
+        pair_stage="Running tiled local BANDON change detection",
+        current_pair_index=2,
+        total_pair_count=4,
+        from_release_identifier="WB_2025_R03",
+        to_release_identifier="WB_2026_R05",
+        release_dates={
+            "WB_2025_R03": "2025-03-27",
+            "WB_2026_R05": "2026-05-28",
+        },
+    )
+
+    assert details["temporal_progress_kind"] == "active_pair"
+    assert details["current_pair_index"] == 2
+    assert details["total_pair_count"] == 4
+    assert details["pair_fraction"] == 0.36
+    assert details["from_release_identifier"] == "WB_2025_R03"
+    assert details["to_release_identifier"] == "WB_2026_R05"
+    assert details["from_release_date"] == "2025-03-27"
+    assert details["to_release_date"] == "2026-05-28"
+    assert details["processed_tiles"] == 36
+    assert details["total_tiles"] == 100
+    assert details["processed_tile_count"] == 12
+    assert details["total_tile_count"] == 20
 
 
 class _FakeQuery:
@@ -130,13 +165,15 @@ def test_start_detection_job_enqueues_and_persists(monkeypatch, tmp_path) -> Non
     assert session.job.celery_task_id == "celery-task-1"
 
 
-def test_start_temporal_job_requires_existing_project(monkeypatch, tmp_path) -> None:
+def test_start_temporal_job_requires_existing_project(monkeypatch, tmp_path, caplog) -> None:
     session = _FakeJobSession(project=SimpleNamespace(id=uuid.uuid4(), project_id="temporal-test"))
     settings = Settings(
         runtime_cache_dir=tmp_path,
         jobs_enabled=True,
         redis_url="redis://localhost:6379/0",
     )
+    launch_lock = settings.wayback_tile_preflight_cache_dir / "launch.json.lock"
+    launch_lock.mkdir()
 
     monkeypatch.setattr(jobs_service, "assert_redis_available", lambda settings: None)
     monkeypatch.setattr(jobs_service, "session_scope", lambda *_args, **_kwargs: _job_session_scope(session))
@@ -152,19 +189,24 @@ def test_start_temporal_job_requires_existing_project(monkeypatch, tmp_path) -> 
         lambda *args, **kwargs: (sent.update(args=args, kwargs=kwargs) or SimpleNamespace(id="celery-task-2")),
     )
 
-    response = start_temporal_project_job(
-        "temporal-test",
-        settings=settings,
-        run_request=TemporalProjectRunRequest(change_threshold=0.6),
-    )
+    with caplog.at_level("INFO"):
+        response = start_temporal_project_job(
+            "temporal-test",
+            settings=settings,
+            run_request=TemporalProjectRunRequest(change_threshold=0.3),
+        )
 
     assert response.job_id.startswith("job-")
     assert response.celery_task_id == "celery-task-2"
     assert session.job is not None
     assert session.job.project_id == "temporal-test"
     assert session.job.project_db_id == session.project.id
-    assert session.job.raw_request["change_threshold"] == 0.6
-    assert sent["kwargs"]["kwargs"]["run_request_payload"] == {"change_threshold": 0.6}
+    assert session.job.raw_request["change_threshold"] == 0.3
+    assert sent["kwargs"]["kwargs"]["run_request_payload"] == {"change_threshold": 0.3}
+    assert not launch_lock.exists()
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert f"TEMPORAL_JOB_THRESHOLD_RECEIVED projectId=temporal-test jobId={response.job_id} changeThreshold=0.3" in messages
+    assert f"TEMPORAL_JOB_THRESHOLD_ENQUEUED projectId=temporal-test jobId={response.job_id} changeThreshold=0.3" in messages
 
 
 def test_start_temporal_job_does_not_enqueue_unreloadable_project(monkeypatch, tmp_path) -> None:
@@ -361,6 +403,8 @@ def test_mark_job_execution_failed_logs_persistence_error_without_raising(monkey
 
 def test_temporal_worker_persists_original_exception_before_reraising(monkeypatch, tmp_path) -> None:
     settings = Settings(runtime_cache_dir=tmp_path)
+    worker_lock = settings.wayback_tile_preflight_cache_dir / "worker.json.lock"
+    worker_lock.mkdir()
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(job_tasks, "_resolve_settings", lambda *_args, **_kwargs: settings)
@@ -388,6 +432,7 @@ def test_temporal_worker_persists_original_exception_before_reraising(monkeypatc
         "message": "RuntimeError: original temporal failure",
         "settings": settings,
     }
+    assert not worker_lock.exists()
 
 
 def test_get_job_response_normalizes_legacy_complete(monkeypatch, tmp_path) -> None:
@@ -518,3 +563,25 @@ def test_worker_effective_runtime_log_uses_selected_checkpoint_and_canonical_thr
     assert "checkpointEnvVar=APP_BANDON_CHECKPOINT_PATH" in messages
     assert f"checkpointPath={bandon_checkpoint.resolve()}" in messages
     assert "thresholdsSource=backend_settings_env semantic=0.42 change=0.37" in messages
+
+
+def test_worker_effective_runtime_log_uses_temporal_request_threshold_override(tmp_path, caplog) -> None:
+    settings = Settings(
+        runtime_cache_dir=tmp_path / "runtime",
+        change_threshold=0.5,
+        semantic_threshold=0.42,
+    )
+
+    with caplog.at_level("INFO"):
+        _log_worker_effective_backend(
+            job_id="job-1",
+            job_kind="temporal_project",
+            settings=settings,
+            change_threshold_override=0.3,
+            threshold_source="request_override",
+        )
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "CELERY_EFFECTIVE_THRESHOLD=0.3 jobId=job-1 jobKind=temporal_project" in messages
+    assert "CELERY_EFFECTIVE_THRESHOLDS source=request_override semantic=0.42 change=0.3" in messages
+    assert "thresholdsSource=request_override semantic=0.42 change=0.3" in messages

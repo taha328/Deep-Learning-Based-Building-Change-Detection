@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from src.config import Settings
 from src.db.models import JobRecord, ProjectRecord
 from src.db.session import session_scope
+from src.domain.wayback_tile_preflight_cache import cleanup_wayback_preflight_locks
 from src.jobs.celery_app import celery_app
 from src.jobs.exceptions import CeleryEnqueueError, JobNotFoundError, JobsDisabledError, RedisUnavailableError
 from src.jobs.schemas import JobResponse, JobStartResponse
@@ -27,6 +28,15 @@ from src.services.temporal_projects import get_temporal_project
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _temporal_threshold_log_values(
+    run_request: TemporalProjectRunRequest | None,
+    settings: Settings,
+) -> tuple[float, str]:
+    if run_request is not None and run_request.change_threshold is not None:
+        return run_request.change_threshold, "request_override"
+    return settings.change_threshold, "backend_settings_env"
 
 
 def _broker_url(settings: Settings) -> str:
@@ -125,6 +135,19 @@ def start_temporal_project_job(
             raw_request={"project_id": project_id, **(run_request.model_dump(exclude_none=True) if run_request else {})},
         ).job_id
     assert job_id is not None
+    threshold, threshold_source = _temporal_threshold_log_values(run_request, settings)
+    LOGGER.info(
+        "TEMPORAL_JOB_THRESHOLD_RECEIVED projectId=%s jobId=%s changeThreshold=%s source=%s",
+        project_id,
+        job_id,
+        threshold,
+        threshold_source,
+    )
+    cleanup_wayback_preflight_locks(
+        "temporal_project_job_launch",
+        settings=settings,
+        source="jobs_service",
+    )
     try:
         async_result = celery_app.send_task(
             "building_change.run_temporal_project",
@@ -143,6 +166,13 @@ def start_temporal_project_job(
         celery_task_id = async_result.id
         with session_scope(settings) as session:
             mark_job_enqueued(job_id=job_id, celery_task_id=async_result.id, session=session)
+        LOGGER.info(
+            "TEMPORAL_JOB_THRESHOLD_ENQUEUED projectId=%s jobId=%s changeThreshold=%s source=%s",
+            project_id,
+            job_id,
+            threshold,
+            threshold_source,
+        )
 
     if enqueue_error is not None:
         raise CeleryEnqueueError(

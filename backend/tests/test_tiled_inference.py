@@ -10,6 +10,7 @@ from rasterio.transform import from_origin
 
 from src.domain.tiled_inference import (
     InferenceTile,
+    PatchPrediction,
     TiledInferenceConfig,
     iter_inference_tiles,
     make_bandon_patch_predictor,
@@ -28,6 +29,7 @@ def _settings(tmp_path: Path, **overrides):
         "inference_tile_size": 1024,
         "inference_tile_overlap": 128,
         "inference_tile_batch_size": 1,
+        "inference_timing_enabled": False,
         "inference_max_in_memory_pixels": 25_000_000,
         "inference_heavy_batch_tile_threshold": 2000,
     }
@@ -81,7 +83,7 @@ def test_bandon_patch_predictor_uses_configured_threshold_not_runner_argmax(monk
         ),
     )
     predictor = make_bandon_patch_predictor(
-        settings=Settings(runtime_cache_dir=tmp_path / "runtime"),
+        settings=Settings(runtime_cache_dir=tmp_path / "runtime", bandon_inference_mode="cli_per_tile"),
         effective_backend="bandon_mps",
         threshold=0.35,
     )
@@ -97,6 +99,73 @@ def test_bandon_patch_predictor_uses_configured_threshold_not_runner_argmax(monk
     )
 
     assert np.array_equal(prediction.mask, np.ones((2, 2), dtype=bool))
+
+
+def test_bandon_patch_predictor_reuses_persistent_runner(monkeypatch, tmp_path: Path) -> None:
+    probability = np.array([[0.1, 0.9], [0.2, 0.8]], dtype=np.float32)
+
+    class FakePersistentRunner:
+        instances: list["FakePersistentRunner"] = []
+
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.calls: list[dict[str, object]] = []
+            self.closed = False
+            FakePersistentRunner.instances.append(self)
+
+        def predict_tile(self, **kwargs):
+            self.calls.append(kwargs)
+            reused = len(self.calls) > 1
+            return SimpleNamespace(
+                change_probability=probability,
+                change_mask=probability >= 0.5,
+                metadata={
+                    "child_timing_ms": {
+                        "model_load_count_this_prediction": 0 if reused else 1,
+                        "model_load_count_total": 1,
+                        "model_reused_numeric": 1 if reused else 0,
+                    }
+                },
+                parent_timing_ms={
+                    "persistent_worker_request_ms": 4.0,
+                    "persistent_worker_startup_wall_ms": 20.0 if not reused else 0.0,
+                    "bandon_output_read_ms": 1.0,
+                    "subprocess_wall_ms": 0.0,
+                },
+            )
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr("src.domain.bandon_runner.PersistentBandonRunner", FakePersistentRunner)
+    settings = Settings(
+        runtime_cache_dir=tmp_path / "runtime",
+        bandon_inference_mode="persistent_runner",
+        inference_timing_enabled=True,
+    )
+    predictor = make_bandon_patch_predictor(
+        settings=settings,
+        effective_backend="bandon_mps",
+        threshold=0.5,
+    )
+
+    for tile_index in (0, 1):
+        prediction = predictor(
+            tile=InferenceTile(index=tile_index, window=rasterio.windows.Window(0, 0, 2, 2)),
+            t1_rgb=np.zeros((2, 2, 3), dtype=np.uint8),
+            t2_rgb=np.zeros((2, 2, 3), dtype=np.uint8),
+            t1_valid_mask=None,
+            t2_valid_mask=None,
+            aoi_mask=None,
+            work_dir=tmp_path / f"work-{tile_index}",
+        )
+        assert np.array_equal(prediction.mask, probability >= 0.5)
+
+    assert len(FakePersistentRunner.instances) == 1
+    assert len(FakePersistentRunner.instances[0].calls) == 2
+    close = getattr(predictor, "close")
+    close()
+    assert FakePersistentRunner.instances[0].closed is True
 
 
 def test_inference_mode_switches_to_tiled_for_large_pixel_count(tmp_path: Path) -> None:
@@ -176,6 +245,110 @@ def test_tiled_inference_writes_raster_state_and_geojsonl(tmp_path: Path) -> Non
     assert state["processed_tiles"] == result.processed_tiles
     assert state["completed_chunk_count"] == result.processed_tiles
     assert len(state["completed_chunks"]) == result.processed_tiles
+    assert not (tmp_path / "out" / "timing_summary.json").exists()
+
+
+def test_tiled_inference_timing_enabled_writes_summary_and_tile_metadata(tmp_path: Path) -> None:
+    settings = _settings(tmp_path, inference_timing_enabled=True)
+    height, width = 32, 32
+    t1 = np.zeros((height, width, 3), dtype=np.uint8)
+    t2 = t1.copy()
+    t2[8:20, 8:20, :] = 255
+    t1_path = tmp_path / "t1.tif"
+    t2_path = tmp_path / "t2.tif"
+    _write_rgb(t1_path, t1)
+    _write_rgb(t2_path, t2)
+
+    def predictor(
+        *,
+        tile: InferenceTile,
+        t1_rgb: np.ndarray,
+        t2_rgb: np.ndarray,
+        t1_valid_mask: np.ndarray | None,
+        t2_valid_mask: np.ndarray | None,
+        aoi_mask: np.ndarray | None,
+        work_dir: Path,
+    ) -> PatchPrediction:
+        bandon_dir = work_dir / "bandon_run"
+        bandon_dir.mkdir(parents=True)
+        (bandon_dir / "run_metadata.json").write_text(
+            json.dumps({"runner_family": "bandon_mps", "existing": True}),
+            encoding="utf-8",
+        )
+        probability = np.full(t2_rgb.shape[:2], 0.5, dtype=np.float32)
+        mask = probability >= 0.2
+        return PatchPrediction(
+            probability=probability,
+            mask=mask,
+            metadata={
+                "patch_predictor_timing_ms": {
+                    "patch_png_write_ms": 1.0,
+                    "bandon_subprocess_wall_ms": 12.0,
+                    "bandon_persistent_request_ms": 0.0,
+                    "bandon_persistent_startup_wall_ms": 0.0,
+                    "bandon_output_read_ms": 2.0,
+                },
+                "child_timing_ms": {
+                    "child_total_wall_ms": 20.0,
+                    "model_load_count_this_prediction": 1,
+                    "model_load_count_total": 1,
+                    "model_reused_numeric": 0,
+                    "model_build_ms": 3.0,
+                    "checkpoint_load_ms": 4.0,
+                    "model_to_device_ms": 5.0,
+                    "input_preprocess_ms": 6.0,
+                    "forward_total_ms": 7.0,
+                    "output_write_ms": 8.0,
+                },
+                "bandon_runner_timing_ms": {"subprocess_wall_ms": 12.0},
+            },
+        )
+
+    result = run_tiled_inference(
+        t1_mosaic_path=t1_path,
+        t2_mosaic_path=t2_path,
+        t1_valid_mask_path=None,
+        t2_valid_mask_path=None,
+        output_dir=tmp_path / "out",
+        run_id="timed-run",
+        settings=settings,
+        config=TiledInferenceConfig(
+            tile_size=32,
+            overlap=4,
+            batch_size=1,
+            threshold=0.2,
+            max_in_memory_pixels=25_000_000,
+            heavy_batch_tile_threshold=2000,
+        ),
+        predictor=predictor,
+        release_t1="WB_2020_R04",
+        release_t2="WB_2026_R04",
+        max_tiles=1,
+    )
+
+    summary_path = tmp_path / "out" / "timing_summary.json"
+    tile_metadata_path = tmp_path / "out" / "tiles" / "000000" / "bandon_run" / "run_metadata.json"
+    assert summary_path.exists()
+    assert tile_metadata_path.exists()
+
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert summary["run_id"] == "timed-run"
+    assert summary["record_count"] == 1
+    assert summary["summary"]["tile_total_wall_ms"]["count"] == 1
+    assert summary["summary"]["bandon_subprocess_wall_ms"]["mean_ms"] == 12.0
+    assert summary["summary"]["bandon_persistent_request_ms"]["mean_ms"] == 0.0
+    assert summary["summary"]["child_model_load_count_this_prediction"]["mean_ms"] == 1.0
+    assert summary["summary"]["child_forward_total_ms"]["mean_ms"] == 7.0
+
+    tile_metadata = json.loads(tile_metadata_path.read_text(encoding="utf-8"))
+    assert tile_metadata["existing"] is True
+    assert tile_metadata["timing_enabled"] is True
+    assert tile_metadata["parent_timing_ms"]["bandon_subprocess_wall_ms"] == 12.0
+    assert tile_metadata["child_timing_ms"]["forward_total_ms"] == 7.0
+
+    state = json.loads(result.state_path.read_text(encoding="utf-8"))
+    assert state["mean_bandon_subprocess_wall_ms"] == 12.0
+    assert state["mean_child_forward_total_ms"] == 7.0
 
 
 def test_tiled_inference_resumes_completed_chunks(tmp_path: Path) -> None:

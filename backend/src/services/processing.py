@@ -40,7 +40,7 @@ from src.domain.postprocess import (
     remove_small_components,
     suppress_edge_hugging_components,
 )
-from src.domain.tiling import estimate_patch_count, intersecting_tiles_for_aoi
+from src.domain.tiling import estimate_patch_count, intersecting_tiles_for_aoi, tile_range_for_bbox
 from src.domain.wayback_metadata_cache import (
     acquire_wayback_metadata_cache_lock,
     build_wayback_metadata_cache_key,
@@ -50,11 +50,14 @@ from src.domain.wayback_metadata_cache import (
     write_wayback_metadata_cache_atomic,
 )
 from src.domain.wayback_tile_preflight_cache import (
+    WaybackTilePreflightCacheLockTimeout,
     acquire_wayback_tile_preflight_cache_lock,
     build_wayback_tile_preflight_cache_key,
     build_wayback_tile_preflight_cache_payload,
+    cleanup_stale_wayback_tile_preflight_locks,
     get_wayback_tile_preflight_cache_path,
     read_wayback_tile_preflight_cache,
+    wayback_tile_preflight_cache_lock_path,
     write_wayback_tile_preflight_cache_atomic,
 )
 from src.domain.vectorize import (
@@ -475,6 +478,24 @@ def _write_manifest_with_timing(
         LOGGER.warning("Failed to refresh manifest with timing report for %s: %s", timing.run_id, exc)
 
 
+def _maybe_create_tiled_export_bundle(
+    *,
+    response: RunResponse,
+    settings: Settings,
+    result_dir: Path,
+    request_hash: str,
+) -> RunResponse:
+    if not settings.auto_generate_tiled_export_bundle:
+        LOGGER.info("TILED_INFERENCE_EXPORT_BUNDLE_SKIPPED runId=%s reason=disabled_by_default", request_hash)
+        return response
+    try:
+        response.downloadable_zip_path = str(create_export_bundle_from_manifest(result_dir))
+        save_cached_response(settings, request_hash, response)
+    except Exception as exc:  # Export bundle is optional for the heavy tiled path.
+        LOGGER.warning("TILED_INFERENCE_EXPORT_BUNDLE_SKIPPED runId=%s reason=%s", request_hash, exc)
+    return response
+
+
 def _sha256_file_or_none(path: Path | None) -> str | None:
     if path is None or not path.is_file():
         return None
@@ -775,6 +796,12 @@ def _summarize_release_metadata_for_request(
     return summary
 
 
+def _effective_wayback_tilemap_preflight_workers(settings: Settings) -> tuple[int, str]:
+    if settings.wayback_tilemap_preflight_workers is not None:
+        return settings.wayback_tilemap_preflight_workers, "explicit"
+    return settings.wayback_metadata_workers, "wayback_metadata_workers_default"
+
+
 def _preflight_release_tile_availability_for_request(
     settings: Settings,
     *,
@@ -799,8 +826,103 @@ def _preflight_release_tile_availability_for_request(
     cache_path_exists = cache_path.exists()
     cache_hit = False
     tilemap: TileAvailabilitySummary | None = None
+    lock_path = wayback_tile_preflight_cache_lock_path(cache_path)
+    worker_count, worker_source = _effective_wayback_tilemap_preflight_workers(settings)
+
+    def _candidate_tile_count() -> int:
+        x_min, x_max, y_min, y_max = tile_range_for_bbox(aoi_bbox, zoom)
+        return max(0, x_max - x_min + 1) * max(0, y_max - y_min + 1)
+
+    def _lock_age_seconds() -> float | None:
+        try:
+            return time.time() - lock_path.stat().st_mtime
+        except OSError:
+            return None
+
+    def _read_cache() -> TileAvailabilitySummary | None:
+        nonlocal cache_path_exists
+        cache_path_exists = cache_path.exists()
+        return read_wayback_tile_preflight_cache(
+            cache_path,
+            cache_key=cache_key,
+            ttl_seconds=settings.wayback_tile_preflight_cache_ttl_seconds,
+        )
+
+    def _read_cache_after_lock_timeout(operation: str) -> TileAvailabilitySummary | None:
+        nonlocal cache_hit
+        appeared = _read_cache()
+        if appeared is not None:
+            cache_hit = True
+            LOGGER.info(
+                "PREFLIGHT_LOCK_TIMEOUT_CACHE_APPEARED cacheKey=%s cachePath=%s lockPath=%s operation=%s",
+                cache_key,
+                cache_path,
+                lock_path,
+                operation,
+            )
+            return appeared
+        LOGGER.warning(
+            "PREFLIGHT_CACHE_LOCK_TIMEOUT cacheKey=%s cachePath=%s lockPath=%s operation=%s cacheExists=%s lockAgeSeconds=%s",
+            cache_key,
+            cache_path,
+            lock_path,
+            operation,
+            cache_path.exists(),
+            _lock_age_seconds(),
+        )
+        return None
+
+    def _read_cache_with_short_lock() -> TileAvailabilitySummary | None:
+        nonlocal cache_hit
+        LOGGER.info(
+            "PREFLIGHT_LOCK_WAIT cacheKey=%s cachePath=%s lockPath=%s operation=read",
+            cache_key,
+            cache_path,
+            lock_path,
+        )
+        try:
+            with acquire_wayback_tile_preflight_cache_lock(cache_path):
+                cached = _read_cache()
+        except WaybackTilePreflightCacheLockTimeout:
+            return _read_cache_after_lock_timeout("read")
+        if cached is not None:
+            cache_hit = True
+            LOGGER.info(
+                "PREFLIGHT_CACHE_HIT cacheKey=%s cachePath=%s release=%s zoom=%s",
+                cache_key,
+                cache_path,
+                release.identifier,
+                zoom,
+            )
+            return cached
+        LOGGER.info(
+            "PREFLIGHT_CACHE_MISS cacheKey=%s cachePath=%s release=%s zoom=%s",
+            cache_key,
+            cache_path,
+            release.identifier,
+            zoom,
+        )
+        return None
 
     def _live_preflight() -> TileAvailabilitySummary:
+        candidate_count = _candidate_tile_count()
+        LOGGER.info(
+            "PREFLIGHT_WORKERS_EFFECTIVE release=%s zoom=%s workers=%s source=%s metadataWorkers=%s",
+            release.identifier,
+            zoom,
+            worker_count,
+            worker_source,
+            settings.wayback_metadata_workers,
+        )
+        LOGGER.info(
+            "PREFLIGHT_REMOTE_START release=%s zoom=%s cacheKey=%s candidateTileCount=%s workers=%s",
+            release.identifier,
+            zoom,
+            cache_key,
+            candidate_count,
+            worker_count,
+        )
+        remote_start = time.perf_counter_ns()
         session_setup_start = time.perf_counter_ns()
         session = build_session(settings)
         _safe_add_timing_stage(
@@ -821,50 +943,96 @@ def _preflight_release_tile_availability_for_request(
             ),
         )
         try:
-            return preflight_wayback_tile_availability(
+            summary = preflight_wayback_tile_availability(
                 session,
                 release,
                 aoi_bbox,
                 zoom=zoom,
-                max_workers=settings.wayback_metadata_workers,
+                max_workers=worker_count,
             )
+            LOGGER.info(
+                "PREFLIGHT_REMOTE_COMPLETE release=%s zoom=%s cacheKey=%s candidateTileCount=%s "
+                "availableTileCount=%s failedCheckCount=%s durationMs=%.3f",
+                release.identifier,
+                zoom,
+                cache_key,
+                summary.candidate_count,
+                summary.available_count,
+                summary.failed_check_count,
+                _elapsed_ms(remote_start),
+            )
+            return summary
         finally:
             _close_session_if_possible(session)
+
+    def _write_cache_with_short_lock(live_tilemap: TileAvailabilitySummary) -> TileAvailabilitySummary:
+        nonlocal cache_hit, cache_path_exists
+        LOGGER.info(
+            "PREFLIGHT_LOCK_WAIT cacheKey=%s cachePath=%s lockPath=%s operation=write",
+            cache_key,
+            cache_path,
+            lock_path,
+        )
+        try:
+            with acquire_wayback_tile_preflight_cache_lock(cache_path):
+                cached = _read_cache()
+                if cached is not None:
+                    cache_hit = True
+                    LOGGER.info(
+                        "PREFLIGHT_CACHE_RACE_HIT cacheKey=%s cachePath=%s release=%s zoom=%s",
+                        cache_key,
+                        cache_path,
+                        release.identifier,
+                        zoom,
+                    )
+                    return cached
+                payload = build_wayback_tile_preflight_cache_payload(
+                    settings=settings,
+                    cache_key=cache_key,
+                    release=release,
+                    bbox=aoi_bbox,
+                    aoi_geojson=None,
+                    zoom=zoom,
+                    tilemap=live_tilemap,
+                    ttl_seconds=settings.wayback_tile_preflight_cache_ttl_seconds,
+                )
+                write_wayback_tile_preflight_cache_atomic(cache_path, payload)
+                LOGGER.info(
+                    "PREFLIGHT_CACHE_WRITE cacheKey=%s cachePath=%s release=%s zoom=%s",
+                    cache_key,
+                    cache_path,
+                    release.identifier,
+                    zoom,
+                )
+                return live_tilemap
+        except WaybackTilePreflightCacheLockTimeout:
+            appeared = _read_cache_after_lock_timeout("write")
+            return appeared if appeared is not None else live_tilemap
+        except Exception as exc:
+            LOGGER.warning("Failed to write Wayback tile preflight cache for %s: %s", cache_key, exc)
+            return live_tilemap
 
     preflight_start = time.perf_counter_ns()
     try:
         if cache_enabled:
-            try:
-                with acquire_wayback_tile_preflight_cache_lock(cache_path):
-                    cache_path_exists = cache_path.exists()
-                    tilemap = read_wayback_tile_preflight_cache(
-                        cache_path,
-                        cache_key=cache_key,
-                        ttl_seconds=settings.wayback_tile_preflight_cache_ttl_seconds,
+            if settings.wayback_tile_preflight_stale_lock_cleanup_enabled:
+                try:
+                    cleanup_stale_wayback_tile_preflight_locks(
+                        settings.wayback_tile_preflight_cache_dir,
+                        stale_seconds=settings.wayback_tile_preflight_stale_lock_seconds,
                     )
-                    cache_hit = tilemap is not None
-                    if tilemap is None:
-                        tilemap = _live_preflight()
-                        try:
-                            payload = build_wayback_tile_preflight_cache_payload(
-                                settings=settings,
-                                cache_key=cache_key,
-                                release=release,
-                                bbox=aoi_bbox,
-                                aoi_geojson=None,
-                                zoom=zoom,
-                                tilemap=tilemap,
-                                ttl_seconds=settings.wayback_tile_preflight_cache_ttl_seconds,
-                            )
-                            write_wayback_tile_preflight_cache_atomic(cache_path, payload)
-                        except Exception as exc:
-                            LOGGER.warning("Failed to write Wayback tile preflight cache for %s: %s", cache_key, exc)
+                except Exception as exc:
+                    LOGGER.warning("Wayback tile preflight stale lock cleanup failed for %s: %s", cache_key, exc)
+            try:
+                tilemap = _read_cache_with_short_lock()
             except Exception as exc:
                 LOGGER.warning("Wayback tile preflight cache lookup failed for %s: %s", cache_key, exc)
                 tilemap = None
                 cache_hit = False
         if tilemap is None:
             tilemap = _live_preflight()
+            if cache_enabled:
+                tilemap = _write_cache_with_short_lock(tilemap)
     except Exception as exc:
         _safe_add_timing_stage(
             timing,
@@ -1926,11 +2094,12 @@ def run_detection(
                 ),
                 run_metadata={**run_identity, "inference_mode": "tiled", "tiled_inference": tiled_result.metadata, "imagery_sources": imagery_source_diagnostics},
             )
-            try:
-                response.downloadable_zip_path = str(create_export_bundle_from_manifest(result_dir))
-                save_cached_response(settings, prepared.request_hash, response)
-            except Exception as exc:  # Export bundle is optional for the heavy tiled path.
-                LOGGER.warning("TILED_INFERENCE_EXPORT_BUNDLE_SKIPPED runId=%s reason=%s", prepared.request_hash, exc)
+            response = _maybe_create_tiled_export_bundle(
+                response=response,
+                settings=settings,
+                result_dir=result_dir,
+                request_hash=prepared.request_hash,
+            )
             _report(progress, 1.0, "Completed")
             run_succeeded = True
             return response

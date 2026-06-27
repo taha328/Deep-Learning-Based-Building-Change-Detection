@@ -14,6 +14,11 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
+import {
+  formatGeometryTypeLabel,
+  formatPreflightDisplayStatus,
+  formatStorageStrategyLabel,
+} from "@/features/temporal/display-labels";
 import { useI18n } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 
@@ -208,8 +213,8 @@ export function ReferenceLayerImportModal({
                 disabled={scope === "full_layer"}
               >
                 <option value="auto">{t("reference_layer.strategy_auto")}</option>
-                <option value="geojson">{t("reference_layer.strategy_geojson")}</option>
-                <option value="pmtiles">{t("reference_layer.strategy_pmtiles")}</option>
+                <option value="geojson">Affichage standard</option>
+                <option value="pmtiles">Affichage optimisé</option>
               </Select>
             </div>
           </div>
@@ -251,12 +256,15 @@ export function ReferenceLayerImportModal({
               </div>
               <dl className="grid gap-2 text-caption text-muted-foreground sm:grid-cols-2">
                 <div><dt>{t("reference_layer.format")}</dt><dd className="text-foreground">{preflight.original_format}</dd></div>
-                <div><dt>{t("reference_layer.kind")}</dt><dd className="text-foreground">{preflight.layer_kind} / {preflight.geometry_type}</dd></div>
+                <div><dt>{t("reference_layer.kind")}</dt><dd className="text-foreground">{formatGeometryTypeLabel(preflight.geometry_type)}</dd></div>
                 <div><dt>{t("reference_layer.crs")}</dt><dd className="text-foreground">{preflight.crs ?? t("common.unknown")}</dd></div>
                 <div><dt>{t("reference_layer.size")}</dt><dd className="text-foreground">{formatBytes(preflight.file_size_bytes)}</dd></div>
                 <div><dt>{t("reference_layer.features")}</dt><dd className="text-foreground">{preflight.feature_count ?? t("common.not_available")}</dd></div>
-                <div><dt>{t("reference_layer.chosen_strategy")}</dt><dd className="text-foreground">{preflight.storage_strategy}</dd></div>
+                <div><dt>{t("reference_layer.chosen_strategy")}</dt><dd className="text-foreground">{formatStorageStrategyLabel(preflight.storage_strategy)}</dd></div>
               </dl>
+              <p className="mt-3 rounded border border-border bg-surface px-3 py-2 text-caption text-foreground">
+                {formatPreflightDisplayStatus(preflight)}
+              </p>
               {preflight.bounds_wgs84 ? (
                 <p className="mt-3 truncate text-caption text-muted-foreground">
                   {t("reference_layer.bounds")}: [{preflight.bounds_wgs84.map((value) => value.toFixed(4)).join(", ")}]
@@ -264,10 +272,8 @@ export function ReferenceLayerImportModal({
               ) : null}
               {Object.keys(preflight.tool_status).length ? (
                 <div className="mt-3 space-y-1 text-caption text-muted-foreground">
-                  <p>{t("reference_layer.tool_status")}</p>
-                  <p>{preflight.tool_status.tippecanoe ? `tippecanoe: ${preflight.tool_status.tippecanoe}` : null}</p>
-                  <p>{preflight.tool_status.pmtiles_cli ? `pmtiles: ${preflight.tool_status.pmtiles_cli}` : null}</p>
-                  {preflight.tool_status.reason ? <p>{preflight.tool_status.reason}</p> : null}
+                  <p>Détails techniques</p>
+                  <p>Les détails avancés ont été vérifiés pendant la préparation de la couche.</p>
                 </div>
               ) : null}
               {[...preflight.warnings, ...preflight.errors].length ? (

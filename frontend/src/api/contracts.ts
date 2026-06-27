@@ -347,6 +347,62 @@ export const temporalProjectSummarySchema = z.object({
   download_bundle_path: z.string().nullable().optional(),
 });
 
+export const temporalCompactArtifactSchema = artifactSchema
+  .extend({
+    exists: z.boolean().default(true),
+    empty: z.boolean().default(false),
+    kind: z.enum(["vector_tilejson", "geojson_fallback", "empty_geojson"]).nullable().optional(),
+    source_layer: z.string().nullable().optional(),
+    geojson_fallback_url: z.string().nullable().optional(),
+  })
+  .partial({
+    name: true,
+    path: true,
+    media_type: true,
+    description: true,
+  });
+
+export const temporalCompactReferenceImagerySchema = temporalReferenceImagerySchema.extend({
+  exists: z.boolean().default(false),
+  kind: z.enum(["raster_tilejson"]).nullable().optional(),
+});
+
+export const temporalCompactMilestoneSchema = z.object({
+  release_identifier: z.string(),
+  label: z.string().nullable().optional(),
+  release_date: z.string().nullable().optional(),
+  status: temporalMilestoneStatusSchema.default("pending"),
+  source_mode: temporalSourceModeSchema.default("automated"),
+  warnings: z.array(z.string()).default([]),
+  error_message: z.string().nullable().optional(),
+  bounds: z.array(z.number()).nullable().optional(),
+  bbox: z.array(z.number()).nullable().optional(),
+  center: z.array(z.number()).nullable().optional(),
+  reference_imagery: temporalCompactReferenceImagerySchema.nullable().optional(),
+  metrics: temporalMilestoneMetricsSchema.nullable().optional(),
+  artifacts: z.record(temporalCompactArtifactSchema).default({}),
+});
+
+export const temporalCompactProjectSchema = z.object({
+  id: z.string(),
+  project_id: z.string().optional(),
+  name: z.string(),
+  status: z.string().nullable().optional(),
+  project_dir: z.string().nullable().optional(),
+  semantics: temporalSemanticsSchema.default("expansion_only"),
+  created_at: z.string(),
+  updated_at: z.string(),
+  download_bundle_path: z.string().nullable().optional(),
+  aoi_geojson: z.record(z.any()).nullable().optional(),
+  bounds: z.array(z.number()).nullable().optional(),
+  bbox: z.array(z.number()).nullable().optional(),
+  center: z.array(z.number()).nullable().optional(),
+  milestone_count: z.number().int(),
+  complete_milestone_count: z.number().int(),
+  milestones: z.array(temporalCompactMilestoneSchema).default([]),
+  loading_mode: z.literal("compact"),
+});
+
 export const temporalProjectSaveResponseSchema = z.object({
   project_id: z.string(),
   updated_at: z.string(),
@@ -408,6 +464,7 @@ export type TemporalReferenceImagery = z.infer<typeof temporalReferenceImagerySc
 export type TemporalMilestone = z.infer<typeof temporalMilestoneSchema>;
 export type TemporalProject = z.infer<typeof temporalProjectSchema>;
 export type TemporalProjectSummary = z.infer<typeof temporalProjectSummarySchema>;
+export type TemporalCompactProject = z.infer<typeof temporalCompactProjectSchema>;
 export type TemporalProjectSaveResponse = z.infer<typeof temporalProjectSaveResponseSchema>;
 export type TemporalPairEstimate = z.infer<typeof temporalPairEstimateSchema>;
 export type TemporalProjectValidationResponse = z.infer<typeof temporalProjectValidationResponseSchema>;

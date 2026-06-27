@@ -1,4 +1,4 @@
-export const DEFAULT_CHANGE_THRESHOLD = 0.5;
+export const DEFAULT_CHANGE_THRESHOLD = 0.3;
 export const MIN_CHANGE_THRESHOLD = 0.01;
 export const MAX_CHANGE_THRESHOLD = 0.99;
 
@@ -13,7 +13,7 @@ export function parseChangeThresholdInput(value: string): number | null {
   if (!value.trim()) {
     return null;
   }
-  const parsed = Number(value);
+  const parsed = Number(value.trim().replace(",", "."));
   if (!Number.isFinite(parsed) || parsed < MIN_CHANGE_THRESHOLD || parsed > MAX_CHANGE_THRESHOLD) {
     return null;
   }

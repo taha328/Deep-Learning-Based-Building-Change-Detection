@@ -2,10 +2,15 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  buildTemporalPeriodLabel,
   createActiveRunProgress,
   createCompletedRunProgress,
   createErrorRunProgress,
+  formatArchiveDateDmy,
+  friendlyTemporalStageLabel,
   shouldShowExecutionProgressPanel,
+  temporalGlobalProgressPercent,
+  temporalPairProgressPercent,
   type RunProgressState,
 } from "./run-progress.ts";
 
@@ -77,4 +82,68 @@ test("execution progress panel remains visible when an error message exists", ()
     ),
     true,
   );
+});
+
+test("archive dates render as DD/MM/YYYY", () => {
+  assert.equal(formatArchiveDateDmy("2025-03-27"), "27/03/2025");
+  assert.equal(formatArchiveDateDmy("2026-05-28T00:00:00Z"), "28/05/2026");
+  assert.equal(formatArchiveDateDmy(null), null);
+});
+
+test("temporal period label prefers archive dates over release identifiers", () => {
+  const label = buildTemporalPeriodLabel({
+    currentPairIndex: 2,
+    totalPairCount: 4,
+    pairFraction: 0.36,
+    pairStage: "Running tiled local BANDON change detection",
+    fromReleaseIdentifier: "WB_2025_R03",
+    toReleaseIdentifier: "WB_2026_R05",
+    fromReleaseDate: "2025-03-27",
+    toReleaseDate: "2026-05-28",
+  });
+
+  assert.equal(label, "Période en cours : 27/03/2025 → 28/05/2026");
+  assert.equal(label.includes("WB_"), false);
+});
+
+test("temporal period label has a clean missing-date fallback", () => {
+  assert.equal(buildTemporalPeriodLabel(null), "Période en cours non disponible");
+  assert.equal(
+    buildTemporalPeriodLabel({
+      currentPairIndex: 1,
+      totalPairCount: 2,
+      pairFraction: null,
+      pairStage: null,
+      fromReleaseIdentifier: null,
+      toReleaseIdentifier: null,
+      fromReleaseDate: null,
+      toReleaseDate: null,
+    }),
+    "Période en cours non disponible",
+  );
+});
+
+test("temporal pair and global progress use real pair fraction", () => {
+  const details = {
+    currentPairIndex: 2,
+    totalPairCount: 4,
+    pairFraction: 0.36,
+    pairStage: "Running tiled local BANDON change detection",
+    fromReleaseIdentifier: "WB_2025_R03",
+    toReleaseIdentifier: "WB_2026_R05",
+    fromReleaseDate: "2025-03-27",
+    toReleaseDate: "2026-05-28",
+  };
+
+  assert.equal(Math.round(temporalPairProgressPercent(details) ?? -1), 36);
+  assert.equal(Math.round(temporalGlobalProgressPercent(details) ?? -1), 34);
+});
+
+test("backend stages map to friendly temporal stage labels", () => {
+  assert.equal(friendlyTemporalStageLabel("Checking tile availability"), "Préparation des images");
+  assert.equal(friendlyTemporalStageLabel("Downloading Wayback imagery"), "Téléchargement des images");
+  assert.equal(friendlyTemporalStageLabel("Running tiled local BANDON change detection"), "Analyse des changements");
+  assert.equal(friendlyTemporalStageLabel("Vectorizing results"), "Génération des résultats");
+  assert.equal(friendlyTemporalStageLabel("Persisting compact job metadata"), "Finalisation");
+  assert.equal(friendlyTemporalStageLabel("unexpected backend stage"), "Traitement en cours");
 });

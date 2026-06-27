@@ -1,0 +1,23 @@
+{
+  "binary_mask_mismatch_count": 0,
+  "max_abs_diff": 0.0,
+  "mean_abs_diff": 0.0,
+  "new_polygon_bounds": null,
+  "new_polygon_count": 0,
+  "new_polygon_total_area_m2": 0.0,
+  "old_polygon_bounds": null,
+  "old_polygon_count": 0,
+  "old_polygon_total_area_m2": 0.0,
+  "p99_abs_diff": 0.0,
+  "polygon_count_delta": 0,
+  "polygon_total_area_delta_m2": 0.0,
+  "probability_raster_metadata_equal": {
+    "bounds": true,
+    "crs": true,
+    "dtype": true,
+    "nodata": true,
+    "shape": true,
+    "transform": true
+  },
+  "valid_pixel_count": 1048576
+}

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+from io import BytesIO
 from pathlib import Path
 import re
 import xml.etree.ElementTree as ET
@@ -10,6 +11,7 @@ import zipfile
 from fastapi.testclient import TestClient
 import geopandas as gpd
 import numpy as np
+from openpyxl import load_workbook
 import pytest
 import rasterio
 from rasterio.transform import from_bounds
@@ -229,13 +231,14 @@ def test_temporal_results_export_formats_are_generated_under_project_exports(tmp
     assert "features" not in json.dumps(summary)
 
     tsv = paths["tsv"].read_text()
-    assert tsv.splitlines()[0].split("\t")[:6] == [
+    assert tsv.splitlines()[0].split("\t") == [
         "project_id",
         "project_name",
-        "run_id",
-        "release_identifier",
         "date",
         "layer_type",
+        "area_m2",
+        "centroid_lon",
+        "centroid_lat",
     ]
     assert "\"geometry\"" not in tsv
 
@@ -282,6 +285,102 @@ def test_temporal_results_export_formats_are_generated_under_project_exports(tmp
         assert "OpenStreetMap" not in qgs
         assert "Fond de carte en ligne" not in qgs
         assert 'name="Synthèse"' in qgs
+
+
+def test_temporal_results_xlsx_schema_excludes_internal_fields_and_uses_150_zoom(tmp_path: Path) -> None:
+    settings = _save_project(tmp_path)
+    workbook_path = build_temporal_results_export_file("temporal-export-formats-test", "xlsx", settings=settings)
+
+    workbook = load_workbook(workbook_path, data_only=True)
+
+    assert workbook.sheetnames == ["Synthèse", "Jalons", "Détails blocs"]
+    assert all(sheet.sheet_view.zoomScale == 150 for sheet in workbook.worksheets if sheet.sheet_state == "visible")
+    assert all(sheet.sheet_view.zoomScaleNormal == 150 for sheet in workbook.worksheets if sheet.sheet_state == "visible")
+
+    summary_values = [
+        value
+        for row in workbook["Synthèse"].iter_rows(values_only=True)
+        for value in row
+        if value is not None
+    ]
+    assert "Backend utilisé" not in summary_values
+    assert "bandon_mps" not in summary_values
+    assert "Identifiant du projet" in summary_values
+    assert "Nom du projet" in summary_values
+    assert "Date d'export" in summary_values
+    assert "Nombre de jalons" in summary_values
+    assert "Système de coordonnées utilisé pour les surfaces" in summary_values
+
+    milestones = workbook["Jalons"]
+    milestone_headers = [cell.value for cell in milestones[1]]
+    assert milestone_headers[0] == "Date d'archive"
+    assert "Jalon" not in milestone_headers
+    assert milestones.max_column == len(milestone_headers)
+
+    blocks = workbook["Détails blocs"]
+    block_headers = [cell.value for cell in blocks[1]]
+    assert block_headers == [
+        "Date d'archive",
+        "Identifiant bloc",
+        "Surface (m²)",
+        "Type géométrie",
+        "Longitude centroïde",
+        "Latitude centroïde",
+    ]
+    assert blocks.max_column == len(block_headers)
+
+
+def test_temporal_results_tsv_powerbi_schema_ordering_and_row_specific_areas(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    project = _three_milestone_project()
+    _save_project_payload(settings, project)
+
+    path = build_temporal_results_export_file(project.project_id, "tsv", settings=settings)
+    lines = path.read_text(encoding="utf-8").splitlines()
+    header = lines[0].split("\t")
+
+    assert header == [
+        "project_id",
+        "project_name",
+        "date",
+        "layer_type",
+        "area_m2",
+        "centroid_lon",
+        "centroid_lat",
+    ]
+    removed_columns = {
+        "run_id",
+        "release_identifier",
+        "growth_label",
+        "feature_count",
+        "added_surface_m2",
+        "current_footprint_m2",
+    }
+    assert not (set(header) & removed_columns)
+    assert all(len(line.split("\t")) == 7 for line in lines)
+
+    rows = [dict(zip(header, line.split("\t", maxsplit=6))) for line in lines[1:]]
+    assert [row["date"] for row in rows] == sorted(row["date"] for row in rows)
+    assert all(re.fullmatch(r"\d{4}-\d{2}-\d{2}", row["date"]) for row in rows)
+
+    known_layer_order = {"additions": 0, "buffer_10m": 1, "buffer_15m": 2, "buffer_20m": 3}
+    for date_value in sorted({row["date"] for row in rows}):
+        layers_for_date = [row["layer_type"] for row in rows if row["date"] == date_value]
+        assert layers_for_date == sorted(layers_for_date, key=lambda layer: known_layer_order[layer])
+
+    for row in rows:
+        assert row["area_m2"]
+        float(row["area_m2"])
+        float(row["centroid_lon"])
+        float(row["centroid_lat"])
+
+    rows_by_date_layer = {(row["date"], row["layer_type"]): row for row in rows}
+    for date_value in {"2020-01-15", "2022-01-15"}:
+        additions_area = float(rows_by_date_layer[(date_value, "additions")]["area_m2"])
+        for layer_type in ("buffer_10m", "buffer_15m", "buffer_20m"):
+            buffer_area = float(rows_by_date_layer[(date_value, layer_type)]["area_m2"])
+            assert buffer_area != pytest.approx(additions_area)
+            assert buffer_area > additions_area
 
 
 def test_temporal_shapefile_labels_baseline_exclusion_and_layer_order() -> None:
@@ -748,6 +847,15 @@ def test_temporal_results_export_route_headers_and_unsupported_format(tmp_path: 
         shapefile = client.get("/api/temporal-projects/temporal-export-formats-test/exports/results_shapefile.zip")
         assert shapefile.status_code == 200
         assert shapefile.headers["content-type"].startswith("application/zip")
+
+        xlsx = client.get("/api/temporal-projects/temporal-export-formats-test/exports/results.xlsx")
+        assert xlsx.status_code == 200
+        assert xlsx.headers["content-type"].startswith(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        workbook = load_workbook(BytesIO(xlsx.content), data_only=True)
+        assert workbook.sheetnames == ["Synthèse", "Jalons", "Détails blocs"]
+        assert all(sheet.sheet_view.zoomScale == 150 for sheet in workbook.worksheets)
 
         unsupported = client.get("/api/temporal-projects/temporal-export-formats-test/exports/results.parquet")
         assert unsupported.status_code == 400

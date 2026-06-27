@@ -2,7 +2,16 @@ import { CheckCircle2, Clock3, Loader2, XCircle } from "lucide-react";
 
 import { useI18n } from "@/lib/i18n";
 import { Progress } from "@/components/ui/progress";
-import { PIPELINE_STAGES, formatRunStatus, getStageState, type RunProgressState } from "@/lib/run-progress";
+import {
+  PIPELINE_STAGES,
+  buildTemporalPeriodLabel,
+  formatRunStatus,
+  friendlyTemporalStageLabel,
+  getStageState,
+  temporalGlobalProgressPercent,
+  temporalPairProgressPercent,
+  type RunProgressState,
+} from "@/lib/run-progress";
 import { cn } from "@/lib/utils";
 
 function formatEta(etaSeconds: number | null): string | null {
@@ -37,12 +46,63 @@ function localizeProgressDetail(detail: string, t: (key: string) => string): str
   }
 }
 
+function tileProgressPercent(progress: RunProgressState): number | null {
+  const details = progress.tileDetails;
+  if (!details || details.totalTileCount <= 0) {
+    return null;
+  }
+  return Math.max(0, Math.min(100, (details.processedTileCount / details.totalTileCount) * 100));
+}
+
 export function RunProgressPanel({ progress }: { progress: RunProgressState }) {
   const { t } = useI18n();
   const eta = formatEta(progress.etaSeconds);
   const tileEta = formatEta(progress.tileDetails?.etaSeconds ?? null);
   const statusText = formatRunStatus(progress, t);
   const visibleStages = PIPELINE_STAGES.filter((stage) => stage.key !== "queue");
+  const temporalDetails = progress.temporalPairDetails;
+  const globalPercent = temporalGlobalProgressPercent(temporalDetails);
+  const pairPercent = temporalPairProgressPercent(temporalDetails);
+  const imagePreparationPercent = tileProgressPercent(progress);
+
+  if (temporalDetails) {
+    const stageLabel = friendlyTemporalStageLabel(temporalDetails.pairStage ?? progress.stageLabel ?? progress.detail);
+    const pairStep =
+      temporalDetails.currentPairIndex !== null && temporalDetails.totalPairCount !== null
+        ? `Étape ${temporalDetails.currentPairIndex} sur ${temporalDetails.totalPairCount}`
+        : "Étape en cours";
+
+    return (
+      <section className="space-y-4 rounded-lg border border-border bg-surface p-4">
+        <div className="space-y-3 rounded-md border border-border bg-card px-3 py-3">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="text-sm font-medium text-foreground">Progression globale du projet</p>
+              <p className="mt-1 text-sm text-muted-foreground">{pairStep}</p>
+            </div>
+            <p className="text-right text-xs text-muted-foreground">
+              {globalPercent !== null ? `Analyse globale : ${Math.round(globalPercent)} %` : "Analyse globale en cours"}
+            </p>
+          </div>
+          {globalPercent !== null ? <Progress value={globalPercent} className="h-2 bg-secondary" indicatorClassName="bg-primary" /> : null}
+        </div>
+
+        <div className="space-y-3 rounded-md border border-border bg-card px-3 py-3">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="text-sm font-medium text-foreground">Analyse de la période en cours</p>
+              <p className="mt-1 text-sm text-muted-foreground">{buildTemporalPeriodLabel(temporalDetails)}</p>
+            </div>
+            <p className="text-right text-xs text-muted-foreground">
+              {pairPercent !== null ? `Avancement de cette période : ${Math.round(pairPercent)} %` : "Analyse en cours..."}
+            </p>
+          </div>
+          {pairPercent !== null ? <Progress value={pairPercent} className="h-2 bg-secondary" indicatorClassName="bg-primary" /> : null}
+          <p className="rounded-md border border-border bg-surface px-3 py-2 text-xs text-muted-foreground">{stageLabel}</p>
+        </div>
+      </section>
+    );
+  }
 
   return (
     <section className="space-y-4 rounded-lg border border-border bg-surface p-4">
@@ -60,25 +120,26 @@ export function RunProgressPanel({ progress }: { progress: RunProgressState }) {
       <Progress value={progress.percent} className="h-2 bg-secondary" indicatorClassName="bg-primary" />
 
       {progress.tileDetails ? (
-        <div className="rounded-md border border-border bg-card px-3 py-2 text-xs text-muted-foreground">
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
-            <span className="font-medium text-foreground">Wayback tiles</span>
-            <span>{progress.tileDetails.processedTileCount}/{progress.tileDetails.totalTileCount}</span>
-            <span>{progress.tileDetails.tileRatePerSec !== null ? `${progress.tileDetails.tileRatePerSec.toFixed(1)} tiles/s` : "rate pending"}</span>
-            <span>{tileEta ? `ETA ${tileEta}` : "ETA pending"}</span>
+        <div className="space-y-2 rounded-md border border-border bg-card px-3 py-3 text-xs text-muted-foreground">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p className="font-medium text-foreground">Préparation des images satellite</p>
+              <p className="mt-1">
+                {progress.tileDetails.fallbackApplied
+                  ? "Les images disponibles sont préparées à une résolution compatible avec la zone sélectionnée."
+                  : "Les images nécessaires à l'analyse sont en cours de préparation."}
+              </p>
+            </div>
+            <p className="text-right">
+              {imagePreparationPercent !== null
+                ? `Avancement des images : ${Math.round(imagePreparationPercent)} %`
+                : "Préparation en cours"}
+            </p>
           </div>
-          <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1">
-            <span>release {progress.tileDetails.releaseIdentifier ?? "unknown"}</span>
-            <span>z{progress.tileDetails.effectiveZoom ?? "?"}</span>
-            {progress.tileDetails.fallbackApplied ? <span>fallback from z{progress.tileDetails.preferredZoom ?? "?"}</span> : null}
-            <span>{progress.tileDetails.cacheHitCount} cache hits</span>
-            <span>{progress.tileDetails.downloadedTileCount} downloaded</span>
-            <span>{progress.tileDetails.missingTileCount} missing</span>
-            <span>{progress.tileDetails.failedTileCount} failed</span>
-            <span>{progress.tileDetails.retryCount} retries</span>
-            <span>{progress.tileDetails.throttleCount} throttles</span>
-            <span>{progress.tileDetails.timeoutCount} timeouts</span>
-          </div>
+          {imagePreparationPercent !== null ? (
+            <Progress value={imagePreparationPercent} className="h-2 bg-secondary" indicatorClassName="bg-primary" />
+          ) : null}
+          <p>{tileEta ? `Temps estimé : ${tileEta}` : "Le temps restant sera affiché dès qu'il sera disponible."}</p>
         </div>
       ) : null}
 

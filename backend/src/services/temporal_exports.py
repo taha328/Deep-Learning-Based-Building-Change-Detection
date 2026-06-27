@@ -83,6 +83,21 @@ QGIS_PROJECT_CRS = "EPSG:3857"
 QGIS_VECTOR_CRS = "EPSG:4326"
 QGIS_PROJECT_EXTENT_PADDING_RATIO = 0.075
 TOPOJSON_ALLOWED_LAYERS = ("additions", "buffer_10m")
+POWERBI_TSV_COLUMNS = (
+    "project_id",
+    "project_name",
+    "date",
+    "layer_type",
+    "area_m2",
+    "centroid_lon",
+    "centroid_lat",
+)
+POWERBI_TSV_LAYER_ORDER = {
+    "additions": 0,
+    "buffer_10m": 1,
+    "buffer_15m": 2,
+    "buffer_20m": 3,
+}
 TOPOJSON_PROPERTY_KEYS = ("id", "project", "date", "year", "period", "layer", "area_m2", "area_ha")
 TOPOJSON_LAYER_ID_SLUGS = {
     "additions": "additions",
@@ -333,6 +348,16 @@ def _area_m2(payload: dict[str, Any] | None, crs: str) -> float | None:
         return None
 
 
+def _powerbi_tsv_area_m2(payload: dict[str, Any] | None, crs: str) -> float | str:
+    geometry = _geometry_from_geojson(payload)
+    if geometry.is_empty:
+        return ""
+    try:
+        return float(reproject_geometry(geometry, "EPSG:4326", crs).area)
+    except Exception:
+        return ""
+
+
 def _float(value: Any) -> float | None:
     if isinstance(value, bool):
         return None
@@ -431,10 +456,6 @@ def _archive_date(
     return None, "Date d'archive indisponible"
 
 
-def _backend_label(project: TemporalProject) -> str:
-    return project.execution_config.inference_backend if project.execution_config else ""
-
-
 def _metrics(milestone: TemporalMilestone) -> TemporalMilestoneMetrics:
     return milestone.metrics or TemporalMilestoneMetrics()
 
@@ -450,7 +471,6 @@ def _milestone_rows(project: TemporalProject, settings: Settings, export_now: da
         archive_date, _note = _archive_date(project, milestone, settings, export_now)
         rows.append(
             {
-                "Jalon": milestone.release_identifier,
                 "Date d'archive": _date_cell(archive_date),
                 "Source d'imagerie": _imagery_source(project, milestone),
                 "Surface ajoutée (m²)": metrics.added_area_m2,
@@ -478,7 +498,6 @@ def _block_rows(project: TemporalProject, settings: Settings, export_now: dateti
         if milestone.status != "complete":
             continue
         archive_date, _note = _archive_date(project, milestone, settings, export_now)
-        cumulative_area = _metrics(milestone).cumulative_block_area_m2
         for index, feature in enumerate(_features(milestone.effective_building_blocks_geojson), start=1):
             geometry_payload = feature.get("geometry") if isinstance(feature, dict) else None
             properties = feature.get("properties") if isinstance(feature, dict) else None
@@ -496,47 +515,14 @@ def _block_rows(project: TemporalProject, settings: Settings, export_now: dateti
             block_id = properties.get("block_id") if isinstance(properties, dict) else None
             rows.append(
                 {
-                    "Jalon": milestone.release_identifier,
                     "Date d'archive": _date_cell(archive_date),
                     "Identifiant bloc": block_id or f"{milestone.release_identifier}-{index}",
                     "Surface (m²)": metric_area,
-                    "Surface cumulée (m²)": cumulative_area,
                     "Type géométrie": geometry.geom_type if not geometry.is_empty else "",
-                    "Source couche": "Blocs ajoutés",
                     "Longitude centroïde": float(centroid.x) if centroid is not None else None,
                     "Latitude centroïde": float(centroid.y) if centroid is not None else None,
                 }
             )
-    return rows
-
-
-def _qc_rows(project: TemporalProject, settings: Settings, export_now: datetime, crs: str) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for milestone in project.milestones:
-        if milestone.status != "complete":
-            continue
-        archive_date, _note = _archive_date(project, milestone, settings, export_now)
-        displayed = milestone.metrics.total_area_m2 if milestone.metrics else None
-        recalculated = _area_m2(milestone.cumulative_union_geojson, crs)
-        diff = None if displayed is None or recalculated is None else recalculated - displayed
-        diff_percent = _percent(diff, displayed)
-        comments: list[str] = []
-        if milestone.metrics is None:
-            comments.append("Indicateurs absents.")
-        if recalculated is None:
-            comments.append("Surface recalculée indisponible.")
-        rows.append(
-            {
-                "Jalon": milestone.release_identifier,
-                "Surface affichée (m²)": displayed,
-                "Surface recalculée depuis la géométrie (m²)": recalculated,
-                "Écart (m²)": diff,
-                "Écart (%)": diff_percent,
-                "CRS de calcul": crs,
-                "Commentaire": " ".join(comments),
-                "Date d'archive": _date_cell(archive_date),
-            }
-        )
     return rows
 
 
@@ -545,6 +531,13 @@ def _append_rows(sheet, rows: list[dict[str, Any]], headers: list[str]) -> None:
     for row in rows:
         sheet.append([row.get(header) for header in headers])
     _format_sheet(sheet)
+
+
+def _set_workbook_view_zoom(workbook: Workbook, zoom_scale: int = 150) -> None:
+    for sheet in workbook.worksheets:
+        if sheet.sheet_state == "visible":
+            sheet.sheet_view.zoomScale = zoom_scale
+            sheet.sheet_view.zoomScaleNormal = zoom_scale
 
 
 def _format_sheet(sheet) -> None:
@@ -586,7 +579,6 @@ def build_temporal_results_workbook(project_id: str, settings: Settings | None =
         {"Champ": "Nom du projet", "Valeur": project.name},
         {"Champ": "Date d'export", "Valeur": export_now.date()},
         {"Champ": "Nombre de jalons", "Valeur": len(project.milestones)},
-        {"Champ": "Backend utilisé", "Valeur": _backend_label(project)},
         {"Champ": "Système de coordonnées utilisé pour les surfaces", "Valeur": crs},
     ]
     _append_rows(summary, summary_rows, ["Champ", "Valeur"])
@@ -596,7 +588,6 @@ def build_temporal_results_workbook(project_id: str, settings: Settings | None =
         milestones,
         _milestone_rows(project, resolved_settings, export_now),
         [
-            "Jalon",
             "Date d'archive",
             "Source d'imagerie",
             "Surface ajoutée (m²)",
@@ -621,34 +612,16 @@ def build_temporal_results_workbook(project_id: str, settings: Settings | None =
         blocks,
         _block_rows(project, resolved_settings, export_now, crs),
         [
-            "Jalon",
             "Date d'archive",
             "Identifiant bloc",
             "Surface (m²)",
-            "Surface cumulée (m²)",
             "Type géométrie",
-            "Source couche",
             "Longitude centroïde",
             "Latitude centroïde",
         ],
     )
 
-    qc = workbook.create_sheet("Contrôle qualité")
-    _append_rows(
-        qc,
-        _qc_rows(project, resolved_settings, export_now, crs),
-        [
-            "Jalon",
-            "Surface affichée (m²)",
-            "Surface recalculée depuis la géométrie (m²)",
-            "Écart (m²)",
-            "Écart (%)",
-            "CRS de calcul",
-            "Commentaire",
-            "Date d'archive",
-        ],
-    )
-
+    _set_workbook_view_zoom(workbook, 150)
     stream = BytesIO()
     workbook.save(stream)
     return stream.getvalue()
@@ -1360,30 +1333,13 @@ def build_temporal_results_tsv(project_id: str, settings: Settings | None = None
     project = _load_project(project_id, resolved_settings)
     export_now = _export_now()
     crs = _metric_crs(project)
-    columns = [
-        "project_id",
-        "project_name",
-        "run_id",
-        "release_identifier",
-        "date",
-        "layer_type",
-        "feature_count",
-        "added_surface_m2",
-        "area_m2",
-        "current_footprint_m2",
-        "growth_label",
-        "centroid_lon",
-        "centroid_lat",
-    ]
     rows: list[dict[str, Any]] = []
     for milestone in project.milestones:
         if milestone.status != "complete":
             continue
-        metrics = _metrics(milestone)
         archive_date, _note = _archive_date(project, milestone, resolved_settings, export_now)
         for layer_type, payload in _result_layer_payloads(milestone):
-            feature_count = len(_features(payload))
-            if feature_count == 0:
+            if len(_features(payload)) == 0:
                 continue
             geometry = _geometry_from_geojson(payload)
             centroid = geometry.centroid if not geometry.is_empty else None
@@ -1391,21 +1347,22 @@ def build_temporal_results_tsv(project_id: str, settings: Settings | None = None
                 {
                     "project_id": project.project_id,
                     "project_name": project.name,
-                    "run_id": milestone.pair_request_hash or "",
-                    "release_identifier": milestone.release_identifier,
-                    "date": archive_date or milestone.release_date or "",
+                    "date": _date_string(archive_date or milestone.release_date) or "",
                     "layer_type": layer_type,
-                    "feature_count": feature_count,
-                    "added_surface_m2": metrics.added_area_m2,
-                    "area_m2": _area_m2(payload, crs),
-                    "current_footprint_m2": metrics.total_area_m2,
-                    "growth_label": TEMPORAL_RESULTS_EXPORT_LABELS[layer_type],
+                    "area_m2": _powerbi_tsv_area_m2(payload, crs),
                     "centroid_lon": float(centroid.x) if centroid is not None else "",
                     "centroid_lat": float(centroid.y) if centroid is not None else "",
                 }
             )
+    rows.sort(
+        key=lambda row: (
+            row["date"] or "9999-99-99",
+            POWERBI_TSV_LAYER_ORDER.get(str(row["layer_type"]), len(POWERBI_TSV_LAYER_ORDER)),
+            str(row["layer_type"]),
+        )
+    )
     stream = BytesIO()
-    writer = csv.DictWriter(TextIOBytesWriter(stream), fieldnames=columns, delimiter="\t", lineterminator="\n")
+    writer = csv.DictWriter(TextIOBytesWriter(stream), fieldnames=POWERBI_TSV_COLUMNS, delimiter="\t", lineterminator="\n")
     writer.writeheader()
     writer.writerows(rows)
     return stream.getvalue()

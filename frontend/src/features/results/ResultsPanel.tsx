@@ -15,6 +15,7 @@ import { useI18n } from "@/lib/i18n";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { RunProgressPanel } from "@/features/results/RunProgressPanel";
+import { formatDiagnosticStageLabel, formatDurationLabel } from "@/features/temporal/display-labels";
 import { buildBackendFileUrl } from "@/lib/backend-files";
 import { shouldShowExecutionProgressPanel } from "@/lib/run-progress";
 import { cn, formatNumber } from "@/lib/utils";
@@ -225,7 +226,7 @@ export function ResultsPanel({ backendUrl }: { backendUrl: string }) {
                           )}
                         </p>
                         <p className="mt-1 text-muted-foreground">
-                          {formatNumber(validation.estimated_total_tiles)} tiles across both releases ·{" "}
+                          Couverture d’image vérifiée pour les deux dates ·{" "}
                           {formatNumber(validation.estimated_area_m2)} m²
                         </p>
                       </div>
@@ -376,13 +377,13 @@ export function ResultsPanel({ backendUrl }: { backendUrl: string }) {
                       aria-controls="diagnostics-panel"
                       className="flex w-full items-center justify-between rounded-md border border-border bg-card px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     >
-                      <span className="text-muted-foreground">{t("section.diagnostics_description")}</span>
+                      <span className="text-muted-foreground">Détails avancés de l’exécution</span>
                       <ChevronDown className={cn("h-4 w-4 text-muted-foreground transition-transform", showDiagnostics ? "rotate-180" : "")} aria-hidden="true" />
                     </button>
                     {showDiagnostics ? (
                       <div id="diagnostics-panel" className="space-y-2 rounded-md border border-border bg-surface p-3">
                         {Object.entries(result.diagnostics.stage_seconds).map(([stage, seconds]) => (
-                          <KeyValueRow key={stage} label={stage} value={`${seconds.toFixed(2)}s`} />
+                          <KeyValueRow key={stage} label={formatDiagnosticStageLabel(stage)} value={formatDurationLabel(seconds)} />
                         ))}
                         {result.diagnostics.warnings?.map((warning) => (
                           <p key={warning} className="text-sm text-amber-900 dark:text-amber-100" role="alert">

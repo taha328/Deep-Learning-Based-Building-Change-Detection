@@ -25,13 +25,14 @@ import type {
   PipelineExecutionConfig,
   TemporalMilestone,
   TemporalProject,
+  TemporalProjectSummary,
 } from "@/api/contracts";
 import {
   createTemporalProjectExportBundle,
   deleteReferenceLayer,
   getCachedRunResponse,
   getTemporalMilestoneArtifact,
-  getTemporalProject,
+  getTemporalProjectCompact,
   importReferenceLayer,
   importTemporalOverride,
   listReferenceLayers,
@@ -68,6 +69,12 @@ import { AOIImportModal } from "@/features/aoi/AOIImportModal";
 import { RunProgressPanel } from "@/features/results/RunProgressPanel";
 import { GeometryImportModal } from "@/features/temporal/GeometryImportModal";
 import {
+  formatMilestoneActionLabel,
+  formatMilestonePrimaryLabel,
+  formatMilestoneSecondaryLabel,
+  formatReferenceLayerKindLabel,
+} from "@/features/temporal/display-labels";
+import {
   buildResultsExportPerimeter,
   canDownloadExport,
   shouldRestoreExportModal,
@@ -84,6 +91,7 @@ import {
   isFeatureCollection,
 } from "@/features/temporal/artifact-fetch-state";
 import { MilestoneMetricCards } from "@/features/temporal/MilestoneMetricCards";
+import { filterProgressWarnings } from "@/features/temporal/progress-warnings";
 import { ReferenceLayerImportModal } from "@/features/temporal/ReferenceLayerImportModal";
 import type {
   TemporalLayerControlEntryPresentation,
@@ -287,7 +295,7 @@ function TemporalLayerControlRow({ entry }: { entry: TemporalLayerControlEntryPr
   return (
     <label
       className={cn(
-        "flex items-start justify-between gap-3 rounded px-2 py-1.5 text-sm",
+        "flex min-h-10 items-start justify-between gap-3 rounded px-2 py-2 text-sm",
         entry.enabled ? "text-foreground" : "text-muted-foreground",
       )}
     >
@@ -309,7 +317,7 @@ function TemporalLayerControlRow({ entry }: { entry: TemporalLayerControlEntryPr
         checked={entry.checked}
         onChange={(event) => entry.onCheckedChange(event.target.checked)}
         disabled={!entry.enabled}
-        className="mt-0.5 h-4 w-4 rounded border-sidebar-border bg-sidebar accent-primary disabled:opacity-40"
+        className="mt-0.5 h-5 w-5 rounded border-sidebar-border bg-sidebar accent-primary disabled:opacity-40"
       />
     </label>
   );
@@ -356,7 +364,7 @@ function TemporalLayerControlsBlock({
                     <span className="text-caption text-muted-foreground">{Math.round(layer.opacity * 100)}%</span>
                   </div>
                   <p className="mt-0.5 text-caption text-muted-foreground">
-                    {layer.geometryType ?? "—"} / {layer.storageStrategy ?? "—"}
+                    {formatReferenceLayerKindLabel(layer.geometryType, layer.storageStrategy)}
                   </p>
                 </div>
               ))}
@@ -387,13 +395,6 @@ function formatErrorMessage(error: unknown, fallback: string): string {
     }
   }
   return fallback;
-}
-
-const UNRELATED_BANDON_WARNING =
-  "BANDON applied an MPS slide-window compatibility patch to the configured crop/stride.";
-
-function filterProgressWarnings(messages: string[]) {
-  return messages.filter((message) => message !== UNRELATED_BANDON_WARNING);
 }
 
 function buildProjectId() {
@@ -432,6 +433,10 @@ function assertLoadedProjectMatchesSelection(
   if (expectedDir && loadedProjectDir && loadedProjectDir !== expectedDir) {
     throw new Error(`Loaded project directory ${loadedProjectDir} does not match saved project directory ${expectedDir}.`);
   }
+}
+
+function projectExistsInList(projects: TemporalProjectSummary[] | undefined, projectId: string): boolean {
+  return Boolean(projectId && projects?.some((item) => item.project_id === projectId));
 }
 
 function preferredLoadedProjectPanel(project: TemporalProject): WorkflowSectionId {
@@ -488,10 +493,6 @@ function createMilestone(release: ReleaseMetadata): TemporalMilestone {
     metrics: null,
     artifacts: [],
   };
-}
-
-function formatMilestoneIdentifier(milestone: TemporalMilestone, t: (key: string) => string): string {
-  return milestone.release_identifier;
 }
 
 function ensureFeatureCollection(value: Record<string, unknown> | null | undefined): FeatureCollection {
@@ -805,6 +806,15 @@ export function TemporalMosaicPanel({
     queryKey: ["temporal-projects", "saved-only"],
     queryFn: () => listTemporalProjects(),
   });
+  const selectedProjectSummary = useMemo(
+    () => projectsQuery.data?.find((item) => item.project_id === selectedProjectId) ?? null,
+    [projectsQuery.data, selectedProjectId],
+  );
+  const currentProjectSummary = useMemo(
+    () => projectsQuery.data?.find((item) => item.project_id === project?.project_id) ?? null,
+    [projectsQuery.data, project?.project_id],
+  );
+  const currentProjectInSavedList = Boolean(currentProjectSummary);
 
   const referenceLayersQuery = useQuery({
     queryKey: ["reference-layers", project?.project_id],
@@ -844,7 +854,12 @@ export function TemporalMosaicPanel({
         throw error;
       }
     },
-    enabled: Boolean(project?.project_id && !staleReferenceLayerProjectIds.has(project.project_id)),
+    enabled: Boolean(
+      project?.project_id &&
+        projectsQuery.data &&
+        currentProjectInSavedList &&
+        !staleReferenceLayerProjectIds.has(project.project_id),
+    ),
     retry: (failureCount, error) => !(error instanceof ApiClientError && error.status === 404) && failureCount < 1,
   });
 
@@ -856,7 +871,7 @@ export function TemporalMosaicPanel({
 
   const loadProjectMutation = useMutation({
     mutationFn: async ({ projectId, expectedProjectDir }: LoadProjectRequest) => {
-      const loadedProject = await getTemporalProject(projectId);
+      const loadedProject = await getTemporalProjectCompact(projectId);
       assertLoadedProjectMatchesSelection(loadedProject, projectId, expectedProjectDir);
       return loadedProject;
     },
@@ -912,6 +927,17 @@ export function TemporalMosaicPanel({
     if (!projectId) {
       return;
     }
+    if (projectsQuery.data && !projectExistsInList(projectsQuery.data, projectId)) {
+      setSelectedProjectId("");
+      if (latestProjectLoadRef.current === projectId) {
+        latestProjectLoadRef.current = null;
+      }
+      relayClientLog("TEMPORAL_STALE_PROJECT_SELECTION_CLEARED", {
+        projectId,
+        reason: "not_in_project_list",
+      });
+      return;
+    }
     setSelectedProjectId(projectId);
     latestProjectLoadRef.current = projectId;
     loadProjectMutation.mutate({
@@ -920,6 +946,21 @@ export function TemporalMosaicPanel({
       focusPanel: true,
     });
   };
+
+  useEffect(() => {
+    if (!projectsQuery.data || !selectedProjectId || selectedProjectSummary) {
+      return;
+    }
+    const staleProjectId = selectedProjectId;
+    setSelectedProjectId("");
+    if (latestProjectLoadRef.current === staleProjectId) {
+      latestProjectLoadRef.current = null;
+    }
+    relayClientLog("TEMPORAL_STALE_PROJECT_SELECTION_CLEARED", {
+      projectId: staleProjectId,
+      reason: "project_list_refreshed",
+    });
+  }, [projectsQuery.data, selectedProjectId, selectedProjectSummary]);
 
   const saveProjectMutation = useMutation({
     mutationFn: saveTemporalProject,
@@ -1924,7 +1965,7 @@ export function TemporalMosaicPanel({
                   <label className="label-xs">{t("temporal.saved_projects_heading")}</label>
                   <div className="flex gap-2">
                     <Select
-                      value=""
+                      value={selectedProjectSummary?.project_id ?? ""}
                       onChange={(event) => {
                         const projectId = event.target.value;
                         if (projectId) {
@@ -1948,12 +1989,12 @@ export function TemporalMosaicPanel({
                       variant="outline"
                       className="border-sidebar-border bg-card"
                       onClick={() => {
-                        const projectId = selectedProjectId || project?.project_id;
+                        const projectId = selectedProjectSummary?.project_id ?? "";
                         if (projectId) {
-                          const projectSummary = projectsQuery.data?.find((item) => item.project_id === projectId);
-                          loadSavedProject(projectId, projectSummary?.project_dir);
+                          loadSavedProject(projectId, selectedProjectSummary?.project_dir);
                         }
                       }}
+                      disabled={!selectedProjectSummary || loadProjectMutation.isPending}
                       aria-label={t("temporal.load_project")}
                     >
                       <FolderOpen className="h-4 w-4" />
@@ -2008,6 +2049,9 @@ export function TemporalMosaicPanel({
                     <div className="space-y-2">
                       {project.milestones.map((milestone) => {
                         const isSelected = selectedMilestoneId === milestone.release_identifier;
+                        const milestonePrimaryLabel = formatMilestonePrimaryLabel(milestone);
+                        const milestoneSecondaryLabel = formatMilestoneSecondaryLabel(milestone);
+                        const milestoneActionLabel = formatMilestoneActionLabel(milestone);
                         return (
                           <div
                             key={milestone.release_identifier}
@@ -2025,8 +2069,8 @@ export function TemporalMosaicPanel({
                               aria-pressed={isSelected}
                             >
                               <div className="min-w-0">
-                                <p className="truncate text-label font-medium text-foreground">{formatReleaseDate(milestone.release_date, locale, t("temporal.unknown_date"))}</p>
-                                <p className="truncate text-caption text-foreground">{formatMilestoneIdentifier(milestone, t)}</p>
+                                <p className="truncate text-label font-medium text-foreground">{milestonePrimaryLabel}</p>
+                                <p className="truncate text-caption text-foreground">{milestoneSecondaryLabel}</p>
                               </div>
                               <span className={cn("rounded-full border px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.12em]", milestoneBadgeTone(milestone.status))}>
                                 {t(`temporal.milestone_status.${milestone.status}`)}
@@ -2035,8 +2079,9 @@ export function TemporalMosaicPanel({
                             <button
                               type="button"
                               onClick={() => handleRemoveMilestone(milestone.release_identifier)}
-                              className="border-l border-sidebar-border px-3 text-foreground transition hover:bg-surface hover:text-foreground"
-                              aria-label={`${t("button.remove")} ${milestone.release_identifier}`}
+                              className="px-3 text-foreground transition hover:bg-surface hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                              aria-label={`${t("button.remove")} ${milestoneActionLabel}`}
+                              title={`${t("button.remove")} ${milestoneActionLabel}`}
                             >
                               <Trash2 className="h-4 w-4" />
                             </button>
@@ -2117,10 +2162,8 @@ export function TemporalMosaicPanel({
                       </label>
                       <Input
                         id="temporal-change-threshold"
-                        type="number"
-                        min="0.01"
-                        max="0.99"
-                        step="0.01"
+                        type="text"
+                        inputMode="decimal"
                         value={runChangeThreshold}
                         onChange={(event) => {
                           setRunChangeThreshold(event.target.value);
@@ -2285,11 +2328,13 @@ export function TemporalMosaicPanel({
                                 <div className="flex items-start justify-between gap-3">
                                   <div className="min-w-0">
                                     <p className="truncate text-sm font-medium text-foreground">{layer.name}</p>
-                                    <p className="text-caption text-muted-foreground">{layer.geometry_type} / {layer.storage_strategy}</p>
+                                    <p className="text-caption text-muted-foreground">
+                                      {formatReferenceLayerKindLabel(layer.geometry_type, layer.storage_strategy)}
+                                    </p>
                                   </div>
                                   <button
                                     type="button"
-                                    className="text-muted-foreground transition hover:text-destructive"
+                                    className="flex h-10 w-10 items-center justify-center rounded-md text-muted-foreground transition hover:bg-surface hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
                                     onClick={() => deleteReferenceLayerMutation.mutate(layer)}
                                     aria-label={t("common.delete")}
                                   >
@@ -2304,7 +2349,7 @@ export function TemporalMosaicPanel({
                                       onChange={(event) =>
                                         updateReferenceLayerMutation.mutate({ layer, patch: { visible: event.target.checked } })
                                       }
-                                      className="h-4 w-4 rounded border-border accent-primary"
+                                      className="h-5 w-5 rounded border-border accent-primary"
                                     />
                                     {t("reference_layer.visible")}
                                   </label>
@@ -2327,7 +2372,7 @@ export function TemporalMosaicPanel({
                                     <Button
                                       type="button"
                                       variant="outline"
-                                      className="h-8 border-sidebar-border bg-sidebar"
+                                      className="h-10 border-sidebar-border bg-sidebar"
                                       onClick={() => requestMapFocusToReferenceLayer(layer.bounds_wgs84 as [number, number, number, number])}
                                     >
                                       {t("reference_layer.zoom")}
@@ -2446,6 +2491,7 @@ export function TemporalMosaicPanel({
                       setResultsExportPerimeterMode(mode);
                       selectExportGeometry(mode === "project_aoi" ? null : mode);
                     }}
+                    className="mt-0.5 h-5 w-5 accent-primary"
                   />
                   <span><span className="block text-sm font-medium">{label}</span><span className="block text-xs text-muted-foreground">{description}</span></span>
                 </label>

@@ -9,6 +9,7 @@ import {
   referenceLayerSchema,
   runResponseSchema,
   temporalProjectRunResponseSchema,
+  temporalCompactProjectSchema,
   temporalProjectExportBundleSchema,
   temporalProjectSaveResponseSchema,
   temporalProjectSchema,
@@ -24,6 +25,7 @@ import {
   type ReferenceLayerStrategy,
   type RunResponse,
   type TemporalProject,
+  type TemporalCompactProject,
   type TemporalProjectRunResponse,
   type TemporalProjectRunRequest,
   type TemporalProjectExportBundle,
@@ -39,6 +41,7 @@ import {
   createCompletedRunProgress,
   createErrorRunProgress,
   formatRunStatus,
+  type TemporalPairProgressDetails,
   type WaybackTileProgressDetails,
   type RunProgressState,
 } from "@/lib/run-progress";
@@ -58,6 +61,7 @@ function createPendingRunProgress(): RunProgressState {
     rawEvent: null,
     updatedAt: Date.now(),
     tileDetails: null,
+    temporalPairDetails: null,
   };
 }
 
@@ -90,6 +94,31 @@ function parseWaybackTileProgress(details: unknown): WaybackTileProgressDetails 
     timeoutCount: numberDetail(record, "timeout_count") ?? 0,
     tileRatePerSec: numberDetail(record, "tile_rate_per_sec"),
     etaSeconds: numberDetail(record, "eta_seconds"),
+  };
+}
+
+function stringDetail(record: Record<string, unknown>, key: string): string | null {
+  const value = record[key];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function parseTemporalPairProgress(details: unknown): TemporalPairProgressDetails | null {
+  if (!details || typeof details !== "object") {
+    return null;
+  }
+  const record = details as Record<string, unknown>;
+  if (record.temporal_progress_kind !== "active_pair") {
+    return null;
+  }
+  return {
+    currentPairIndex: numberDetail(record, "current_pair_index"),
+    totalPairCount: numberDetail(record, "total_pair_count"),
+    pairFraction: numberDetail(record, "pair_fraction"),
+    pairStage: stringDetail(record, "pair_stage"),
+    fromReleaseIdentifier: stringDetail(record, "from_release_identifier"),
+    toReleaseIdentifier: stringDetail(record, "to_release_identifier"),
+    fromReleaseDate: stringDetail(record, "from_release_date"),
+    toReleaseDate: stringDetail(record, "to_release_date"),
   };
 }
 
@@ -144,6 +173,7 @@ function jobToProgress(job: JobResponse): RunProgressState {
     rawEvent: job.status,
     updatedAt: Date.now(),
     tileDetails: parseWaybackTileProgress(job.progress_details),
+    temporalPairDetails: parseTemporalPairProgress(job.progress_details),
   };
 }
 
@@ -376,6 +406,129 @@ export async function listTemporalProjects(options?: { includeCachedRuns?: boole
 export async function getTemporalProject(projectId: string): Promise<TemporalProject> {
   const result = await apiFetch<unknown>(`/api/temporal-projects/${encodeURIComponent(projectId)}`);
   return temporalProjectSchema.parse(result);
+}
+
+function temporalProjectFromCompact(compact: TemporalCompactProject): TemporalProject {
+  const projectId = compact.project_id ?? compact.id;
+  const compactBoundsToPolygon = (bounds: number[] | null | undefined): Record<string, unknown> | null => {
+    if (!bounds || bounds.length < 4) {
+      return null;
+    }
+    const [west, south, east, north] = bounds;
+    if (![west, south, east, north].every((value) => Number.isFinite(value)) || west >= east || south >= north) {
+      return null;
+    }
+    return {
+      type: "Polygon",
+      coordinates: [
+        [
+          [west, south],
+          [east, south],
+          [east, north],
+          [west, north],
+          [west, south],
+        ],
+      ],
+    };
+  };
+  const compactAoi =
+    compact.aoi_geojson ??
+    compactBoundsToPolygon(compact.bounds) ??
+    compactBoundsToPolygon(compact.bbox) ??
+    null;
+  return temporalProjectSchema.parse({
+    project_id: projectId,
+    name: compact.name,
+    project_dir: compact.project_dir ?? null,
+    semantics: compact.semantics,
+    aoi_geojson: compactAoi,
+    milestones: compact.milestones.map((milestone) => ({
+      release_identifier: milestone.release_identifier,
+      release_date: milestone.release_date ?? null,
+      status: milestone.status,
+      source_mode: milestone.source_mode,
+      warnings: milestone.warnings,
+      error_message: milestone.error_message ?? null,
+      pair_request_hash: null,
+      automated_additions_geojson: null,
+      automated_candidate_footprint_geojson: null,
+      automated_building_blocks_geojson: null,
+      manual_override_geojson: null,
+      additions_geojson: null,
+      effective_building_blocks_geojson: null,
+      effective_footprint_geojson: null,
+      buffer_layers_geojson: {},
+      cumulative_union_geojson: null,
+      cumulative_convex_hull_geojson: null,
+      cumulative_growth_blocks_geojson: null,
+      cumulative_growth_envelope_geojson: null,
+      reference_imagery:
+        milestone.reference_imagery?.exists === false
+          ? null
+          : {
+              image_path: null,
+              image_png_data_url: null,
+              raster_bounds_wgs84: milestone.reference_imagery?.raster_bounds_wgs84 ?? null,
+              storage_strategy: milestone.reference_imagery?.storage_strategy ?? "raster_tiles",
+              cog_path: milestone.reference_imagery?.cog_path ?? null,
+              cog_url: milestone.reference_imagery?.cog_url ?? null,
+              tilejson_url: milestone.reference_imagery?.tilejson_url ?? null,
+              tiles_url_template: milestone.reference_imagery?.tiles_url_template ?? null,
+              minzoom: milestone.reference_imagery?.minzoom ?? null,
+              maxzoom: milestone.reference_imagery?.maxzoom ?? null,
+              tile_size: milestone.reference_imagery?.tile_size ?? 256,
+            },
+      metrics: milestone.metrics ?? null,
+      artifacts: Object.entries(milestone.artifacts)
+        .filter(([, artifact]) => artifact.exists !== false && artifact.empty !== true)
+        .map(([artifactKey, artifact]) => {
+          const artifactUrl = artifact.artifact_url ?? artifact.geojson_fallback_url ?? null;
+          return {
+            name: artifact.name ?? `${milestone.release_identifier}_${artifactKey}`,
+            path: artifact.path ?? "",
+            media_type: artifact.media_type ?? "application/geo+json",
+            description: artifact.description ?? artifactKey,
+            key: artifact.key ?? artifactKey,
+            feature_count: artifact.feature_count ?? null,
+            size_bytes: artifact.size_bytes ?? null,
+            source_mtime_ns: artifact.source_mtime_ns ?? null,
+            qgis_cache_key: artifact.qgis_cache_key ?? null,
+            bbox: artifact.bbox ?? null,
+            sha256: artifact.sha256 ?? null,
+            artifact_url: artifactUrl,
+            geojson_url: artifact.geojson_url ?? null,
+            download_url: artifact.download_url ?? artifact.geojson_url ?? artifactUrl,
+            gpkg_url: artifact.gpkg_url ?? null,
+            qgis_preferred_url: artifact.qgis_preferred_url ?? null,
+            qgis_preferred_format: artifact.qgis_preferred_format ?? null,
+            qgis_compatible: artifact.qgis_compatible ?? false,
+            tilejson_url: artifact.tilejson_url ?? null,
+            tiles_url_template: artifact.tiles_url_template ?? null,
+            vector_source_layer: artifact.vector_source_layer ?? artifact.source_layer ?? null,
+          };
+        }),
+    })),
+    created_at: compact.created_at,
+    updated_at: compact.updated_at,
+    execution_config: null,
+    warnings: [],
+    validation_blocking_errors: [],
+    download_bundle_path: compact.download_bundle_path ?? null,
+    has_reference_layers: false,
+    reference_layer_count: 0,
+  });
+}
+
+export async function getTemporalProjectCompact(projectId: string): Promise<TemporalProject> {
+  try {
+    const result = await apiFetch<unknown>(`/api/temporal-projects/${encodeURIComponent(projectId)}/compact`);
+    return temporalProjectFromCompact(temporalCompactProjectSchema.parse(result));
+  } catch (error) {
+    if (error instanceof ApiClientError && (error.status === 404 || error.status === 501)) {
+      return getTemporalProject(projectId);
+    }
+    throw error;
+  }
 }
 
 export async function getTemporalMilestoneArtifact(

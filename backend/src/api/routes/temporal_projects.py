@@ -24,6 +24,7 @@ from src.core_api import (
 from src.services.temporal_projects import (
     build_temporal_artifact_vector_tilejson,
     create_temporal_project_bundle,
+    load_temporal_project_compact_payload,
     load_temporal_project_response_payload,
     render_temporal_artifact_vector_tile,
     resolve_temporal_project_artifact_path,
@@ -189,6 +190,16 @@ def get_project(project_id: str, settings=Depends(get_app_settings)) -> dict[str
         raise_api_error(status.HTTP_404_NOT_FOUND, "not_found", str(exc))
     finally:
         logger.info("PROJECT_LOAD_SKIPPED_COG_HYDRATION projectId=%s value=true", project_id)
+
+
+@router.get("/{project_id}/compact")
+def get_project_compact(project_id: str, settings=Depends(get_app_settings)) -> dict[str, object]:
+    try:
+        return load_temporal_project_compact_payload(project_id, settings)
+    except FileNotFoundError as exc:
+        raise_api_error(status.HTTP_404_NOT_FOUND, "not_found", str(exc))
+    except ValueError as exc:
+        raise_api_error(status.HTTP_400_BAD_REQUEST, "invalid_project_id", str(exc))
 
 
 @router.post("")

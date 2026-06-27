@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 
@@ -11,6 +12,8 @@ from PIL import Image
 from src.config import Settings, get_settings
 from src.domain.bandon_runner import (
     BandonRuntimeProbe,
+    _CHECKPOINT_SHA_CACHE,
+    _checkpoint_sha256,
     _resolve_launcher,
     _resolve_runtime_paths,
     probe_bandon_runtime,
@@ -442,6 +445,25 @@ def test_run_bandon_inference_raises_on_failure(tmp_path, monkeypatch) -> None:
         assert "boom" in str(exc)
     else:
         raise AssertionError("Expected BANDON inference to raise on non-zero exit.")
+
+
+def test_checkpoint_sha256_cache_invalidates_by_size_and_mtime(tmp_path: Path) -> None:
+    _CHECKPOINT_SHA_CACHE.clear()
+    checkpoint = tmp_path / "checkpoint.pth"
+    checkpoint.write_bytes(b"one")
+
+    first = _checkpoint_sha256(checkpoint)
+    second = _checkpoint_sha256(checkpoint)
+
+    assert second == first
+
+    checkpoint.write_bytes(b"two")
+    stat = checkpoint.stat()
+    os.utime(checkpoint, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
+
+    third = _checkpoint_sha256(checkpoint)
+
+    assert third != first
 
 
 def test_resolve_launcher_prefers_env_python_over_conda(tmp_path, monkeypatch) -> None:

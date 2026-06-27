@@ -182,6 +182,10 @@ function assertLoadedProjectMatchesSelection(
   }
 }
 
+function projectExistsInList(projects: TemporalProjectSummary[] | undefined, projectId: string): boolean {
+  return Boolean(projectId && projects?.some((item) => item.project_id === projectId));
+}
+
 function formatArea(areaM2: number | undefined | null, fallback: string): string {
   if (!areaM2 || areaM2 <= 0) {
     return fallback;
@@ -586,10 +590,28 @@ export function SettingsPanel({
     if (!projectId) {
       return;
     }
+    if (projectsQuery.data && !projectExistsInList(projectsQuery.data, projectId)) {
+      setSelectedProjectId("");
+      if (latestProjectLoadRef.current === projectId) {
+        latestProjectLoadRef.current = null;
+      }
+      return;
+    }
     setSelectedProjectId(projectId);
     latestProjectLoadRef.current = projectId;
     loadProjectMutation.mutate({ projectId, expectedProjectDir });
   };
+
+  useEffect(() => {
+    if (!projectsQuery.data || !selectedProjectId || selectedProjectSummary) {
+      return;
+    }
+    const staleProjectId = selectedProjectId;
+    setSelectedProjectId("");
+    if (latestProjectLoadRef.current === staleProjectId) {
+      latestProjectLoadRef.current = null;
+    }
+  }, [projectsQuery.data, selectedProjectId, selectedProjectSummary]);
 
   const handleCreateProject = () => {
     setCreateProjectError(null);
@@ -948,7 +970,7 @@ export function SettingsPanel({
                 <div className="flex gap-2">
                 <Select
                   id="saved-projects"
-                  value=""
+                  value={selectedProjectSummary?.project_id ?? ""}
                   onChange={(event) => {
                     const projectId = event.target.value;
                     if (projectId) {
@@ -971,11 +993,11 @@ export function SettingsPanel({
                   <button
                     type="button"
                     onClick={() => {
-                      if (selectedProjectId) {
-                        loadSavedProject(selectedProjectId, selectedProjectSummary?.project_dir);
+                      if (selectedProjectSummary) {
+                        loadSavedProject(selectedProjectSummary.project_id, selectedProjectSummary.project_dir);
                       }
                     }}
-                    disabled={!selectedProjectId || loadProjectMutation.isPending}
+                    disabled={!selectedProjectSummary || loadProjectMutation.isPending}
                     aria-label={t("temporal.load_project")}
                     className="inline-flex h-11 w-11 items-center justify-center rounded border border-sidebar-border bg-card text-foreground transition-colors hover:bg-surface disabled:cursor-not-allowed disabled:opacity-50"
                   >

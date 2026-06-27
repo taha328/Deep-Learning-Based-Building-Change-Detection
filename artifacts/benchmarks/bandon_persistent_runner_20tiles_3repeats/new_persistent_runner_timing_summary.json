@@ -1,0 +1,197 @@
+{
+  "record_count": 20,
+  "run_id": "bench_persistent_runner_1_20260626T202031Z",
+  "summary": {
+    "bandon_persistent_request_ms": {
+      "count": 20,
+      "max_ms": 2396.201,
+      "mean_ms": 333.631,
+      "median_ms": 226.062,
+      "min_ms": 207.337,
+      "p90_ms": 242.451,
+      "p95_ms": 364.676,
+      "total_ms": 6672.62
+    },
+    "bandon_persistent_startup_wall_ms": {
+      "count": 20,
+      "max_ms": 4036.95,
+      "mean_ms": 201.847,
+      "median_ms": 0.0,
+      "min_ms": 0.0,
+      "p90_ms": 0.0,
+      "p95_ms": 201.848,
+      "total_ms": 4036.95
+    },
+    "bandon_subprocess_wall_ms": {
+      "count": 20,
+      "max_ms": 0.0,
+      "mean_ms": 0.0,
+      "median_ms": 0.0,
+      "min_ms": 0.0,
+      "p90_ms": 0.0,
+      "p95_ms": 0.0,
+      "total_ms": 0.0
+    },
+    "child_checkpoint_load_ms": {
+      "count": 20,
+      "max_ms": 672.78,
+      "mean_ms": 33.639,
+      "median_ms": 0.0,
+      "min_ms": 0.0,
+      "p90_ms": 0.0,
+      "p95_ms": 33.639,
+      "total_ms": 672.78
+    },
+    "child_forward_total_ms": {
+      "count": 20,
+      "max_ms": 2212.981,
+      "mean_ms": 151.251,
+      "median_ms": 42.152,
+      "min_ms": 33.683,
+      "p90_ms": 54.924,
+      "p95_ms": 167.206,
+      "total_ms": 3025.028
+    },
+    "child_input_preprocess_ms": {
+      "count": 20,
+      "max_ms": 37.564,
+      "mean_ms": 32.236,
+      "median_ms": 31.584,
+      "min_ms": 29.12,
+      "p90_ms": 35.988,
+      "p95_ms": 36.561,
+      "total_ms": 644.72
+    },
+    "child_model_build_ms": {
+      "count": 20,
+      "max_ms": 1434.019,
+      "mean_ms": 71.701,
+      "median_ms": 0.0,
+      "min_ms": 0.0,
+      "p90_ms": 0.0,
+      "p95_ms": 71.701,
+      "total_ms": 1434.019
+    },
+    "child_model_load_count_this_prediction": {
+      "count": 20,
+      "max_ms": 1.0,
+      "mean_ms": 0.05,
+      "median_ms": 0.0,
+      "min_ms": 0.0,
+      "p90_ms": 0.0,
+      "p95_ms": 0.05,
+      "total_ms": 1.0
+    },
+    "child_model_load_count_total": {
+      "count": 20,
+      "max_ms": 1.0,
+      "mean_ms": 1.0,
+      "median_ms": 1.0,
+      "min_ms": 1.0,
+      "p90_ms": 1.0,
+      "p95_ms": 1.0,
+      "total_ms": 20.0
+    },
+    "child_model_reused_numeric": {
+      "count": 20,
+      "max_ms": 1.0,
+      "mean_ms": 0.95,
+      "median_ms": 1.0,
+      "min_ms": 0.0,
+      "p90_ms": 1.0,
+      "p95_ms": 1.0,
+      "total_ms": 19.0
+    },
+    "child_model_to_device_ms": {
+      "count": 20,
+      "max_ms": 170.565,
+      "mean_ms": 8.528,
+      "median_ms": 0.0,
+      "min_ms": 0.0,
+      "p90_ms": 0.0,
+      "p95_ms": 8.528,
+      "total_ms": 170.565
+    },
+    "child_output_write_ms": {
+      "count": 20,
+      "max_ms": 42.64,
+      "mean_ms": 19.724,
+      "median_ms": 18.767,
+      "min_ms": 15.429,
+      "p90_ms": 20.785,
+      "p95_ms": 22.469,
+      "total_ms": 394.483
+    },
+    "child_total_wall_ms": {
+      "count": 20,
+      "max_ms": 2391.52,
+      "mean_ms": 329.401,
+      "median_ms": 222.243,
+      "min_ms": 202.916,
+      "p90_ms": 238.452,
+      "p95_ms": 361.296,
+      "total_ms": 6588.011
+    },
+    "patch_png_write_ms": {
+      "count": 20,
+      "max_ms": 30.163,
+      "mean_ms": 28.048,
+      "median_ms": 28.206,
+      "min_ms": 26.83,
+      "p90_ms": 28.753,
+      "p95_ms": 28.831,
+      "total_ms": 560.958
+    },
+    "prediction_geotiff_write_ms": {
+      "count": 20,
+      "max_ms": 51.532,
+      "mean_ms": 31.567,
+      "median_ms": 31.599,
+      "min_ms": 17.511,
+      "p90_ms": 49.843,
+      "p95_ms": 50.103,
+      "total_ms": 631.332
+    },
+    "raster_window_read_ms": {
+      "count": 20,
+      "max_ms": 29.504,
+      "mean_ms": 18.454,
+      "median_ms": 18.784,
+      "min_ms": 12.423,
+      "p90_ms": 25.179,
+      "p95_ms": 28.715,
+      "total_ms": 369.08
+    },
+    "state_progress_write_ms": {
+      "count": 20,
+      "max_ms": 0.307,
+      "mean_ms": 0.262,
+      "median_ms": 0.266,
+      "min_ms": 0.218,
+      "p90_ms": 0.289,
+      "p95_ms": 0.301,
+      "total_ms": 5.234
+    },
+    "tile_total_wall_ms": {
+      "count": 20,
+      "max_ms": 6513.899,
+      "mean_ms": 634.304,
+      "median_ms": 330.557,
+      "min_ms": 284.332,
+      "p90_ms": 355.98,
+      "p95_ms": 669.175,
+      "total_ms": 12686.076
+    },
+    "vectorization_ms": {
+      "count": 20,
+      "max_ms": 9.982,
+      "mean_ms": 9.026,
+      "median_ms": 9.033,
+      "min_ms": 8.097,
+      "p90_ms": 9.33,
+      "p95_ms": 9.386,
+      "total_ms": 180.511
+    }
+  },
+  "updated_at": "2026-06-26T20:20:44Z"
+}

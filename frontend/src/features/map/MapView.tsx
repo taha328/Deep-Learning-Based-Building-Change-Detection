@@ -14,6 +14,7 @@ import { isDevClientLogEnabled } from "@/lib/client-log-config";
 import { relayClientLog } from "@/lib/client-log-relay";
 import { cn } from "@/lib/utils";
 import { MilestoneMetricCards } from "@/features/temporal/MilestoneMetricCards";
+import { formatReferenceLayerKindLabel } from "@/features/temporal/display-labels";
 import {
   buildTemporalLayerLabels,
   getIncludedAdditionReleasesForCumulativeLayer,
@@ -4374,11 +4375,10 @@ export function MapView({
                 });
           temporalReferenceLayerIdsRef.current.add(lifecycle.layerId);
           temporalReferenceSourceIdsRef.current.add(lifecycle.sourceId);
-          temporalReferenceLoadedLayerIdsRef.current.add(lifecycle.layerId);
           setTemporalReferenceLayerVisibility(
             map,
             lifecycle.layerId,
-            layerState.temporalReferenceImagery && imagery.releaseIdentifier === temporalReferenceImagery?.releaseIdentifier,
+            layerState.temporalReferenceImagery && lifecycle.layerId === activeTemporalReferenceLayerIdRef.current,
           );
           if (lifecycle.mode === "create" || lifecycle.mode === "recreate") {
             created += 1;
@@ -5908,6 +5908,20 @@ export function MapView({
         if (!map.isStyleLoaded()) {
           return;
         }
+        const latestReferenceContext = temporalReferenceDebugContextRef.current;
+        if (
+          latestReferenceContext.projectId !== projectId ||
+          latestReferenceContext.selectedReleaseIdentifier !== imagery.releaseIdentifier
+        ) {
+          devLog("TEMPORAL_REFERENCE_EVENT_REGISTRATION_SKIPPED", {
+            projectId,
+            releaseIdentifier: imagery.releaseIdentifier,
+            currentProjectId: latestReferenceContext.projectId,
+            currentReleaseIdentifier: latestReferenceContext.selectedReleaseIdentifier,
+            reason: "stale_selection",
+          });
+          return;
+        }
         try {
           const lifecycle =
             imagery.storageStrategy === "image_overlay" && imagery.imageUrl && imagery.bounds
@@ -5921,16 +5935,19 @@ export function MapView({
                 });
           temporalReferenceLayerIdsRef.current.add(lifecycle.layerId);
           temporalReferenceSourceIdsRef.current.add(lifecycle.sourceId);
-          for (const layerId of temporalReferenceLayerIdsRef.current) {
-            setTemporalReferenceLayerVisibility(map, layerId, layerId === lifecycle.layerId);
-          }
-          activeTemporalReferenceLayerIdRef.current = lifecycle.layerId;
-          activeTemporalReferenceReleaseIdentifierRef.current = imagery.releaseIdentifier;
-          moveReferenceOverlaysAboveTemporalImagery(
+          setTemporalReferenceLayerVisibility(
             map,
             lifecycle.layerId,
-            latestPresentationRef.current?.referenceLayers ?? [],
+            lifecycle.layerId === activeTemporalReferenceLayerIdRef.current,
           );
+          devLog("TEMPORAL_REFERENCE_EVENT_REGISTERED_DEFERRED", {
+            projectId,
+            releaseIdentifier: imagery.releaseIdentifier,
+            sourceId: lifecycle.sourceId,
+            layerId: lifecycle.layerId,
+            mode: lifecycle.mode,
+            visibilityCommitted: false,
+          });
         } catch (error) {
           console.warn("Failed to register temporal reference selection event", imagery.releaseIdentifier, error);
         }
@@ -5968,16 +5985,18 @@ export function MapView({
       window.removeEventListener("building-change-validation-map-jump", onValidationMapJump);
       window.removeEventListener("building-change-temporal-reference-selection", onTemporalReferenceSelection);
       map.remove();
-      delete (window as Window & { __buildingChangeMap?: MapLibreMap }).__buildingChangeMap;
-      delete (
-        window as Window & {
-          __buildingChangeMapDebug?: {
-            getLayerState: () => LayerToggleState;
-            setLayerState: (updater: Partial<LayerToggleState>) => void;
-          };
-        }
-      ).__buildingChangeMapDebug;
-      delete window.__BUILDING_CHANGE_REFERENCE_DEBUG__;
+      const debugWindow = window as Window & {
+        __buildingChangeMap?: MapLibreMap;
+        __buildingChangeMapDebug?: {
+          getLayerState: () => LayerToggleState;
+          setLayerState: (updater: Partial<LayerToggleState>) => void;
+        };
+      };
+      if (debugWindow.__buildingChangeMap === map) {
+        delete debugWindow.__buildingChangeMap;
+        delete debugWindow.__buildingChangeMapDebug;
+        delete window.__BUILDING_CHANGE_REFERENCE_DEBUG__;
+      }
       mapRef.current = null;
     };
   }, [apiKey]);
@@ -6528,7 +6547,7 @@ export function MapView({
         checked={layerState[entry.key]}
         onChange={(event) => updateLayerState({ [entry.key]: event.target.checked })}
         disabled={!entry.enabled}
-        className="mt-0.5 h-4 w-4 rounded border-white/50 bg-transparent accent-sky-400 disabled:opacity-40"
+        className="mt-0.5 h-5 w-5 rounded border-white/50 bg-transparent accent-primary disabled:opacity-40"
       />
     </label>
   );
@@ -6651,7 +6670,7 @@ export function MapView({
                 setHighlightedResultIndex(-1);
               }
             }}
-            className="h-11 rounded-sm border-0 bg-card px-10 text-sm text-foreground shadow-panel placeholder:text-muted-foreground focus-visible:ring-0 focus-visible:ring-ring"
+            className="h-11 rounded-sm border-0 bg-card px-10 text-sm text-foreground shadow-panel placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
           />
           {searchValue ? (
             <button
@@ -6662,7 +6681,7 @@ export function MapView({
                 setSearchError(null);
                 setHighlightedResultIndex(-1);
               }}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground transition hover:text-foreground"
+              className="absolute right-1.5 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded text-muted-foreground transition hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               aria-label={t("map.clear_search")}
             >
               <X className="h-4 w-4" />
@@ -6812,7 +6831,9 @@ export function MapView({
                           <span className="min-w-0 truncate">{layer.name}</span>
                           <span className="text-caption text-muted-foreground">{Math.round(layer.opacity * 100)}%</span>
                         </div>
-                        <p className="mt-0.5 text-caption text-muted-foreground">{layer.geometry_type} / {layer.storage_strategy}</p>
+                        <p className="mt-0.5 text-caption text-muted-foreground">
+                          {formatReferenceLayerKindLabel(layer.geometry_type, layer.storage_strategy)}
+                        </p>
                       </div>
                     ))}
                   </div>
@@ -6876,7 +6897,7 @@ export function MapView({
 
           {drawingMode === "drawing" && drawingPointer ? (
             <div
-              className="pointer-events-none absolute z-20 max-w-80 rounded-md border border-[#d6a800] bg-[#ffd84d] px-3 py-2 text-[13px] font-semibold text-[#1f2937] shadow-panel"
+              className="pointer-events-none absolute z-20 max-w-80 rounded-md border border-warning/40 bg-warning px-3 py-2 text-[13px] font-semibold text-warning-foreground shadow-panel"
               style={{ left: drawingPointer[0] + 16, top: drawingPointer[1] + 16 }}
             >
               {drawingInstruction || drawingHelperMessage(drawingSubMode, draftVertices.length, firstVertexCloseTarget)}

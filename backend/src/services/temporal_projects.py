@@ -82,6 +82,7 @@ PairRunner = Callable[[RunRequest], RunResponse]
 
 PROJECT_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{3,128}$")
 PROJECT_REGISTRY_FILENAME = "temporal_projects_registry.json"
+PROJECT_COMPACT_METADATA_FILENAME = "project_compact_metadata.json"
 logger = logging.getLogger(__name__)
 
 
@@ -404,6 +405,345 @@ def load_temporal_project_response_payload(project_id: str, settings: Settings) 
         round((time.perf_counter() - started_at) * 1000, 2),
     )
     return payload
+
+
+def _resolve_existing_temporal_project_dir(settings: Settings, project_id: str) -> Path:
+    safe_project_id = _safe_project_id(project_id)
+    registry = _load_project_registry(settings)
+    candidates: list[Path] = []
+    registry_dir = registry.get(project_id)
+    if registry_dir:
+        candidates.append(Path(registry_dir).expanduser())
+    candidates.append(settings.temporal_projects_dir / safe_project_id)
+
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved.is_dir() and (
+            (resolved / "project_summary.json").is_file()
+            or (resolved / "project.json").is_file()
+            or (resolved / "milestones").is_dir()
+        ):
+            return resolved
+    raise FileNotFoundError(f"Unknown temporal project: {project_id}")
+
+
+def _load_compact_project_summary(project_id: str, project_dir: Path) -> TemporalProjectSummary:
+    summary_path = project_dir / "project_summary.json"
+    if summary_path.is_file():
+        try:
+            summary = TemporalProjectSummary.model_validate(json.loads(summary_path.read_text()))
+            if summary.project_id == project_id:
+                return summary
+        except Exception as exc:
+            logger.warning(
+                "COMPACT_PROJECT_DETAIL_SUMMARY_INVALID projectId=%s path=%s error=%s",
+                project_id,
+                summary_path,
+                exc,
+            )
+
+    milestone_dirs = [path for path in (project_dir / "milestones").iterdir() if path.is_dir()] if (project_dir / "milestones").is_dir() else []
+    try:
+        updated_at = datetime.fromtimestamp(project_dir.stat().st_mtime, UTC).isoformat()
+    except OSError:
+        updated_at = _utc_now_iso()
+    return TemporalProjectSummary(
+        project_id=project_id,
+        name=project_id,
+        project_dir=str(project_dir),
+        project_kind="temporal",
+        display_name=_project_summary_display_name(project_id, project_id, len(milestone_dirs)),
+        semantics="expansion_only",
+        milestone_count=len(milestone_dirs),
+        complete_milestone_count=len(milestone_dirs),
+        created_at=updated_at,
+        updated_at=updated_at,
+        download_bundle_path=None,
+    )
+
+
+def _project_compact_metadata_json_path(project_json_path: Path) -> Path:
+    return project_json_path.with_name(PROJECT_COMPACT_METADATA_FILENAME)
+
+
+def _write_project_compact_metadata(project: TemporalProject, project_json_path: Path) -> None:
+    project_json_mtime_ns: int | None = None
+    try:
+        project_json_mtime_ns = project_json_path.stat().st_mtime_ns
+    except OSError:
+        pass
+    payload = {
+        "project_id": project.project_id,
+        "project_json_mtime_ns": project_json_mtime_ns,
+        "aoi_geojson": project.aoi_geojson,
+        "milestones": [
+            {
+                "release_identifier": milestone.release_identifier,
+                "release_date": milestone.release_date,
+                "status": milestone.status,
+                "source_mode": milestone.source_mode,
+                "warnings": milestone.warnings,
+                "error_message": milestone.error_message,
+                "metrics": milestone.metrics.model_dump(mode="json") if milestone.metrics is not None else None,
+            }
+            for milestone in project.milestones
+        ],
+    }
+    _project_compact_metadata_json_path(project_json_path).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _load_project_compact_metadata(project_id: str, project_dir: Path) -> dict[str, Any]:
+    metadata_path = project_dir / PROJECT_COMPACT_METADATA_FILENAME
+    if not metadata_path.is_file():
+        return {}
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning(
+            "COMPACT_PROJECT_METADATA_INVALID projectId=%s path=%s error=%s",
+            project_id,
+            metadata_path,
+            exc,
+        )
+        return {}
+    if not isinstance(metadata, dict) or metadata.get("project_id") != project_id:
+        return {}
+    project_json_path = project_dir / "project.json"
+    expected_mtime_ns = metadata.get("project_json_mtime_ns")
+    if project_json_path.is_file() and isinstance(expected_mtime_ns, int):
+        try:
+            if project_json_path.stat().st_mtime_ns != expected_mtime_ns:
+                logger.info("COMPACT_PROJECT_METADATA_STALE projectId=%s path=%s", project_id, metadata_path)
+                return {}
+        except OSError:
+            return {}
+    return metadata
+
+
+def _compact_artifact_entry(
+    *,
+    project_id: str,
+    release_identifier: str,
+    artifact_key: str,
+    path: Path,
+    description: str,
+    media_type: str,
+) -> dict[str, Any]:
+    stat = path.stat()
+    size_bytes = stat.st_size
+    compute_geojson_metadata = media_type != "application/geo+json" or size_bytes < TEMPORAL_VECTOR_TILE_METADATA_THRESHOLD_BYTES
+    feature_count, bbox = (
+        _geojson_feature_count_and_bbox(path)
+        if compute_geojson_metadata and media_type == "application/geo+json"
+        else (None, None)
+    )
+    empty_artifact = media_type == "application/geo+json" and _is_empty_qgis_geojson_artifact(
+        path=path,
+        feature_count=feature_count,
+        size_bytes=size_bytes,
+    )
+    if empty_artifact:
+        logger.info(
+            "COMPACT_PROJECT_DETAIL_SKIPPED_EMPTY_ARTIFACT projectId=%s releaseIdentifier=%s artifactKey=%s sizeBytes=%s",
+            project_id,
+            release_identifier,
+            artifact_key,
+            size_bytes,
+        )
+    artifact_url = f"/api/temporal-projects/{project_id}/milestones/{release_identifier}/artifacts/{artifact_key}"
+    tilejson_url = None
+    tiles_url_template = None
+    vector_source_layer = None
+    if not empty_artifact and media_type == "application/geo+json" and _should_advertise_vector_tiles(feature_count, size_bytes):
+        tilejson_url = _temporal_vector_tilejson_route(project_id, release_identifier, artifact_key)
+        tiles_url_template = _temporal_vector_tiles_route(project_id, release_identifier, artifact_key)
+        vector_source_layer = TEMPORAL_VECTOR_TILE_SOURCE_LAYER
+
+    return {
+        "exists": not empty_artifact,
+        "empty": empty_artifact,
+        "kind": "vector_tilejson" if tilejson_url else ("empty_geojson" if empty_artifact else "geojson_fallback"),
+        "name": f"{release_identifier}_{artifact_key}",
+        "path": str(path),
+        "media_type": media_type,
+        "description": description,
+        "key": artifact_key,
+        "feature_count": feature_count,
+        "size_bytes": size_bytes,
+        "source_mtime_ns": stat.st_mtime_ns,
+        "bbox": bbox,
+        "artifact_url": artifact_url if not empty_artifact else None,
+        "geojson_url": f"{artifact_url}.geojson" if not empty_artifact and media_type == "application/geo+json" else None,
+        "download_url": f"{artifact_url}.geojson" if not empty_artifact and media_type == "application/geo+json" else None,
+        "tilejson_url": tilejson_url,
+        "tiles_url_template": tiles_url_template,
+        "source_layer": vector_source_layer,
+        "vector_source_layer": vector_source_layer,
+        "geojson_fallback_url": artifact_url if not empty_artifact else None,
+    }
+
+
+def _valid_compact_bounds(bounds: list[float] | tuple[float, ...] | None) -> list[float] | None:
+    if not bounds or len(bounds) < 4:
+        return None
+    west, south, east, north = (float(value) for value in bounds[:4])
+    if not all(math.isfinite(value) for value in (west, south, east, north)):
+        return None
+    if west >= east or south >= north:
+        return None
+    if west < -180 or east > 180 or south < -90 or north > 90:
+        return None
+    return [west, south, east, north]
+
+
+def _compact_bounds_center(bounds: list[float] | None) -> list[float] | None:
+    if not bounds:
+        return None
+    west, south, east, north = bounds
+    return [(west + east) / 2, (south + north) / 2]
+
+
+def _merge_compact_bounds(bounds_items: list[list[float] | None]) -> list[float] | None:
+    valid_items = [bounds for bounds in bounds_items if bounds]
+    if not valid_items:
+        return None
+    return [
+        min(bounds[0] for bounds in valid_items),
+        min(bounds[1] for bounds in valid_items),
+        max(bounds[2] for bounds in valid_items),
+        max(bounds[3] for bounds in valid_items),
+    ]
+
+
+def _compact_reference_cog_bounds_wgs84(cog_path: Path) -> list[float] | None:
+    try:
+        with rasterio.open(cog_path) as src:
+            if src.crs is not None:
+                return _valid_compact_bounds(
+                    [
+                        float(value)
+                        for value in transform_bounds(src.crs, "EPSG:4326", *src.bounds, densify_pts=21)
+                    ]
+                )
+            return _valid_compact_bounds([float(src.bounds.left), float(src.bounds.bottom), float(src.bounds.right), float(src.bounds.top)])
+    except Exception:
+        logger.debug("COMPACT_PROJECT_REFERENCE_BOUNDS_FAILED cogPath=%s", cog_path, exc_info=True)
+        return None
+
+
+def load_temporal_project_compact_payload(project_id: str, settings: Settings) -> dict[str, Any]:
+    started_at = time.perf_counter()
+    logger.info("COMPACT_PROJECT_DETAIL_STARTED projectId=%s", project_id)
+    project_dir = _resolve_existing_temporal_project_dir(settings, project_id)
+    summary = _load_compact_project_summary(project_id, project_dir)
+    compact_metadata = _load_project_compact_metadata(project_id, project_dir)
+    milestone_metadata_by_release = {
+        str(item.get("release_identifier")): item
+        for item in compact_metadata.get("milestones", [])
+        if isinstance(item, dict) and item.get("release_identifier")
+    }
+    milestones_dir = project_dir / "milestones"
+    milestone_dirs = sorted((path for path in milestones_dir.iterdir() if path.is_dir()), key=lambda path: path.name) if milestones_dir.is_dir() else []
+
+    milestones: list[dict[str, Any]] = []
+    milestone_bounds_items: list[list[float] | None] = []
+    artifact_count = 0
+    complete_milestone_count = 0
+    for milestone_dir in milestone_dirs:
+        release_identifier = milestone_dir.name
+        milestone_metadata = milestone_metadata_by_release.get(release_identifier, {})
+        reference_cog_path = milestone_dir / "reference_imagery_cog.tif"
+        reference_exists = reference_cog_path.is_file()
+        reference_bounds = _compact_reference_cog_bounds_wgs84(reference_cog_path) if reference_exists else None
+        artifacts: dict[str, dict[str, Any]] = {}
+        for artifact_key, (_field_path, filename, description, media_type) in TEMPORAL_LAYER_ARTIFACTS.items():
+            artifact_path = milestone_dir / filename
+            if not artifact_path.is_file():
+                continue
+            artifacts[artifact_key] = _compact_artifact_entry(
+                project_id=project_id,
+                release_identifier=release_identifier,
+                artifact_key=artifact_key,
+                path=artifact_path,
+                description=description,
+                media_type=media_type,
+            )
+        artifact_count += sum(1 for artifact in artifacts.values() if artifact.get("exists"))
+        milestone_bounds = _merge_compact_bounds(
+            [reference_bounds]
+            + [
+                _valid_compact_bounds(artifact.get("bbox"))
+                for artifact in artifacts.values()
+                if artifact.get("exists") and not artifact.get("empty")
+            ]
+        )
+        milestone_bounds_items.append(milestone_bounds)
+        milestone_complete = reference_exists or any(artifact.get("exists") for artifact in artifacts.values())
+        complete_milestone_count += 1 if milestone_complete else 0
+        milestones.append(
+            {
+                "release_identifier": release_identifier,
+                "label": release_identifier,
+                "release_date": milestone_metadata.get("release_date"),
+                "status": milestone_metadata.get("status") or ("complete" if milestone_complete else "pending"),
+                "source_mode": milestone_metadata.get("source_mode") or "automated",
+                "warnings": milestone_metadata.get("warnings") if isinstance(milestone_metadata.get("warnings"), list) else [],
+                "error_message": milestone_metadata.get("error_message"),
+                "metrics": milestone_metadata.get("metrics") if isinstance(milestone_metadata.get("metrics"), dict) else None,
+                "bounds": milestone_bounds,
+                "bbox": milestone_bounds,
+                "center": _compact_bounds_center(milestone_bounds),
+                "reference_imagery": {
+                    "exists": reference_exists,
+                    "kind": "raster_tilejson" if reference_exists else None,
+                    "storage_strategy": "raster_tiles" if reference_exists else None,
+                    "cog_path": str(reference_cog_path) if reference_exists else None,
+                    "raster_bounds_wgs84": reference_bounds,
+                    "tilejson_url": (
+                        f"/api/temporal-projects/{project_id}/milestones/{release_identifier}/reference/tilejson.json"
+                        if reference_exists
+                        else None
+                    ),
+                    "tiles_url_template": (
+                        f"/api/temporal-projects/{project_id}/milestones/{release_identifier}/reference/tiles/{{z}}/{{x}}/{{y}}.png"
+                        if reference_exists
+                        else None
+                    ),
+                    "tile_size": 256 if reference_exists else None,
+                },
+                "artifacts": artifacts,
+            }
+        )
+
+    duration_ms = round((time.perf_counter() - started_at) * 1000, 2)
+    logger.info(
+        "COMPACT_PROJECT_DETAIL_SERVED projectId=%s milestoneCount=%s artifactCount=%s durationMs=%s",
+        project_id,
+        len(milestones),
+        artifact_count,
+        duration_ms,
+    )
+    project_bounds = _merge_compact_bounds(milestone_bounds_items)
+    compact_aoi_geojson = compact_metadata.get("aoi_geojson") if isinstance(compact_metadata.get("aoi_geojson"), dict) else None
+    return {
+        "id": project_id,
+        "project_id": project_id,
+        "name": summary.name,
+        "status": "complete" if milestones and complete_milestone_count == len(milestones) else "pending",
+        "project_dir": str(project_dir),
+        "semantics": summary.semantics,
+        "created_at": summary.created_at,
+        "updated_at": summary.updated_at,
+        "download_bundle_path": summary.download_bundle_path,
+        "aoi_geojson": compact_aoi_geojson or _bbox_to_geojson_polygon(project_bounds),
+        "bounds": project_bounds,
+        "bbox": project_bounds,
+        "center": _compact_bounds_center(project_bounds),
+        "milestone_count": len(milestones) or summary.milestone_count,
+        "complete_milestone_count": complete_milestone_count or summary.complete_milestone_count,
+        "milestones": milestones,
+        "loading_mode": "compact",
+    }
 
 
 def _load_project_registry(settings: Settings) -> dict[str, str]:
@@ -3423,24 +3763,6 @@ def _refresh_project_bundle(project: TemporalProject, settings: Settings) -> Tem
                     )
                 )
 
-        if cached_pair_response is not None and cached_pair_response.downloadable_zip_path:
-            zip_path = Path(cached_pair_response.downloadable_zip_path)
-            if zip_path.is_file():
-                milestone_artifacts.append(
-                    TemporalArtifactEntry(
-                        name=f"{milestone.release_identifier}_export_bundle",
-                        path=str(zip_path),
-                        media_type="application/zip",
-                        description="Pairwise request export bundle used to publish this milestone",
-                    )
-                )
-                logger.info(
-                    "TEMPORAL_PROJECT_PUBLICATION_BUNDLE_REGISTERED projectId=%s releaseIdentifier=%s path=%s bytes=%s",
-                    project.project_id,
-                    milestone.release_identifier,
-                    zip_path,
-                    zip_path.stat().st_size,
-                )
         milestone.artifacts = milestone_artifacts
 
     externalized_count, empty_baseline_artifacts_removed = _externalize_temporal_artifact_payloads_in_project(
@@ -4784,28 +5106,6 @@ def _ensure_existing_milestone_artifacts_registered(
             feature_counts.get(filename),
         )
 
-    if response.downloadable_zip_path:
-        zip_path = Path(response.downloadable_zip_path)
-        if zip_path.is_file():
-            zip_artifact_name = f"{milestone.release_identifier}_export_bundle"
-            if all(artifact.name != zip_artifact_name for artifact in milestone.artifacts):
-                milestone.artifacts.append(
-                    TemporalArtifactEntry(
-                        name=zip_artifact_name,
-                        path=str(zip_path),
-                        media_type="application/zip",
-                        description="Pairwise request export bundle used to publish this milestone",
-                    )
-                )
-            logger.info(
-                "TEMPORAL_PROJECT_PUBLICATION_BUNDLE_REGISTERED projectId=%s releaseIdentifier=%s path=%s bytes=%s",
-                project.project_id,
-                milestone.release_identifier,
-                zip_path,
-                zip_path.stat().st_size,
-            )
-
-
 def publish_completed_tiled_request(
     *,
     request_id: str,
@@ -5229,6 +5529,7 @@ def _project_summary(project: TemporalProject, *, project_dir: str | None = None
 def _write_project_summary(project: TemporalProject, project_json_path: Path) -> None:
     summary = _project_summary(project, project_dir=str(project_json_path.parent))
     _project_summary_json_path(project_json_path).write_text(json.dumps(summary.model_dump(mode="json"), indent=2))
+    _write_project_compact_metadata(project, project_json_path)
 
 
 def _load_cached_project_summary(
@@ -5656,6 +5957,126 @@ def _recompute_project_outputs(project: TemporalProject, aoi_geometry: BaseGeome
     return _recompute_project_outputs_from_index(project, aoi_geometry, 0)
 
 
+def _storage_size_bytes(path: Path | None) -> int:
+    if path is None or not path.exists():
+        return 0
+    if path.is_file() or path.is_symlink():
+        try:
+            return path.stat().st_size
+        except OSError:
+            return 0
+    total = 0
+    for child in path.rglob("*"):
+        if not child.is_file() and not child.is_symlink():
+            continue
+        try:
+            total += child.stat().st_size
+        except OSError:
+            pass
+    return total
+
+
+def _wayback_mosaic_storage_size_for_milestone(milestone: TemporalMilestone) -> tuple[str | None, int]:
+    reference = milestone.reference_imagery
+    canonical_cog_path = Path(reference.canonical_cog_path) if reference and reference.canonical_cog_path else None
+    if canonical_cog_path is None:
+        return None, 0
+    metadata = read_reference_imagery_cache_metadata(canonical_cog_path.with_name("metadata.json"))
+    source_dir = metadata.get("source_wayback_mosaic_dir") if metadata else None
+    if not isinstance(source_dir, str) or not source_dir:
+        return None, 0
+    source_path = Path(source_dir)
+    return str(source_path), _storage_size_bytes(source_path)
+
+
+def _cleanup_report_paths(entries: list[dict[str, Any]]) -> list[str]:
+    paths: list[str] = []
+    for entry in entries:
+        value = entry.get("path")
+        if isinstance(value, str) and value:
+            paths.append(value)
+    return paths
+
+
+def _cleanup_published_temporal_pair_request(
+    *,
+    project: TemporalProject,
+    milestone: TemporalMilestone,
+    settings: Settings,
+) -> None:
+    request_hash = milestone.pair_request_hash or milestone.populated_request_hash
+    if not request_hash:
+        return
+    physical_request_hash = milestone.populated_request_hash or request_hash
+    request_dir = Path(milestone.request_workspace_path) if milestone.request_workspace_path else settings.request_cache_dir / physical_request_hash
+    project_dir = Path(project.project_dir) if project.project_dir else settings.temporal_projects_dir / project.project_id
+    milestone_dir = project_dir / "milestones" / milestone.release_identifier
+    wayback_mosaic_dir, wayback_mosaic_size_bytes = _wayback_mosaic_storage_size_for_milestone(milestone)
+    request_size_before = _storage_size_bytes(request_dir)
+    logger.info(
+        "TEMPORAL_PAIR_STORAGE_ACCOUNTING_BEFORE projectId=%s releaseIdentifier=%s requestHash=%s populatedRequestHash=%s requestDir=%s requestSizeBytes=%s milestoneDir=%s milestoneSizeBytes=%s waybackMosaicDir=%s waybackMosaicSizeBytes=%s",
+        project.project_id,
+        milestone.release_identifier,
+        request_hash,
+        physical_request_hash,
+        request_dir,
+        request_size_before,
+        milestone_dir,
+        _storage_size_bytes(milestone_dir),
+        wayback_mosaic_dir,
+        wayback_mosaic_size_bytes,
+    )
+    from src.services.request_cleanup import run_post_completion_request_cleanup_if_enabled
+
+    report = None
+    cleanup_error: str | None = None
+    try:
+        report = run_post_completion_request_cleanup_if_enabled(
+            request_hash=request_hash,
+            pair_request_hash=milestone.pair_request_hash,
+            populated_request_hash=milestone.populated_request_hash,
+            request_workspace_path=milestone.request_workspace_path,
+            project_id=project.project_id,
+            release_identifier=milestone.release_identifier,
+            settings=settings,
+        )
+    except Exception as exc:
+        cleanup_error = str(exc)
+        logger.warning(
+            "TEMPORAL_PAIR_REQUEST_CLEANUP_FAILED projectId=%s releaseIdentifier=%s requestHash=%s populatedRequestHash=%s error=%s",
+            project.project_id,
+            milestone.release_identifier,
+            request_hash,
+            physical_request_hash,
+            exc,
+            exc_info=True,
+        )
+    request_size_after = _storage_size_bytes(request_dir)
+    preserved_paths: list[str] = []
+    deleted_paths: list[str] = []
+    if report is not None:
+        preserved_paths = _cleanup_report_paths(report.preserved) + _cleanup_report_paths(report.preserved_request_files)
+        deleted_paths = _cleanup_report_paths(report.deleted)
+    logger.info(
+        "TEMPORAL_PAIR_STORAGE_ACCOUNTING_AFTER projectId=%s releaseIdentifier=%s requestHash=%s populatedRequestHash=%s cleanupMode=%s cleanupSkipped=%s cleanupReason=%s bytesDeleted=%s requestSizeBeforeBytes=%s requestSizeAfterBytes=%s requestBytesFreedObserved=%s preservedCount=%s deletedCount=%s preservedPaths=%s deletedPaths=%s",
+        project.project_id,
+        milestone.release_identifier,
+        request_hash,
+        physical_request_hash,
+        report.mode if report is not None else settings.post_completion_request_cleanup_mode,
+        report.skipped if report is not None else True,
+        report.reason if report is not None else cleanup_error or "cleanup_disabled_or_failed",
+        report.bytes_deleted if report is not None else 0,
+        request_size_before,
+        request_size_after,
+        max(request_size_before - request_size_after, 0),
+        len(preserved_paths),
+        len(deleted_paths),
+        json.dumps(preserved_paths, sort_keys=True),
+        json.dumps(deleted_paths, sort_keys=True),
+    )
+
+
 def run_temporal_project(
     project_id: str,
     *,
@@ -5828,8 +6249,17 @@ def run_temporal_project(
             settings.semantic_threshold,
             milestone.metrics.total_area_m2 if milestone.metrics is not None else None,
         )
-        previous_cumulative = _geometry_from_geojson(milestone.cumulative_union_geojson)
-        previous_successful_release_identifier = milestone.release_identifier
+        project.updated_at = _utc_now_iso()
+        project = _refresh_project_bundle(project, settings)
+        project = _save_project(project, settings)
+        persisted_milestone = project.milestones[index]
+        _cleanup_published_temporal_pair_request(
+            project=project,
+            milestone=persisted_milestone,
+            settings=settings,
+        )
+        previous_cumulative = _geometry_from_geojson(persisted_milestone.cumulative_union_geojson)
+        previous_successful_release_identifier = persisted_milestone.release_identifier
 
     project.updated_at = _utc_now_iso()
     project = _refresh_project_bundle(project, settings)

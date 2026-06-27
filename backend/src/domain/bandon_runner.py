@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 from dataclasses import dataclass
 import hashlib
 import json
@@ -10,16 +11,21 @@ import shutil
 import sys
 import subprocess
 import threading
+import time
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from PIL import Image
+
+from src.domain.inference_timing import elapsed_ms
 
 if TYPE_CHECKING:
     from src.config import Settings
 
 
 logger = logging.getLogger(__name__)
+_CHECKPOINT_SHA_CACHE_LOCK = threading.Lock()
+_CHECKPOINT_SHA_CACHE: dict[tuple[str, int, int], str] = {}
 
 
 @dataclass(frozen=True)
@@ -85,6 +91,7 @@ class BandonRunResult:
     stderr: str
     command: list[str]
     launcher: str
+    parent_timing_ms: dict[str, Any] | None = None
 
 
 def _resolve_runtime_paths(settings: Settings) -> dict[str, Path]:
@@ -140,6 +147,42 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _checkpoint_sha256(path: Path) -> str:
+    resolved = path.expanduser().resolve()
+    stat = resolved.stat()
+    key = (str(resolved), int(stat.st_size), int(stat.st_mtime_ns))
+    with _CHECKPOINT_SHA_CACHE_LOCK:
+        cached = _CHECKPOINT_SHA_CACHE.get(key)
+    if cached is not None:
+        return cached
+    digest = _sha256_file(resolved)
+    with _CHECKPOINT_SHA_CACHE_LOCK:
+        _CHECKPOINT_SHA_CACHE.clear()
+        _CHECKPOINT_SHA_CACHE[key] = digest
+    return digest
+
+
+def _process_rss_mb(pid: int) -> float | None:
+    try:
+        completed = subprocess.run(
+            ["ps", "-o", "rss=", "-p", str(int(pid))],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except Exception:
+        return None
+    if completed.returncode != 0:
+        return None
+    raw = completed.stdout.strip()
+    if not raw:
+        return None
+    try:
+        return round(float(raw.splitlines()[-1].strip()) / 1024.0, 3)
+    except ValueError:
+        return None
 
 
 def _read_pipe_thread(fd: int, chunks: list[bytes]) -> None:
@@ -385,6 +428,8 @@ def run_bandon_inference(
     effective_backend: str | None = None,
     threshold: float | None = None,
 ) -> BandonRunResult:
+    timing_enabled = bool(getattr(settings, "inference_timing_enabled", False))
+    command_prepare_started = time.perf_counter()
     paths = _resolve_runtime_paths(settings)
     launcher_name, launcher_prefix, _python_executable = _resolve_launcher(paths["env_prefix"])
     command = launcher_prefix + [
@@ -443,10 +488,17 @@ def run_bandon_inference(
     else:
         logger.info("BANDON_CROP_SKIP_CLI_DISABLED reason=setting_disabled")
 
+    command_prepare_ms = elapsed_ms(command_prepare_started)
+    command_env = _clean_env()
+    if timing_enabled:
+        command_env["APP_INFERENCE_TIMING_ENABLED"] = "1"
+
+    subprocess_started = time.perf_counter()
     completed = _run_command(
         command,
-        env=_clean_env(),
+        env=command_env,
     )
+    subprocess_wall_ms = elapsed_ms(subprocess_started)
     if completed.returncode != 0:
         error_text = completed.stderr.strip() or completed.stdout.strip() or "unknown error"
         raise RuntimeError(
@@ -464,13 +516,32 @@ def run_bandon_inference(
     if not mask_path.exists():
         raise RuntimeError(f"BANDON did not write change_mask.png to {mask_path}")
 
+    metadata_read_started = time.perf_counter()
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    result_metadata_read_ms = elapsed_ms(metadata_read_started)
+    checkpoint_sha_started = time.perf_counter()
+    checkpoint_sha256 = _checkpoint_sha256(paths["checkpoint_path"])
+    parent_checkpoint_sha_ms = elapsed_ms(checkpoint_sha_started)
+    output_read_started = time.perf_counter()
+    change_probability = np.load(probability_path).astype(np.float32)
+    change_mask = np.asarray(Image.open(mask_path).convert("L"), dtype=np.uint8) > 0
+    bandon_output_read_ms = elapsed_ms(output_read_started)
+    runner_timing_ms = {
+        "subprocess_command_prepare_ms": command_prepare_ms,
+        "subprocess_wall_ms": subprocess_wall_ms,
+        "subprocess_return_code": int(completed.returncode),
+        "subprocess_stdout_bytes": len(completed.stdout.encode("utf-8", errors="replace")),
+        "subprocess_stderr_bytes": len(completed.stderr.encode("utf-8", errors="replace")),
+        "parent_checkpoint_sha_ms": parent_checkpoint_sha_ms,
+        "result_metadata_read_ms": result_metadata_read_ms,
+        "bandon_output_read_ms": bandon_output_read_ms,
+    }
     metadata.update(
         {
             "effective_backend": effective_backend or settings.inference_backend,
             "runner_family": metadata.get("runner_family") or "bandon_mps",
             "checkpoint_path": str(paths["checkpoint_path"]),
-            "checkpoint_sha256": _sha256_file(paths["checkpoint_path"]),
+            "checkpoint_sha256": checkpoint_sha256,
             "threshold": threshold,
             "device": settings.bandon_device,
             "device_requested": metadata.get("device_requested") or settings.bandon_device,
@@ -488,10 +559,10 @@ def run_bandon_inference(
             "input_t2": str(image_b_path),
         }
     )
+    if timing_enabled:
+        metadata["bandon_runner_timing_ms"] = runner_timing_ms
     metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
     child_timing = metadata.get("stage_timings") if isinstance(metadata.get("stage_timings"), dict) else None
-    change_probability = np.load(probability_path).astype(np.float32)
-    change_mask = np.asarray(Image.open(mask_path).convert("L"), dtype=np.uint8) > 0
 
     device_resolved = str(metadata.get("device_resolved") or "")
     if settings.bandon_device in {"cuda", "mps"} and device_resolved != settings.bandon_device:
@@ -515,4 +586,273 @@ def run_bandon_inference(
         stderr=completed.stderr,
         command=command,
         launcher=launcher_name,
+        parent_timing_ms=runner_timing_ms if timing_enabled else None,
     )
+
+
+class PersistentBandonRunner:
+    """One BANDON model process reused across many tile predictions."""
+
+    def __init__(
+        self,
+        *,
+        settings: Settings,
+        effective_backend: str | None = None,
+        threshold: float | None = None,
+    ) -> None:
+        self._settings = settings
+        self._effective_backend = effective_backend or settings.inference_backend
+        self._threshold = threshold
+        self._timing_enabled = bool(getattr(settings, "inference_timing_enabled", False))
+        self._paths = _resolve_runtime_paths(settings)
+        self._launcher_name, launcher_prefix, _python_executable = _resolve_launcher(self._paths["env_prefix"])
+        self._worker_path = self._paths["repo_dir"] / "tools" / "persistent_infer_worker.py"
+        if not self._worker_path.exists():
+            raise RuntimeError(f"BANDON persistent worker is missing: {self._worker_path}")
+        self._command = launcher_prefix + [
+            str(self._worker_path),
+            "--config",
+            str(self._paths["config_path"]),
+            "--checkpoint",
+            str(self._paths["checkpoint_path"]),
+            "--device",
+            settings.bandon_device,
+            "--effective-backend",
+            self._effective_backend,
+        ]
+        if settings.bandon_allow_mps_fallback:
+            self._command.append("--allow-mps-fallback")
+        self._stderr_chunks: list[bytes] = []
+        env = _clean_env()
+        if self._timing_enabled:
+            env["APP_INFERENCE_TIMING_ENABLED"] = "1"
+        startup_started = time.perf_counter()
+        self._process = subprocess.Popen(
+            self._command,
+            env=env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=False,
+            bufsize=0,
+        )
+        if self._process.stderr is not None:
+            self._stderr_thread = threading.Thread(
+                target=_read_pipe_thread,
+                args=(self._process.stderr.fileno(), self._stderr_chunks),
+                daemon=True,
+            )
+            self._stderr_thread.start()
+        else:
+            self._stderr_thread = None
+        atexit.register(self.close)
+        ready = self._read_response()
+        self._startup_wall_ms = elapsed_ms(startup_started)
+        if ready.get("status") != "ready":
+            self.close()
+            error = ready.get("error") or self._stderr_tail() or "unknown persistent worker startup error"
+            raise RuntimeError(f"BANDON persistent worker failed to start: {error}")
+        self._ready = ready
+        self._predict_count = 0
+
+    @property
+    def model_load_count(self) -> int:
+        value = self._ready.get("model_load_count")
+        return int(value) if isinstance(value, (int, float)) else 1
+
+    @property
+    def command(self) -> list[str]:
+        return list(self._command)
+
+    @property
+    def launcher(self) -> str:
+        return self._launcher_name
+
+    def _stderr_tail(self) -> str:
+        data = b"".join(self._stderr_chunks)
+        if not data:
+            return ""
+        return data[-8000:].decode("utf-8", errors="replace")
+
+    def _read_response(self) -> dict[str, Any]:
+        stdout = self._process.stdout
+        if stdout is None:
+            raise RuntimeError("BANDON persistent worker stdout pipe is unavailable.")
+        while True:
+            line = stdout.readline()
+            if not line:
+                returncode = self._process.poll()
+                if returncode is not None:
+                    raise RuntimeError(
+                        "BANDON persistent worker exited before response "
+                        f"(code {returncode}): {self._stderr_tail()}"
+                    )
+                continue
+            try:
+                payload = json.loads(line.decode("utf-8"))
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                return payload
+
+    def _send(self, payload: dict[str, Any]) -> None:
+        stdin = self._process.stdin
+        if stdin is None:
+            raise RuntimeError("BANDON persistent worker stdin pipe is unavailable.")
+        stdin.write(json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\n")
+        stdin.flush()
+
+    def predict_tile(
+        self,
+        *,
+        image_a_path: Path,
+        image_b_path: Path,
+        out_dir: Path,
+        t1_valid_mask_path: Path | None = None,
+        t2_valid_mask_path: Path | None = None,
+        aoi_mask_path: Path | None = None,
+    ) -> BandonRunResult:
+        if self._process.poll() is not None:
+            raise RuntimeError(
+                "BANDON persistent worker is not running "
+                f"(code {self._process.returncode}): {self._stderr_tail()}"
+            )
+        skip_mask_paths = (t1_valid_mask_path, t2_valid_mask_path, aoi_mask_path)
+        skip_invalid_crops = bool(
+            self._settings.bandon_skip_invalid_crops
+            and all(path is not None and path.exists() for path in skip_mask_paths)
+        )
+        if self._settings.bandon_skip_invalid_crops and not skip_invalid_crops:
+            logger.warning(
+                "BANDON_CROP_SKIP_PERSISTENT_DISABLED reason=missing_masks t1=%s t2=%s aoi=%s",
+                t1_valid_mask_path,
+                t2_valid_mask_path,
+                aoi_mask_path,
+            )
+        request = {
+            "command": "predict",
+            "image_a": str(image_a_path),
+            "image_b": str(image_b_path),
+            "outdir": str(out_dir),
+            "skip_invalid_crops": skip_invalid_crops,
+            "t1_valid_mask": str(t1_valid_mask_path) if t1_valid_mask_path is not None else None,
+            "t2_valid_mask": str(t2_valid_mask_path) if t2_valid_mask_path is not None else None,
+            "aoi_mask": str(aoi_mask_path) if aoi_mask_path is not None else None,
+            "skip_outside_aoi_crops": bool(self._settings.bandon_skip_outside_aoi_crops),
+            "skip_nodata_crops": bool(self._settings.bandon_skip_nodata_crops),
+            "min_valid_ratio_within_aoi": float(self._settings.bandon_min_valid_ratio_within_aoi),
+            "threshold": self._threshold,
+        }
+        request_started = time.perf_counter()
+        self._send(request)
+        response = self._read_response()
+        persistent_request_ms = elapsed_ms(request_started)
+        if response.get("status") != "ok":
+            error = response.get("error") or self._stderr_tail() or "unknown persistent worker error"
+            raise RuntimeError(f"BANDON persistent inference failed: {error}")
+
+        metadata_path = out_dir / "run_metadata.json"
+        probability_path = out_dir / "change_probability.npy"
+        mask_path = out_dir / "change_mask.png"
+        if not metadata_path.exists():
+            raise RuntimeError(f"BANDON persistent worker did not write run_metadata.json to {metadata_path}")
+        if not probability_path.exists():
+            raise RuntimeError(f"BANDON persistent worker did not write change_probability.npy to {probability_path}")
+        if not mask_path.exists():
+            raise RuntimeError(f"BANDON persistent worker did not write change_mask.png to {mask_path}")
+
+        metadata_read_started = time.perf_counter()
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        result_metadata_read_ms = elapsed_ms(metadata_read_started)
+        checkpoint_sha_started = time.perf_counter()
+        checkpoint_sha256 = _checkpoint_sha256(self._paths["checkpoint_path"])
+        parent_checkpoint_sha_ms = elapsed_ms(checkpoint_sha_started)
+        output_read_started = time.perf_counter()
+        change_probability = np.load(probability_path).astype(np.float32)
+        change_mask = np.asarray(Image.open(mask_path).convert("L"), dtype=np.uint8) > 0
+        bandon_output_read_ms = elapsed_ms(output_read_started)
+        self._predict_count += 1
+        runner_timing_ms = {
+            "persistent_worker_request_ms": persistent_request_ms,
+            "persistent_worker_startup_wall_ms": self._startup_wall_ms if self._predict_count == 1 else 0.0,
+            "persistent_worker_pid": int(self._process.pid),
+            "persistent_worker_rss_mb": _process_rss_mb(int(self._process.pid)),
+            "subprocess_command_prepare_ms": 0.0,
+            "subprocess_wall_ms": 0.0,
+            "subprocess_return_code": None,
+            "subprocess_stdout_bytes": 0,
+            "subprocess_stderr_bytes": len(b"".join(self._stderr_chunks)),
+            "parent_checkpoint_sha_ms": parent_checkpoint_sha_ms,
+            "result_metadata_read_ms": result_metadata_read_ms,
+            "bandon_output_read_ms": bandon_output_read_ms,
+        }
+        metadata.update(
+            {
+                "effective_backend": self._effective_backend,
+                "runner_family": metadata.get("runner_family") or "bandon_mps",
+                "bandon_inference_mode": "persistent_runner",
+                "checkpoint_path": str(self._paths["checkpoint_path"]),
+                "checkpoint_sha256": checkpoint_sha256,
+                "threshold": self._threshold,
+                "device": self._settings.bandon_device,
+                "device_requested": metadata.get("device_requested") or self._settings.bandon_device,
+                "device_resolved": metadata.get("device_resolved"),
+                "config_path": str(self._paths["config_path"]),
+                "input_t1": str(image_a_path),
+                "input_t2": str(image_b_path),
+                "model_load_count_total": self.model_load_count,
+            }
+        )
+        if self._timing_enabled:
+            metadata["bandon_runner_timing_ms"] = runner_timing_ms
+        metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
+        child_timing = metadata.get("stage_timings") if isinstance(metadata.get("stage_timings"), dict) else None
+
+        device_resolved = str(metadata.get("device_resolved") or "")
+        if self._settings.bandon_device in {"cuda", "mps"} and device_resolved != self._settings.bandon_device:
+            raise RuntimeError(
+                f"BANDON resolved device '{device_resolved}' instead of requested {self._settings.bandon_device}."
+            )
+        if not self._settings.bandon_allow_mps_fallback:
+            if bool(metadata.get("allow_mps_fallback")):
+                raise RuntimeError("BANDON unexpectedly enabled allow_mps_fallback.")
+            if metadata.get("pytorch_enable_mps_fallback"):
+                raise RuntimeError(
+                    "BANDON unexpectedly ran with PYTORCH_ENABLE_MPS_FALLBACK enabled."
+                )
+
+        return BandonRunResult(
+            change_probability=change_probability,
+            change_mask=change_mask,
+            metadata=metadata,
+            child_timing=child_timing,
+            stdout="",
+            stderr=self._stderr_tail(),
+            command=self.command,
+            launcher=self.launcher,
+            parent_timing_ms=runner_timing_ms if self._timing_enabled else None,
+        )
+
+    def close(self) -> None:
+        process = getattr(self, "_process", None)
+        if process is None or process.poll() is not None:
+            return
+        try:
+            self._send({"command": "shutdown"})
+        except Exception:
+            pass
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass

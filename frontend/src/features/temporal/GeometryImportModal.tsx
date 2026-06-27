@@ -187,19 +187,19 @@ export function GeometryImportModal({
                 <div className="flex-1 min-w-0">
                   {parseResult.valid ? (
                     <div className="space-y-1">
-                      <p className="text-label font-medium text-foreground">
-                        {parseResult.format} geometry parsed successfully
-                      </p>
+                      <p className="text-label font-medium text-foreground">Géométrie importée avec succès.</p>
                       <p className="text-caption text-muted-foreground truncate">
-                        Bounds: [{parseResult.bounds[0].toFixed(4)}, {parseResult.bounds[1].toFixed(4)}, {parseResult.bounds[2].toFixed(4)}, {parseResult.bounds[3].toFixed(4)}]
+                        Emprise détectée : [{parseResult.bounds[0].toFixed(4)}, {parseResult.bounds[1].toFixed(4)}, {parseResult.bounds[2].toFixed(4)}, {parseResult.bounds[3].toFixed(4)}]
                       </p>
                     </div>
                   ) : (
                     <div>
                       <p className="text-label font-medium text-red-900 dark:text-red-200">
-                        {parseResult.format ? `${parseResult.format} parsing error` : "Invalid geometry"}
+                        {parseResult.format ? "Impossible de lire la géométrie." : "Géométrie invalide."}
                       </p>
-                      <p className="mt-1 text-caption text-red-800 dark:text-red-300">{parseResult.error}</p>
+                      <p className="mt-1 text-caption text-red-800 dark:text-red-300">
+                        Vérifiez le fichier importé ou le contenu collé.
+                      </p>
                     </div>
                   )}
                 </div>

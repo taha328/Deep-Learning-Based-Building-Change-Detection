@@ -14,6 +14,7 @@ ModeName = Literal["fast_preview", "full_run"]
 InferenceBackendName = Literal["bandon_mps"]
 CheckpointEnvName = Literal["APP_BANDON_CHECKPOINT_PATH"]
 ModelDeviceName = Literal["auto", "cpu", "cuda", "mps"]
+BandonInferenceModeName = Literal["cli_per_tile", "persistent_runner"]
 PersistenceBackendName = Literal["filesystem", "postgres"]
 PostCompletionRequestCleanupMode = Literal["off", "compact_heavy", "delete_full"]
 LOGGER = logging.getLogger(__name__)
@@ -94,12 +95,15 @@ class Settings(BaseModel):
     wayback_tile_cache_service_kind: str = "mapproxy"
     wayback_heavy_batch_tile_threshold: int = 2000
     wayback_tilemap_preflight_enabled: bool = True
+    wayback_tilemap_preflight_workers: int | None = None
     wayback_metadata_cache_enabled: bool = True
     wayback_metadata_cache_ttl_seconds: int = 604800
     wayback_metadata_cache_dir: Path | None = None
     wayback_tile_preflight_cache_enabled: bool = True
     wayback_tile_preflight_cache_ttl_seconds: int = 604800
     wayback_tile_preflight_cache_dir: Path | None = None
+    wayback_tile_preflight_stale_lock_cleanup_enabled: bool = False
+    wayback_tile_preflight_stale_lock_seconds: float = 3600.0
     mapbox_access_token: str | None = None
     mapbox_satellite_tileset: str = "mapbox.satellite"
     mapbox_current_imagery_enabled: bool = False
@@ -121,6 +125,7 @@ class Settings(BaseModel):
     inference_tile_size: int = 1024
     inference_tile_overlap: int = 128
     inference_tile_batch_size: int = 1
+    inference_timing_enabled: bool = False
     inference_max_in_memory_pixels: int = 25_000_000
     inference_heavy_batch_tile_threshold: int = 2000
     inference_disable_full_preview_png_for_heavy_batch: bool = True
@@ -153,6 +158,7 @@ class Settings(BaseModel):
         default_factory=lambda: DEFAULT_BANDON_CHECKPOINT_PATH
     )
     bandon_device: ModelDeviceName = "auto"
+    bandon_inference_mode: BandonInferenceModeName = "persistent_runner"
     bandon_allow_mps_fallback: bool = False
     bandon_skip_invalid_crops: bool = True
     bandon_skip_outside_aoi_crops: bool = True
@@ -183,6 +189,7 @@ class Settings(BaseModel):
     post_completion_request_cleanup_grace_seconds: int = 300
     post_completion_request_cleanup_keep_provenance: bool = True
     post_completion_request_cleanup_delete_export_bundle: bool = True
+    auto_generate_tiled_export_bundle: bool = False
     enable_client_log_relay: bool = True
     temporal_imagery_prefetch_enabled: bool = False
     temporal_imagery_prefetch_workers: int = 2
@@ -239,6 +246,13 @@ class Settings(BaseModel):
             raise ValueError(f"Unsupported inference backend: {value}. Supported backends: bandon_mps.")
         return value
 
+    @field_validator("bandon_inference_mode", mode="before")
+    @classmethod
+    def validate_bandon_inference_mode(cls, value: object) -> object:
+        if value not in {"cli_per_tile", "persistent_runner"}:
+            raise ValueError("APP_BANDON_INFERENCE_MODE must be one of: cli_per_tile, persistent_runner.")
+        return value
+
     def model_post_init(self, __context: object) -> None:
         if self.wayback_metadata_cache_dir is None:
             self.wayback_metadata_cache_dir = self.runtime_cache_dir / "wayback_metadata_cache"
@@ -288,6 +302,10 @@ class Settings(BaseModel):
             raise ValueError("wayback_tile_sqlite_batch_insert_size must be greater than or equal to 1.")
         if self.wayback_heavy_batch_tile_threshold < 1:
             raise ValueError("wayback_heavy_batch_tile_threshold must be greater than or equal to 1.")
+        if self.wayback_tilemap_preflight_workers is not None and self.wayback_tilemap_preflight_workers < 1:
+            raise ValueError("wayback_tilemap_preflight_workers must be greater than or equal to 1.")
+        if self.wayback_tile_preflight_stale_lock_seconds <= 0:
+            raise ValueError("wayback_tile_preflight_stale_lock_seconds must be greater than 0.")
         if self.inference_tile_size < 128:
             raise ValueError("inference_tile_size must be greater than or equal to 128.")
         if self.inference_tile_overlap < 0:
@@ -330,6 +348,8 @@ class Settings(BaseModel):
             raise ValueError("bandon_min_valid_ratio_within_aoi must be between 0 and 1.")
         if self.bandon_min_model_input_size_px < 1:
             raise ValueError("bandon_min_model_input_size_px must be greater than or equal to 1.")
+        if self.bandon_inference_mode not in {"cli_per_tile", "persistent_runner"}:
+            raise ValueError("APP_BANDON_INFERENCE_MODE must be one of: cli_per_tile, persistent_runner.")
         ratio_values = {
             "addition_max_existing_overlap_ratio": self.addition_max_existing_overlap_ratio,
             "addition_thinness_min_ratio": self.addition_thinness_min_ratio,
@@ -451,6 +471,14 @@ def _int_env_any(names: tuple[str, ...], default: int) -> int:
     return default
 
 
+def _optional_int_env(*names: str) -> int | None:
+    for name in names:
+        value = os.getenv(name)
+        if value:
+            return int(value)
+    return None
+
+
 def _bool_env(name: str, default: bool) -> bool:
     value = os.getenv(name)
     if value is None:
@@ -463,6 +491,16 @@ def _bool_env_any(names: tuple[str, ...], default: bool) -> bool:
         value = os.getenv(name)
         if value is not None:
             return value.strip().lower() in {"1", "true", "yes", "on"}
+    return default
+
+
+def _bandon_inference_mode_env(default: BandonInferenceModeName) -> BandonInferenceModeName:
+    mode = os.getenv("APP_BANDON_INFERENCE_MODE")
+    if mode:
+        return mode  # type: ignore[return-value]
+    enabled = os.getenv("APP_BANDON_PERSISTENT_RUNNER_ENABLED")
+    if enabled is not None:
+        return "persistent_runner" if enabled.strip().lower() in {"1", "true", "yes", "on"} else "cli_per_tile"
     return default
 
 
@@ -661,6 +699,7 @@ def get_settings() -> Settings:
             "APP_WAYBACK_TILEMAP_PREFLIGHT_ENABLED",
             base.wayback_tilemap_preflight_enabled,
         ),
+        wayback_tilemap_preflight_workers=_optional_int_env("APP_WAYBACK_TILEMAP_PREFLIGHT_WORKERS"),
         wayback_metadata_cache_enabled=_bool_env_any(
             ("WAYBACK_METADATA_CACHE_ENABLED", "APP_WAYBACK_METADATA_CACHE_ENABLED"),
             base.wayback_metadata_cache_enabled,
@@ -691,6 +730,14 @@ def get_settings() -> Settings:
                 )
             )
             else None
+        ),
+        wayback_tile_preflight_stale_lock_cleanup_enabled=_bool_env(
+            "APP_WAYBACK_TILE_PREFLIGHT_STALE_LOCK_CLEANUP_ENABLED",
+            base.wayback_tile_preflight_stale_lock_cleanup_enabled,
+        ),
+        wayback_tile_preflight_stale_lock_seconds=_float_env(
+            "APP_WAYBACK_TILE_PREFLIGHT_STALE_LOCK_SECONDS",
+            base.wayback_tile_preflight_stale_lock_seconds,
         ),
         mapbox_access_token=_optional_str_env("MAPBOX_ACCESS_TOKEN"),
         mapbox_satellite_tileset=os.getenv("MAPBOX_SATELLITE_TILESET", base.mapbox_satellite_tileset),
@@ -766,6 +813,10 @@ def get_settings() -> Settings:
         inference_tile_batch_size=_int_env(
             "APP_INFERENCE_TILE_BATCH_SIZE",
             base.inference_tile_batch_size,
+        ),
+        inference_timing_enabled=_bool_env(
+            "APP_INFERENCE_TIMING_ENABLED",
+            base.inference_timing_enabled,
         ),
         inference_max_in_memory_pixels=_int_env(
             "APP_INFERENCE_MAX_IN_MEMORY_PIXELS",
@@ -844,6 +895,7 @@ def get_settings() -> Settings:
         bandon_config_path=Path(os.getenv("APP_BANDON_CONFIG_PATH", str(base.bandon_config_path))),
         bandon_checkpoint_path=Path(os.getenv("APP_BANDON_CHECKPOINT_PATH", str(base.bandon_checkpoint_path))),
         bandon_device=os.getenv("MODEL_DEVICE", os.getenv("APP_BANDON_DEVICE", base.bandon_device)),  # type: ignore[arg-type]
+        bandon_inference_mode=_bandon_inference_mode_env(base.bandon_inference_mode),
         bandon_allow_mps_fallback=_bool_env(
             "APP_BANDON_ALLOW_MPS_FALLBACK",
             base.bandon_allow_mps_fallback,
@@ -915,6 +967,10 @@ def get_settings() -> Settings:
         post_completion_request_cleanup_delete_export_bundle=_bool_env(
             "APP_POST_COMPLETION_REQUEST_CLEANUP_DELETE_EXPORT_BUNDLE",
             base.post_completion_request_cleanup_delete_export_bundle,
+        ),
+        auto_generate_tiled_export_bundle=_bool_env(
+            "APP_AUTO_GENERATE_TILED_EXPORT_BUNDLE",
+            base.auto_generate_tiled_export_bundle,
         ),
         enable_client_log_relay=_bool_env(
             "APP_ENABLE_CLIENT_LOG_RELAY",

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import date
 import json
+import logging
+from pathlib import Path
 
 import geopandas as gpd
 import pytest
@@ -15,11 +17,13 @@ from src.execution_profiles import PipelineExecutionConfig, resolve_backend
 from src.schemas import PreviewImages, RunRequest, RunResponse, SummaryStats, TemporalMilestone, TemporalOverrideRequest, TemporalProject, TemporalProjectRunRequest
 from src.domain.vectorize import build_temporal_growth_blocks, build_temporal_growth_envelope
 from src.services.releases import list_releases
+from src.services import request_cleanup as request_cleanup_service
 from src.services.temporal_projects import (
     _reference_imagery_from_pair_response,
     audit_temporal_project_metadata_bloat,
     audit_temporal_project_metrics,
     get_temporal_project,
+    load_temporal_project_compact_payload,
     load_temporal_project_response_payload,
     list_temporal_projects,
     import_temporal_override,
@@ -88,6 +92,7 @@ def _sample_project(project_id: str = "temporal-demo") -> TemporalProject:
 
 def test_temporal_run_request_validates_change_threshold_range() -> None:
     assert TemporalProjectRunRequest(change_threshold=0.35).change_threshold == 0.35
+    assert TemporalProjectRunRequest.model_validate({"changeThreshold": 0.3}).change_threshold == 0.3
     with pytest.raises(ValidationError):
         TemporalProjectRunRequest(change_threshold=0.0)
     with pytest.raises(ValidationError):
@@ -293,6 +298,122 @@ def test_run_temporal_project_builds_monotonic_cumulative_union(monkeypatch, tmp
     milestone_dir = settings.temporal_projects_dir / project.project_id / "milestones" / "WB_2026_R01"
     assert not (milestone_dir / "cumulative_union.geojson").exists()
     assert not (milestone_dir / "cumulative_growth_envelope.geojson").exists()
+
+
+def test_run_temporal_project_cleans_pair_request_before_next_pair(monkeypatch, tmp_path, caplog) -> None:
+    caplog.set_level(logging.INFO, logger="src.services.temporal_projects")
+    settings = Settings(runtime_cache_dir=tmp_path / "runtime")
+    releases = _sample_releases(settings)
+    monkeypatch.setattr("src.services.temporal_projects.list_releases", lambda _: releases)
+    project = save_temporal_project(_sample_project("per-pair-cleanup"), settings)
+    request_dirs: dict[str, object] = {}
+    events: list[str] = []
+    cleanup_calls: list[str] = []
+    original_cleanup = request_cleanup_service.run_post_completion_request_cleanup_if_enabled
+
+    def _assert_artifacts_saved_before_cleanup(**kwargs):
+        release_identifier = kwargs["release_identifier"]
+        cleanup_calls.append(release_identifier)
+        if release_identifier != "WB_2024_R01":
+            additions_path = (
+                settings.temporal_projects_dir
+                / kwargs["project_id"]
+                / "milestones"
+                / release_identifier
+                / "additions.geojson"
+            )
+            assert additions_path.is_file()
+        return original_cleanup(**kwargs)
+
+    monkeypatch.setattr(
+        request_cleanup_service,
+        "run_post_completion_request_cleanup_if_enabled",
+        _assert_artifacts_saved_before_cleanup,
+    )
+    automated_layers = {
+        "WB_2025_R01": _feature_collection(
+            [[(-6.9998, 33.0002), (-6.9992, 33.0002), (-6.9992, 33.0008), (-6.9998, 33.0008)]]
+        ),
+        "WB_2026_R01": _feature_collection(
+            [[(-6.9989, 33.0011), (-6.9984, 33.0011), (-6.9984, 33.0016), (-6.9989, 33.0016)]]
+        ),
+    }
+
+    def _write_request_outputs(request_hash: str, geojson: dict) -> Path:
+        request_dir = settings.request_cache_dir / request_hash
+        request_dir.mkdir(parents=True, exist_ok=True)
+        (request_dir / "manifest.json").write_text(json.dumps({"success": True, "artifacts": []}), encoding="utf-8")
+        (request_dir / "timing.json").write_text("{}", encoding="utf-8")
+        (request_dir / "tiled_inference_metadata.json").write_text("{}", encoding="utf-8")
+        (request_dir / "prediction_change_probability.tif").write_bytes(b"probability")
+        (request_dir / "prediction_change_mask.tif").write_bytes(b"mask")
+        (request_dir / "export_bundle.zip").write_bytes(b"legacy-zip")
+        tiles = request_dir / "tiles"
+        tiles.mkdir(exist_ok=True)
+        (tiles / "tile.bin").write_bytes(b"tile")
+        (request_dir / "building_change_polygons.geojson").write_text(json.dumps(geojson), encoding="utf-8")
+        return request_dir
+
+    def _pair_runner(request: RunRequest) -> RunResponse:
+        events.append(f"start:{request.t1_release}->{request.t2_release}")
+        first_dir = request_dirs.get("WB_2025_R01")
+        if request.t2_release == "WB_2026_R01":
+            assert isinstance(first_dir, Path)
+            assert not (first_dir / "prediction_change_probability.tif").exists()
+            assert not (first_dir / "tiles").exists()
+            assert (first_dir / "run_response.json").is_file()
+            assert (first_dir / "manifest.json").is_file()
+            assert (first_dir / "tiled_inference_metadata.json").is_file()
+            assert (first_dir / "cleanup_audit.json").is_file()
+            events.append("first_pair_cleaned_before_second")
+        geojson = automated_layers[request.t2_release]
+        response = _bandon_pair_response(settings, request, releases=releases, geojson=geojson)
+        request_dir = _write_request_outputs(response.summary.request_hash, geojson)
+        save_cached_response(settings, response.summary.request_hash, response)
+        request_dirs[request.t2_release] = request_dir
+        return response
+
+    response = run_temporal_project(
+        project.project_id,
+        settings=settings,
+        pair_runner=_pair_runner,
+        execution_config=_bandon_config(),
+    )
+
+    assert response.success is True
+    assert events == [
+        "start:WB_2024_R01->WB_2025_R01",
+        "start:WB_2025_R01->WB_2026_R01",
+        "first_pair_cleaned_before_second",
+    ]
+    for release_identifier, request_dir in request_dirs.items():
+        assert isinstance(request_dir, Path)
+        assert not (request_dir / "prediction_change_probability.tif").exists()
+        assert not (request_dir / "prediction_change_mask.tif").exists()
+        assert not (request_dir / "tiles").exists()
+        assert not (request_dir / "export_bundle.zip").exists()
+        assert (request_dir / "run_response.json").is_file()
+        assert (request_dir / "manifest.json").is_file()
+        audit = json.loads((request_dir / "cleanup_audit.json").read_text(encoding="utf-8"))
+        assert audit["skipped"] is False
+        assert audit["bytes_deleted"] > 0
+        milestone_dir = settings.temporal_projects_dir / project.project_id / "milestones" / release_identifier
+        assert (milestone_dir / "additions.geojson").is_file()
+
+    compact = load_temporal_project_compact_payload(project.project_id, settings)
+    assert compact["project_id"] == project.project_id
+    non_baseline = [item for item in compact["milestones"] if item["release_identifier"] != "WB_2024_R01"]
+    assert all(item["artifacts"]["additions"]["exists"] is True for item in non_baseline)
+
+    project_payload = json.loads((settings.temporal_projects_dir / project.project_id / "project.json").read_text(encoding="utf-8"))
+    for milestone in project_payload["milestones"]:
+        for artifact in milestone.get("artifacts") or []:
+            assert "/requests/" not in str(artifact.get("path", ""))
+    assert "TEMPORAL_PAIR_STORAGE_ACCOUNTING_BEFORE" in caplog.text
+    assert "TEMPORAL_PAIR_STORAGE_ACCOUNTING_AFTER" in caplog.text
+    assert "bytesDeleted=" in caplog.text
+    assert "WB_2025_R01" in cleanup_calls
+    assert "WB_2026_R01" in cleanup_calls
 
 
 def test_publish_completed_tiled_request_uses_temporal_project_artifact_schema(monkeypatch, tmp_path) -> None:

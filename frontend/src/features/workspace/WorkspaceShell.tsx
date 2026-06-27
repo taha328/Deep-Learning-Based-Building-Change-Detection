@@ -110,7 +110,7 @@ export function WorkspaceShell<T extends string>({
             type="button"
             onClick={onToggleCollapse}
             title={isCollapsed ? t("panel.expand") : t("panel.collapse")}
-            className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground transition-colors hover:text-foreground"
+            className="flex h-10 w-10 items-center justify-center rounded text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             aria-label={isCollapsed ? t("panel.expand") : t("panel.collapse")}
           >
             <ChevronLeft className={cn("h-4 w-4 transition-transform", isCollapsed && "rotate-180")} />

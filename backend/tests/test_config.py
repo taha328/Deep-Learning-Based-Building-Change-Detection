@@ -72,6 +72,44 @@ def test_settings_accepts_bandon_as_the_only_inference_backend(tmp_path: Path) -
     assert settings.inference_backend == "bandon_mps"
 
 
+def test_get_settings_reads_inference_timing_flag(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    get_settings.cache_clear()
+    monkeypatch.setenv("APP_RUNTIME_CACHE_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setenv("APP_INFERENCE_TIMING_ENABLED", "true")
+
+    settings = get_settings()
+
+    assert settings.inference_timing_enabled is True
+
+
+def test_get_settings_reads_bandon_inference_mode(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    get_settings.cache_clear()
+    monkeypatch.setenv("APP_RUNTIME_CACHE_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setenv("APP_BANDON_INFERENCE_MODE", "persistent_runner")
+
+    settings = get_settings()
+
+    assert settings.bandon_inference_mode == "persistent_runner"
+
+
+def test_get_settings_reads_bandon_persistent_runner_compat_flag(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    get_settings.cache_clear()
+    monkeypatch.setenv("APP_RUNTIME_CACHE_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setenv("APP_BANDON_PERSISTENT_RUNNER_ENABLED", "true")
+
+    settings = get_settings()
+
+    assert settings.bandon_inference_mode == "persistent_runner"
+
+
+def test_settings_rejects_invalid_bandon_inference_mode(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="APP_BANDON_INFERENCE_MODE"):
+        Settings(runtime_cache_dir=tmp_path / "runtime", bandon_inference_mode="invalid")
+
+
 def test_settings_rejects_bandon_backend_with_missing_selected_checkpoint(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="APP_BANDON_CHECKPOINT_PATH.*APP_INFERENCE_BACKEND=bandon_mps"):
         Settings(

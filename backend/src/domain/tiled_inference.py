@@ -19,6 +19,7 @@ from pyproj import Geod
 from shapely.geometry import mapping, shape
 
 from src.domain.change_products import threshold_change_probability
+from src.domain.inference_timing import elapsed_ms, safe_merge_json_file, write_timing_summary
 from src.utils.geometry import parse_aoi_geometry, reproject_geometry
 
 if TYPE_CHECKING:
@@ -111,6 +112,29 @@ class PatchPredictor(Protocol):
 
 
 ProgressCallback = Callable[[dict[str, object]], None]
+
+TIMING_SUMMARY_FIELDS = [
+    "tile_total_wall_ms",
+    "raster_window_read_ms",
+    "patch_png_write_ms",
+    "bandon_subprocess_wall_ms",
+    "bandon_persistent_request_ms",
+    "bandon_persistent_startup_wall_ms",
+    "persistent_worker_rss_mb",
+    "child_total_wall_ms",
+    "child_model_load_count_this_prediction",
+    "child_model_load_count_total",
+    "child_model_reused_numeric",
+    "child_model_build_ms",
+    "child_checkpoint_load_ms",
+    "child_model_to_device_ms",
+    "child_input_preprocess_ms",
+    "child_forward_total_ms",
+    "child_output_write_ms",
+    "prediction_geotiff_write_ms",
+    "vectorization_ms",
+    "state_progress_write_ms",
+]
 
 
 def _rss_mb() -> float | None:
@@ -240,6 +264,21 @@ def make_bandon_patch_predictor(
     effective_backend: str,
     threshold: float,
 ) -> PatchPredictor:
+    inference_mode = getattr(settings, "bandon_inference_mode", "cli_per_tile")
+    persistent_runner: Any | None = None
+
+    def _get_persistent_runner():
+        nonlocal persistent_runner
+        if persistent_runner is None:
+            from src.domain.bandon_runner import PersistentBandonRunner
+
+            persistent_runner = PersistentBandonRunner(
+                settings=settings,
+                effective_backend=effective_backend,
+                threshold=threshold,
+            )
+        return persistent_runner
+
     def _predict(
         *,
         tile: InferenceTile,
@@ -252,6 +291,8 @@ def make_bandon_patch_predictor(
     ) -> PatchPrediction:
         from src.domain.bandon_runner import run_bandon_inference
 
+        timing_enabled = bool(getattr(settings, "inference_timing_enabled", False))
+        patch_write_started = time.perf_counter()
         work_dir.mkdir(parents=True, exist_ok=True)
         image_a_path = work_dir / "patch_t1.png"
         image_b_path = work_dir / "patch_t2.png"
@@ -262,26 +303,56 @@ def make_bandon_patch_predictor(
         if aoi_mask is None and t2_valid_mask is not None:
             aoi_mask = np.ones(t2_valid_mask.shape, dtype=bool)
         aoi_path = _write_mask_png(work_dir / "patch_aoi.png", aoi_mask) if aoi_mask is not None else None
-        result = run_bandon_inference(
-            image_a_path=image_a_path,
-            image_b_path=image_b_path,
-            settings=settings,
-            out_dir=work_dir / "bandon_run",
-            t1_valid_mask_path=t1_valid_path,
-            t2_valid_mask_path=t2_valid_path,
-            aoi_mask_path=aoi_path,
-            effective_backend=effective_backend,
-            threshold=threshold,
-        )
+        patch_png_write_ms = elapsed_ms(patch_write_started)
+        if inference_mode == "persistent_runner":
+            result = _get_persistent_runner().predict_tile(
+                image_a_path=image_a_path,
+                image_b_path=image_b_path,
+                out_dir=work_dir / "bandon_run",
+                t1_valid_mask_path=t1_valid_path,
+                t2_valid_mask_path=t2_valid_path,
+                aoi_mask_path=aoi_path,
+            )
+        elif inference_mode == "cli_per_tile":
+            result = run_bandon_inference(
+                image_a_path=image_a_path,
+                image_b_path=image_b_path,
+                settings=settings,
+                out_dir=work_dir / "bandon_run",
+                t1_valid_mask_path=t1_valid_path,
+                t2_valid_mask_path=t2_valid_path,
+                aoi_mask_path=aoi_path,
+                effective_backend=effective_backend,
+                threshold=threshold,
+            )
+        else:
+            raise ValueError(f"Unsupported BANDON inference mode: {inference_mode}")
+        metadata = dict(result.metadata)
+        if timing_enabled:
+            runner_timing = result.parent_timing_ms or {}
+            metadata["patch_predictor_timing_ms"] = {
+                "patch_png_write_ms": patch_png_write_ms,
+                "bandon_subprocess_wall_ms": runner_timing.get("subprocess_wall_ms"),
+                "bandon_persistent_request_ms": runner_timing.get("persistent_worker_request_ms"),
+                "bandon_persistent_startup_wall_ms": runner_timing.get("persistent_worker_startup_wall_ms"),
+                "persistent_worker_rss_mb": runner_timing.get("persistent_worker_rss_mb"),
+                "bandon_output_read_ms": runner_timing.get("bandon_output_read_ms"),
+            }
         return PatchPrediction(
             probability=result.change_probability.astype(np.float32, copy=False),
             mask=threshold_change_probability(
                 result.change_probability,
                 change_threshold=threshold,
             ),
-            metadata=result.metadata,
+            metadata=metadata,
         )
 
+    def _close() -> None:
+        runner = persistent_runner
+        if runner is not None:
+            runner.close()
+
+    setattr(_predict, "close", _close)
     return _predict
 
 
@@ -414,6 +485,39 @@ def _stats_from_histogram(sum_value: float, sum_sq: float, count: int, min_value
     }
 
 
+def _numeric_metadata_value(payload: dict[str, Any], key: str) -> float | None:
+    value = payload.get(key)
+    return float(value) if isinstance(value, (int, float)) else None
+
+
+def _flatten_child_timing(child_timing: dict[str, Any] | None) -> dict[str, float]:
+    if not isinstance(child_timing, dict):
+        return {}
+    mapping = {
+        "child_total_wall_ms": "child_total_wall_ms",
+        "child_model_load_count_this_prediction": "model_load_count_this_prediction",
+        "child_model_load_count_total": "model_load_count_total",
+        "child_model_reused_numeric": "model_reused_numeric",
+        "child_model_build_ms": "model_build_ms",
+        "child_checkpoint_load_ms": "checkpoint_load_ms",
+        "child_model_to_device_ms": "model_to_device_ms",
+        "child_input_preprocess_ms": "input_preprocess_ms",
+        "child_forward_total_ms": "forward_total_ms",
+        "child_output_write_ms": "output_write_ms",
+    }
+    flattened: dict[str, float] = {}
+    for output_key, child_key in mapping.items():
+        value = _numeric_metadata_value(child_timing, child_key)
+        if value is not None:
+            flattened[output_key] = value
+    return flattened
+
+
+def _mean_from_records(records: list[dict[str, Any]], key: str) -> float | None:
+    values = [float(record[key]) for record in records if isinstance(record.get(key), (int, float))]
+    return float(sum(values) / len(values)) if values else None
+
+
 def run_tiled_inference(
     *,
     t1_mosaic_path: Path,
@@ -439,6 +543,11 @@ def run_tiled_inference(
     mask_path = output_dir / "prediction_change_mask.tif"
     geojsonl_path = output_dir / "prediction_change_polygons.geojsonl"
     metadata_path = output_dir / "tiled_inference_metadata.json"
+    timing_enabled = bool(getattr(settings, "inference_timing_enabled", False))
+    timing_summary_path = output_dir / "timing_summary.json"
+    timing_records: list[dict[str, Any]] = []
+    if timing_enabled:
+        LOGGER.info("INFERENCE_TIMING_ENABLED runId=%s summaryPath=%s", run_id, timing_summary_path)
     started = time.monotonic()
     completed_chunks: set[int] = set()
     can_resume = probability_path.exists() and mask_path.exists() and state_path.exists()
@@ -524,19 +633,44 @@ def run_tiled_inference(
                     skipped_tiles += 1
                     continue
                 tile_started = time.monotonic()
+                tile_wall_started = time.perf_counter()
+                parent_timing_ms: dict[str, float] = {
+                    "raster_window_read_ms": 0.0,
+                    "valid_mask_read_ms": 0.0,
+                    "aoi_mask_build_ms": 0.0,
+                    "patch_png_write_ms": 0.0,
+                    "bandon_subprocess_wall_ms": 0.0,
+                    "bandon_persistent_request_ms": 0.0,
+                    "bandon_persistent_startup_wall_ms": 0.0,
+                    "persistent_worker_rss_mb": 0.0,
+                    "bandon_output_read_ms": 0.0,
+                    "prediction_geotiff_write_ms": 0.0,
+                    "vectorization_ms": 0.0,
+                    "state_progress_write_ms": 0.0,
+                    "other_parent_overhead_ms": 0.0,
+                }
                 window = tile.window.round_offsets().round_lengths()
                 tile_dir = output_dir / "tiles" / f"{tile.index:06d}"
+                read_started = time.perf_counter()
                 t1_rgb = _read_rgb_window(t1_src, window)
                 t2_rgb = _read_rgb_window(t2_src, window)
+                if timing_enabled:
+                    parent_timing_ms["raster_window_read_ms"] = elapsed_ms(read_started)
+                mask_read_started = time.perf_counter()
                 t1_valid = _read_mask_window(t1_valid_mask_path, window)
                 t2_valid = _read_mask_window(t2_valid_mask_path, window)
+                if timing_enabled:
+                    parent_timing_ms["valid_mask_read_ms"] = elapsed_ms(mask_read_started)
                 tile_transform = window_transform(window, t2_src.transform)
+                aoi_started = time.perf_counter()
                 aoi_mask = _aoi_mask_for_window(
                     aoi_geojson=aoi_geojson,
                     raster_crs=t2_src.crs,
                     out_shape=(int(window.height), int(window.width)),
                     transform=tile_transform,
                 )
+                if timing_enabled:
+                    parent_timing_ms["aoi_mask_build_ms"] = elapsed_ms(aoi_started)
 
                 prediction = predictor(
                     tile=tile,
@@ -547,6 +681,20 @@ def run_tiled_inference(
                     aoi_mask=aoi_mask,
                     work_dir=tile_dir,
                 )
+                if timing_enabled:
+                    patch_predictor_timing = prediction.metadata.get("patch_predictor_timing_ms")
+                    if isinstance(patch_predictor_timing, dict):
+                        for key in (
+                            "patch_png_write_ms",
+                            "bandon_subprocess_wall_ms",
+                            "bandon_persistent_request_ms",
+                            "bandon_persistent_startup_wall_ms",
+                            "persistent_worker_rss_mb",
+                            "bandon_output_read_ms",
+                        ):
+                            value = patch_predictor_timing.get(key)
+                            if isinstance(value, (int, float)):
+                                parent_timing_ms[key] = float(value)
                 probability = prediction.probability.astype(np.float32, copy=False)
                 mask = prediction.mask.astype(bool, copy=False)
                 if probability.shape != (int(window.height), int(window.width)):
@@ -563,9 +711,13 @@ def run_tiled_inference(
                     mask &= aoi_mask
                     probability = np.where(aoi_mask, probability, 0.0).astype(np.float32)
 
+                geotiff_write_started = time.perf_counter()
                 prob_dst.write(probability, indexes=1, window=window)
                 mask_dst.write(mask.astype(np.uint8), indexes=1, window=window)
+                if timing_enabled:
+                    parent_timing_ms["prediction_geotiff_write_ms"] = elapsed_ms(geotiff_write_started)
                 processed_tiles += 1
+                vectorization_started = time.perf_counter()
                 feature_count += _write_feature_geojsonl(
                     handle=geojsonl,
                     tile=tile,
@@ -576,6 +728,8 @@ def run_tiled_inference(
                     release_t1=release_t1,
                     release_t2=release_t2,
                 )
+                if timing_enabled:
+                    parent_timing_ms["vectorization_ms"] = elapsed_ms(vectorization_started)
 
                 finite = probability[np.isfinite(probability)]
                 if finite.size:
@@ -617,6 +771,42 @@ def run_tiled_inference(
                     "geojsonl_path": str(geojsonl_path),
                     "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 }
+                if timing_enabled:
+                    child_timing = prediction.metadata.get("child_timing_ms")
+                    child_timing_flat = _flatten_child_timing(child_timing if isinstance(child_timing, dict) else None)
+                    timing_record: dict[str, Any] = {
+                        "tile_id": tile.index,
+                        "run_id": run_id,
+                        **parent_timing_ms,
+                        **child_timing_flat,
+                    }
+                    timing_record["tile_total_wall_ms"] = elapsed_ms(tile_wall_started)
+                    measured_parent_ms = sum(
+                        float(timing_record.get(key) or 0.0)
+                        for key in (
+                            "raster_window_read_ms",
+                            "valid_mask_read_ms",
+                            "aoi_mask_build_ms",
+                            "patch_png_write_ms",
+                            "bandon_subprocess_wall_ms",
+                            "bandon_persistent_request_ms",
+                            "bandon_persistent_startup_wall_ms",
+                            "bandon_output_read_ms",
+                            "prediction_geotiff_write_ms",
+                            "vectorization_ms",
+                        )
+                    )
+                    timing_record["other_parent_overhead_ms"] = round(max(float(timing_record["tile_total_wall_ms"]) - measured_parent_ms, 0.0), 3)
+                    parent_timing_ms["tile_total_wall_ms"] = float(timing_record["tile_total_wall_ms"])
+                    parent_timing_ms["other_parent_overhead_ms"] = float(timing_record["other_parent_overhead_ms"])
+                    state.update(
+                        {
+                            "last_tile_total_wall_ms": timing_record.get("tile_total_wall_ms"),
+                            "last_bandon_subprocess_wall_ms": timing_record.get("bandon_subprocess_wall_ms"),
+                            "last_child_forward_total_ms": timing_record.get("child_forward_total_ms"),
+                        }
+                    )
+                state_progress_started = time.perf_counter()
                 state_path.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
                 if progress_callback is not None:
                     progress_callback(
@@ -634,6 +824,65 @@ def run_tiled_inference(
                             "current_tile_index": tile.index,
                         }
                     )
+                if timing_enabled:
+                    parent_timing_ms["state_progress_write_ms"] = elapsed_ms(state_progress_started)
+                    timing_record["state_progress_write_ms"] = parent_timing_ms["state_progress_write_ms"]
+                    timing_record["tile_total_wall_ms"] = elapsed_ms(tile_wall_started)
+                    timing_record["other_parent_overhead_ms"] = round(
+                        max(
+                            float(timing_record["tile_total_wall_ms"])
+                            - sum(
+                                float(timing_record.get(key) or 0.0)
+                                for key in (
+                                    "raster_window_read_ms",
+                                    "valid_mask_read_ms",
+                                    "aoi_mask_build_ms",
+                                    "patch_png_write_ms",
+                                    "bandon_subprocess_wall_ms",
+                                    "bandon_persistent_request_ms",
+                                    "bandon_persistent_startup_wall_ms",
+                                    "bandon_output_read_ms",
+                                    "prediction_geotiff_write_ms",
+                                    "vectorization_ms",
+                                    "state_progress_write_ms",
+                                )
+                            ),
+                            0.0,
+                        ),
+                        3,
+                    )
+                    parent_timing_ms["tile_total_wall_ms"] = float(timing_record["tile_total_wall_ms"])
+                    parent_timing_ms["other_parent_overhead_ms"] = float(timing_record["other_parent_overhead_ms"])
+                    timing_records.append(timing_record)
+                    safe_merge_json_file(
+                        tile_dir / "bandon_run" / "run_metadata.json",
+                        {
+                            "run_id": run_id,
+                            "tile_id": tile.index,
+                            "timing_enabled": True,
+                            "parent_timing_ms": parent_timing_ms,
+                            "child_timing_ms": prediction.metadata.get("child_timing_ms"),
+                            "bandon_runner_timing_ms": prediction.metadata.get("bandon_runner_timing_ms"),
+                        },
+                    )
+                    state.update(
+                        {
+                            "last_tile_total_wall_ms": timing_record.get("tile_total_wall_ms"),
+                            "last_bandon_subprocess_wall_ms": timing_record.get("bandon_subprocess_wall_ms"),
+                            "last_child_forward_total_ms": timing_record.get("child_forward_total_ms"),
+                            "mean_tile_total_wall_ms": _mean_from_records(timing_records, "tile_total_wall_ms"),
+                            "mean_bandon_subprocess_wall_ms": _mean_from_records(timing_records, "bandon_subprocess_wall_ms"),
+                            "mean_child_forward_total_ms": _mean_from_records(timing_records, "child_forward_total_ms"),
+                        }
+                    )
+                    state_path.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
+                    if processed_tiles % 25 == 0:
+                        write_timing_summary(
+                            timing_summary_path,
+                            run_id=run_id,
+                            records=timing_records,
+                            fields=TIMING_SUMMARY_FIELDS,
+                        )
                 LOGGER.info(
                     "TILED_INFERENCE_PROGRESS runId=%s processed=%s total=%s rate=%.3f rssMb=%s",
                     run_id,
@@ -644,30 +893,46 @@ def run_tiled_inference(
                 )
         final_elapsed = max(time.monotonic() - started, 1e-6)
         final_rate = processed_tiles / final_elapsed if processed_tiles > 0 else 0.0
-        state_path.write_text(
-            json.dumps(
+        final_state = {
+            "run_id": run_id,
+            "processed_tiles": len(completed_chunks),
+            "processed_tiles_this_run": processed_tiles,
+            "skipped_tiles_this_run": skipped_tiles,
+            "total_tiles": selected_total,
+            "full_tile_count": total_tiles,
+            "completed_chunks": sorted(completed_chunks),
+            "completed_chunk_count": len(completed_chunks),
+            "tile_rate_per_sec": final_rate,
+            "eta_seconds": 0.0 if len(completed_chunks) >= selected_total else None,
+            "rss_mb": _rss_mb(),
+            "probability_path": str(probability_path),
+            "mask_path": str(mask_path),
+            "geojsonl_path": str(geojsonl_path),
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        if timing_enabled:
+            final_state.update(
                 {
-                    "run_id": run_id,
-                    "processed_tiles": len(completed_chunks),
-                    "processed_tiles_this_run": processed_tiles,
-                    "skipped_tiles_this_run": skipped_tiles,
-                    "total_tiles": selected_total,
-                    "full_tile_count": total_tiles,
-                    "completed_chunks": sorted(completed_chunks),
-                    "completed_chunk_count": len(completed_chunks),
-                    "tile_rate_per_sec": final_rate,
-                    "eta_seconds": 0.0 if len(completed_chunks) >= selected_total else None,
-                    "rss_mb": _rss_mb(),
-                    "probability_path": str(probability_path),
-                    "mask_path": str(mask_path),
-                    "geojsonl_path": str(geojsonl_path),
-                    "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                },
-                indent=2,
-                sort_keys=True,
-            ),
+                    "mean_tile_total_wall_ms": _mean_from_records(timing_records, "tile_total_wall_ms"),
+                    "mean_bandon_subprocess_wall_ms": _mean_from_records(timing_records, "bandon_subprocess_wall_ms"),
+                    "mean_child_forward_total_ms": _mean_from_records(timing_records, "child_forward_total_ms"),
+                    "timing_summary_path": str(timing_summary_path),
+                }
+            )
+            write_timing_summary(
+                timing_summary_path,
+                run_id=run_id,
+                records=timing_records,
+                fields=TIMING_SUMMARY_FIELDS,
+            )
+        state_path.write_text(
+            json.dumps(final_state, indent=2, sort_keys=True),
             encoding="utf-8",
         )
+
+    close_predictor = getattr(predictor, "close", None)
+    if callable(close_predictor):
+        close_predictor()
 
     probability_stats = _stats_from_histogram(sum_value, sum_sq, value_count, min_value, max_value)
     metadata = {
@@ -707,6 +972,10 @@ def run_tiled_inference(
         "rss_mb": _rss_mb(),
         "duration_seconds": time.monotonic() - started,
     }
+    if timing_enabled:
+        metadata["timing_enabled"] = True
+        metadata["timing_summary_path"] = str(timing_summary_path)
+        metadata["timing_record_count"] = len(timing_records)
     metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
     LOGGER.info(
         "TILED_INFERENCE_DONE runId=%s processedTiles=%s totalTiles=%s features=%s probabilityPath=%s maskPath=%s",

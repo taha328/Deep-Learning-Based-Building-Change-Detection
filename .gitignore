@@ -49,6 +49,16 @@ mps_verification/
 **/mps_verification/
 mtgcdnet_s2looking_outputs/
 
+# Benchmark summaries under artifacts/benchmarks are trackable; raw per-run
+# inputs, tiles, and runtime caches are preserved locally and kept out of Git.
+artifacts/benchmarks/**/inputs/
+artifacts/benchmarks/**/cli_per_tile/
+artifacts/benchmarks/**/persistent_runner/
+artifacts/benchmarks/**/runtime/
+artifacts/benchmarks/**/*.npy
+artifacts/analysis/
+artifacts/verification/
+
 # Model checkpoints and generated model packages
 checkpoints/
 backend/checkpoints/
