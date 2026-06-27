@@ -1,0 +1,111 @@
+{
+  "checkpoint_path": "/Users/tahaelouali/Developer/Building_change_app/vendor/BANDON-mps/checkpoints/mtgcdnet_iter_40000.pth",
+  "checkpoint_sha256": "e1f5c92cb0951fecea1ba74bc5fa86db013d6f8085c2741fe7d60f84e9505813",
+  "device_requested": "auto",
+  "environment": {
+    "APP_BANDON_INFERENCE_MODE": "persistent_runner",
+    "APP_INFERENCE_TIMING_ENABLED": "true",
+    "APP_INFERENCE_VERBOSE_TILE_LOGS": "false"
+  },
+  "memory_profile_path": "/Users/tahaelouali/Developer/Building_change_app/artifacts/benchmarks/bandon_persistent_runner_full_pair_validation/memory_profile_full_pair.json",
+  "output_dir": "/Users/tahaelouali/Developer/Building_change_app/artifacts/benchmarks/bandon_persistent_runner_full_pair_validation/persistent_runner/20260627T070827Z",
+  "output_validation_report_path": "/Users/tahaelouali/Developer/Building_change_app/artifacts/benchmarks/bandon_persistent_runner_full_pair_validation/output_validation_report.json",
+  "overlap": 128,
+  "pair": {
+    "milestone_release": "WB_2026_R05",
+    "populated_request_hash": "7f0f8a6b47f2018148907f36",
+    "source_pair_request_hash": "9b79366d5c6221b7b36c2521",
+    "t1_release": "WB_2026_R03",
+    "t2_release": "WB_2026_R05"
+  },
+  "project_id": "temporal-tanger-mqrokfqx-hpimht",
+  "project_name": "Tanger",
+  "run_id": "full_pair_persistent_7f0f8a6b47f2018148907f36_20260627T070827Z",
+  "runtime_dir": "/Users/tahaelouali/Developer/Building_change_app/artifacts/benchmarks/bandon_persistent_runner_full_pair_validation/runtime/20260627T070827Z",
+  "source_paths": {
+    "t1_mosaic": "/Users/tahaelouali/Developer/Building_change_app/backend/runtime_cache/imagery_cache/refimg-v1-44e49a5ff666aefe198a07d36c2fb3bb1b3e1b25e07989e71ba1fbc38bf760c7/reference_imagery_cog.tif",
+    "t1_valid_mask": "/Users/tahaelouali/Developer/Building_change_app/backend/runtime_cache/imagery_cache/refimg-v1-44e49a5ff666aefe198a07d36c2fb3bb1b3e1b25e07989e71ba1fbc38bf760c7/valid_mask.tif",
+    "t2_mosaic": "/Users/tahaelouali/Developer/Building_change_app/backend/runtime_cache/imagery_cache/refimg-v1-783824c752f44ebdeaf928d50b943f5d820b981b96a830ba20ee2f6262a13cc2/reference_imagery_cog.tif",
+    "t2_valid_mask": "/Users/tahaelouali/Developer/Building_change_app/backend/runtime_cache/imagery_cache/refimg-v1-783824c752f44ebdeaf928d50b943f5d820b981b96a830ba20ee2f6262a13cc2/valid_mask.tif"
+  },
+  "source_rasters": {
+    "t1": {
+      "bounds": [
+        -657817.0654222268,
+        4259376.964163162,
+        -639625.0526903549,
+        4272218.384915072
+      ],
+      "count": 4,
+      "crs": "EPSG:3857",
+      "dtype": "uint8",
+      "height": 21504,
+      "path": "/Users/tahaelouali/Developer/Building_change_app/backend/runtime_cache/imagery_cache/refimg-v1-44e49a5ff666aefe198a07d36c2fb3bb1b3e1b25e07989e71ba1fbc38bf760c7/reference_imagery_cog.tif",
+      "size_bytes": 1283158476,
+      "transform": [
+        0.5971642834779385,
+        0.0,
+        -657817.0654222268,
+        0.0,
+        -0.5971642834779448,
+        4272218.384915072
+      ],
+      "width": 30464
+    },
+    "t2": {
+      "bounds": [
+        -657817.0654222268,
+        4259376.964163162,
+        -639625.0526903549,
+        4272218.384915072
+      ],
+      "count": 4,
+      "crs": "EPSG:3857",
+      "dtype": "uint8",
+      "height": 21504,
+      "path": "/Users/tahaelouali/Developer/Building_change_app/backend/runtime_cache/imagery_cache/refimg-v1-783824c752f44ebdeaf928d50b943f5d820b981b96a830ba20ee2f6262a13cc2/reference_imagery_cog.tif",
+      "size_bytes": 1284521208,
+      "transform": [
+        0.5971642834779385,
+        0.0,
+        -657817.0654222268,
+        0.0,
+        -0.5971642834779448,
+        4272218.384915072
+      ],
+      "width": 30464
+    }
+  },
+  "source_request_id": "7f0f8a6b47f2018148907f36",
+  "status": "completed",
+  "threshold": 0.35,
+  "tile_size": 1024,
+  "timing_metrics": {
+    "checkpoint_load_count_total": 1,
+    "checkpoint_load_ms_total": 727.384,
+    "forward_ms_total": 2056712.013,
+    "model_build_ms_total": 1405.223,
+    "model_load_count_total": 1,
+    "model_reused_ratio": 0.999107,
+    "model_reused_tile_count": 1119,
+    "model_to_device_ms_total": 544.231,
+    "patch_png_write_ms_total": 121352.738,
+    "persistent_request_ms_total": 2378064.535,
+    "persistent_worker_rss_mean_mb": 532.663,
+    "persistent_worker_rss_peak_mb": 665.219,
+    "persistent_worker_startup_wall_ms": 6148.385,
+    "prediction_geotiff_write_ms_total": 154934.498,
+    "processed_tiles": 1120,
+    "seconds_per_tile_max": 8.813744,
+    "seconds_per_tile_mean": 2.433392,
+    "seconds_per_tile_median": 3.343095,
+    "seconds_per_tile_p90": 3.605454,
+    "seconds_per_tile_p95": 3.685431,
+    "state_progress_write_ms_total": 590.122,
+    "tiles_per_second": 0.410534,
+    "timing_summary_path": "/Users/tahaelouali/Developer/Building_change_app/artifacts/benchmarks/bandon_persistent_runner_full_pair_validation/timing_summary.json",
+    "total_tiles": 1120,
+    "total_wall_time_seconds": 2728.152,
+    "vectorization_ms_total": 12320.451
+  }
+}
