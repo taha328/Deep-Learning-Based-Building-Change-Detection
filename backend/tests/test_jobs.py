@@ -16,7 +16,18 @@ from src.jobs import service as jobs_service
 from src.jobs.exceptions import JobsDisabledError
 from src.jobs.service import cancel_job, start_detection_job, start_temporal_project_job
 from src.repositories.job_repository import mark_job_completed, mark_job_failed
-from src.schemas import ArtifactEntry, DiagnosticMetadata, RunRequest, RunResponse, SummaryStats, TemporalProjectRunRequest
+from src.schemas import (
+    ArtifactEntry,
+    DiagnosticMetadata,
+    RunRequest,
+    RunResponse,
+    SummaryStats,
+    TemporalMilestone,
+    TemporalMilestoneMetrics,
+    TemporalProject,
+    TemporalProjectRunRequest,
+    TemporalProjectRunResponse,
+)
 from src.jobs.tasks import _log_worker_effective_backend
 
 
@@ -433,6 +444,57 @@ def test_temporal_worker_persists_original_exception_before_reraising(monkeypatc
         "settings": settings,
     }
     assert not worker_lock.exists()
+
+
+def test_temporal_worker_fails_success_response_without_published_artifacts(monkeypatch, tmp_path) -> None:
+    settings = Settings(runtime_cache_dir=tmp_path)
+    session = _FakeJobSession(
+        job=JobRecord(
+            job_id="job-temporal-incomplete-finalization",
+            job_kind="temporal_project",
+            status="queued",
+            project_id="project-1",
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+    )
+    project = TemporalProject(
+        project_id="project-1",
+        name="Project 1",
+        aoi_geojson=None,
+        milestones=[
+            TemporalMilestone(release_identifier="WB_2024_R01", status="complete", metrics=TemporalMilestoneMetrics()),
+            TemporalMilestone(
+                release_identifier="WB_2025_R01",
+                status="complete",
+                pair_request_hash="request-1",
+                populated_request_hash="request-1",
+                metrics=TemporalMilestoneMetrics(additions_feature_count=1, effective_feature_count=1),
+                artifacts=[],
+            ),
+        ],
+        created_at="2026-06-27T00:00:00Z",
+        updated_at="2026-06-27T00:00:00Z",
+    )
+
+    monkeypatch.setattr(job_tasks, "_resolve_settings", lambda *_args, **_kwargs: settings)
+    monkeypatch.setattr(job_tasks, "_log_worker_effective_backend", lambda **_kwargs: None)
+    monkeypatch.setattr(job_tasks, "cleanup_wayback_preflight_locks", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(job_tasks, "session_scope", lambda *_args, **_kwargs: _job_session_scope(session))
+    monkeypatch.setattr(job_tasks, "update_progress", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(job_tasks, "_latest_temporal_run_id", lambda *_args, **_kwargs: "temporal-run-1")
+    monkeypatch.setattr(
+        job_tasks,
+        "run_temporal_project_api",
+        lambda *_args, **_kwargs: TemporalProjectRunResponse(success=True, project=project),
+    )
+
+    result = job_tasks.run_temporal_project_job.run("job-temporal-incomplete-finalization", "project-1")
+
+    assert result["status"] == "failed"
+    assert session.job.status == "failed"
+    assert session.job.error_code == "temporal_finalization_incomplete"
+    assert "no registered project artifacts" in session.job.error_message
 
 
 def test_get_job_response_normalizes_legacy_complete(monkeypatch, tmp_path) -> None:

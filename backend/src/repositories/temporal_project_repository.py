@@ -109,6 +109,34 @@ def _summary_from_project(project: TemporalProject) -> TemporalProjectSummary:
     )
 
 
+def _write_project_sidecars(project: TemporalProject, project_json_path: Path) -> None:
+    summary = _summary_from_project(project)
+    summary.project_dir = str(project_json_path.parent)
+    write_json_payload_to_file(summary.model_dump(mode="json"), project_json_path.with_name("project_summary.json"))
+    try:
+        project_json_mtime_ns = project_json_path.stat().st_mtime_ns
+    except OSError:
+        project_json_mtime_ns = None
+    compact_payload = {
+        "project_id": project.project_id,
+        "project_json_mtime_ns": project_json_mtime_ns,
+        "aoi_geojson": project.aoi_geojson,
+        "milestones": [
+            {
+                "release_identifier": milestone.release_identifier,
+                "release_date": milestone.release_date,
+                "status": milestone.status,
+                "source_mode": milestone.source_mode,
+                "warnings": milestone.warnings,
+                "error_message": milestone.error_message,
+                "metrics": milestone.metrics.model_dump(mode="json") if milestone.metrics is not None else None,
+            }
+            for milestone in project.milestones
+        ],
+    }
+    write_json_payload_to_file(compact_payload, project_json_path.with_name("project_compact_metadata.json"))
+
+
 def _summary_from_row(row: Any) -> TemporalProjectSummary:
     return TemporalProjectSummary(
         project_id=row.project_id,
@@ -213,6 +241,22 @@ def _geometry_layer_mapping(
 ) -> dict[str, Any] | None:
     if not geojson or layer_kind not in GEOMETRY_LAYER_KINDS:
         return None
+    feature_count = _feature_count(geojson)
+    geom = None
+    area_m2 = None
+    max_geometry_features = settings.temporal_derived_geometry_max_features
+    if feature_count is None or feature_count <= max_geometry_features:
+        geom = geojson_to_wkt_element(geojson)
+        area_m2 = _area_m2(geojson)
+    else:
+        logger.warning(
+            "DB_GEOMETRY_LAYER_GEOM_SKIPPED projectId=%s layerKind=%s releaseIdentifier=%s reason=feature_limit_exceeded featureCount=%s maxFeatures=%s",
+            project.project_id,
+            layer_kind,
+            milestone.release_identifier if milestone else None,
+            feature_count,
+            max_geometry_features,
+        )
     owner_key = f"{project.project_id}-{milestone.release_identifier if milestone else 'project'}-{layer_kind}"
     stored_geojson = externalize_payload_if_needed(
         geojson,
@@ -232,10 +276,10 @@ def _geometry_layer_mapping(
         "project_db_id": project.id,
         "milestone_id": milestone.id if milestone else None,
         "layer_kind": layer_kind,
-        "geom": geojson_to_wkt_element(geojson),
+        "geom": geom,
         "geojson": stored_geojson,
-        "feature_count": _feature_count(geojson),
-        "area_m2": _area_m2(geojson),
+        "feature_count": feature_count,
+        "area_m2": area_m2,
         "source": source,
     }
 
@@ -277,6 +321,7 @@ def save_project(
     payload = project.model_dump(mode="json")
     project_json_path = project_dir / "project.json"
     write_json_payload_to_file(payload, project_json_path)
+    _write_project_sidecars(project, project_json_path)
     project_payload_reference = {
         "storage": "file",
         "path": str(project_json_path),

@@ -196,6 +196,7 @@ class Settings(BaseModel):
     temporal_imagery_prefetch_max_pairs: int = 4
     temporal_imagery_prefetch_timeout_seconds: int = 600
     temporal_imagery_prefetch_reduce_provider_workers: bool = True
+    temporal_derived_geometry_max_features: int = 5_000
     reference_layer_max_upload_bytes: int = 2_147_483_648
     reference_layer_browser_geojson_max_bytes: int = 5_000_000
     reference_layer_browser_geojson_max_features: int = 25_000

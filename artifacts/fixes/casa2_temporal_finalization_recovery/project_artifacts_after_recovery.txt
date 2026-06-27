@@ -1,0 +1,14 @@
+backend/runtime_cache/temporal_projects/temporal-casa-2-mqw5jysv-ri6q84/milestones/WB_2025_R03/building_change_buffer_15m.geojson
+-rw-r--r--@ 1 tahaelouali  staff   134M Jun 27 15:26 backend/runtime_cache/temporal_projects/temporal-casa-2-mqw5jysv-ri6q84/milestones/WB_2025_R03/building_change_buffer_15m.geojson
+backend/runtime_cache/temporal_projects/temporal-casa-2-mqw5jysv-ri6q84/milestones/WB_2025_R03/building_change_buffer_20m.geojson
+-rw-r--r--@ 1 tahaelouali  staff   129M Jun 27 15:26 backend/runtime_cache/temporal_projects/temporal-casa-2-mqw5jysv-ri6q84/milestones/WB_2025_R03/building_change_buffer_20m.geojson
+backend/runtime_cache/temporal_projects/temporal-casa-2-mqw5jysv-ri6q84/milestones/WB_2025_R03/reference_imagery_cog.tif
+-rw-r--r--@ 3 tahaelouali  staff   3.2G Jun 26 03:23 backend/runtime_cache/temporal_projects/temporal-casa-2-mqw5jysv-ri6q84/milestones/WB_2025_R03/reference_imagery_cog.tif
+backend/runtime_cache/temporal_projects/temporal-casa-2-mqw5jysv-ri6q84/milestones/WB_2025_R03/additions.geojson
+-rw-r--r--@ 1 tahaelouali  staff   134M Jun 27 15:26 backend/runtime_cache/temporal_projects/temporal-casa-2-mqw5jysv-ri6q84/milestones/WB_2025_R03/additions.geojson
+backend/runtime_cache/temporal_projects/temporal-casa-2-mqw5jysv-ri6q84/milestones/WB_2025_R03/automated_building_blocks.geojson
+-rw-r--r--@ 1 tahaelouali  staff    51B Jun 27 15:25 backend/runtime_cache/temporal_projects/temporal-casa-2-mqw5jysv-ri6q84/milestones/WB_2025_R03/automated_building_blocks.geojson
+backend/runtime_cache/temporal_projects/temporal-casa-2-mqw5jysv-ri6q84/milestones/WB_2025_R03/reference_imagery_cog.tif.version.json
+-rw-r--r--@ 1 tahaelouali  staff   116B Jun 27 14:47 backend/runtime_cache/temporal_projects/temporal-casa-2-mqw5jysv-ri6q84/milestones/WB_2025_R03/reference_imagery_cog.tif.version.json
+backend/runtime_cache/temporal_projects/temporal-casa-2-mqw5jysv-ri6q84/milestones/WB_2025_R03/building_change_buffer_10m.geojson
+-rw-r--r--@ 1 tahaelouali  staff   148M Jun 27 15:26 backend/runtime_cache/temporal_projects/temporal-casa-2-mqw5jysv-ri6q84/milestones/WB_2025_R03/building_change_buffer_10m.geojson

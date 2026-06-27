@@ -497,6 +497,100 @@ def test_publish_completed_tiled_request_uses_temporal_project_artifact_schema(m
     assert cleanup_audit["bytes_deleted"] > 0
 
 
+def test_publish_completed_tiled_request_skips_large_missing_buffer_regeneration(monkeypatch, tmp_path) -> None:
+    settings = Settings(runtime_cache_dir=tmp_path, temporal_derived_geometry_max_features=1)
+    monkeypatch.setattr("src.services.temporal_projects.list_releases", lambda _: _sample_releases(settings))
+    monkeypatch.setattr(
+        "src.services.temporal_projects.build_change_buffer_layers",
+        lambda *args, **kwargs: pytest.fail("large recovery must not regenerate buffers"),
+    )
+    monkeypatch.setattr(
+        "src.services.temporal_projects.build_temporal_growth_blocks",
+        lambda *args, **kwargs: pytest.fail("large recovery must not regenerate growth blocks"),
+    )
+    monkeypatch.setattr(
+        "src.services.temporal_projects.build_temporal_growth_envelope",
+        lambda *args, **kwargs: pytest.fail("large recovery must not regenerate growth envelope"),
+    )
+    project = _sample_project("publish-large-tiled")
+    project.milestones = [
+        TemporalMilestone(release_identifier="WB_2024_R01"),
+        TemporalMilestone(release_identifier="WB_2025_R01"),
+    ]
+    saved = save_temporal_project(project, settings)
+
+    request_id = "completed-large-tiled-request"
+    request_dir = settings.request_cache_dir / request_id
+    request_dir.mkdir(parents=True)
+    (request_dir / "prediction_change_mask.tif").write_bytes(b"mask")
+    (request_dir / "prediction_change_probability.tif").write_bytes(b"probability")
+    change_geojson = _feature_collection(
+        [
+            [(-6.9998, 33.0002), (-6.9996, 33.0002), (-6.9996, 33.0004), (-6.9998, 33.0004)],
+            [(-6.9994, 33.0006), (-6.9992, 33.0006), (-6.9992, 33.0008), (-6.9994, 33.0008)],
+        ]
+    )
+    (request_dir / "building_change_polygons.geojson").write_text(json.dumps(change_geojson), encoding="utf-8")
+    save_cached_response(
+        settings,
+        request_id,
+        RunResponse(
+            success=True,
+            summary=SummaryStats(
+                request_hash=request_id,
+                mode="full_run",
+                model_backend="bandon_mps",
+                result_semantics="building_change",
+                estimated_area_m2=10.0,
+                tile_count_t1=1,
+                tile_count_t2=1,
+                total_new_buildings=0,
+                total_building_blocks=0,
+                total_new_building_area_m2=0.0,
+                total_building_block_area_m2=0.0,
+                total_change_polygons=2,
+                total_change_area_m2=123.45,
+            ),
+            change_polygons_geojson=change_geojson,
+        ),
+    )
+
+    result = publish_completed_tiled_request(
+        request_id=request_id,
+        project_id=saved.project_id,
+        target_release="WB_2025_R01",
+        baseline_release="WB_2024_R01",
+        settings=settings,
+    )
+    second_result = publish_completed_tiled_request(
+        request_id=request_id,
+        project_id=saved.project_id,
+        target_release="WB_2025_R01",
+        baseline_release="WB_2024_R01",
+        settings=settings,
+    )
+
+    milestone_dir = settings.temporal_projects_dir / saved.project_id / "milestones" / "WB_2025_R01"
+    assert (milestone_dir / "additions.geojson").is_file()
+    assert not (milestone_dir / "building_change_buffer_10m.geojson").exists()
+    assert result["summary_backed_finalization"] is True
+    assert second_result["artifact_counts"]["additions.geojson"] == 2
+
+    reloaded = get_temporal_project(saved.project_id, settings)
+    target = next(item for item in reloaded.milestones if item.release_identifier == "WB_2025_R01")
+    assert target.status == "complete"
+    assert target.pair_request_hash == request_id
+    assert target.populated_request_hash == request_id
+    assert target.metrics is not None
+    assert target.metrics.additions_feature_count == 2
+    assert any("summary-backed temporal finalization" in warning for warning in target.warnings)
+
+    compact = load_temporal_project_compact_payload(saved.project_id, settings)
+    compact_target = next(item for item in compact["milestones"] if item["release_identifier"] == "WB_2025_R01")
+    assert compact_target["metrics"]["additions_feature_count"] == 2
+    assert compact_target["artifacts"]["additions"]["exists"] is True
+
+
 def test_temporal_project_metric_audit_reads_published_artifacts(monkeypatch, tmp_path) -> None:
     settings = Settings(runtime_cache_dir=tmp_path)
     monkeypatch.setattr("src.services.temporal_projects.list_releases", lambda _: _sample_releases(settings))

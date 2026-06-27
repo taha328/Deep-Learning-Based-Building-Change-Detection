@@ -187,6 +187,24 @@ def _compact_temporal_result(response: TemporalProjectRunResponse, *, result_run
     }
 
 
+def _temporal_finalization_errors(response: TemporalProjectRunResponse) -> list[str]:
+    project = response.project
+    if project is None:
+        return ["Temporal finalization returned no project payload."]
+    finalized_milestones = [
+        milestone
+        for milestone in project.milestones
+        if milestone.status == "complete"
+        and milestone.metrics is not None
+        and (milestone.pair_request_hash or milestone.populated_request_hash)
+    ]
+    if not finalized_milestones:
+        return ["No completed temporal milestone has persisted metrics and a request hash."]
+    if not any(milestone.artifacts for milestone in finalized_milestones):
+        return ["Completed temporal milestones have no registered project artifacts."]
+    return []
+
+
 def _prepare_job_for_execution(job_id: str, settings: Settings) -> dict[str, Any] | None:
     with session_scope(settings) as session:
         job = get_job(job_id, settings=settings, session=session)
@@ -291,6 +309,19 @@ def run_temporal_project_job(
             timer.mark("saving_artifacts")
             _publish_progress(self, job_id, 95, "persisting", "Persisting compact job metadata.", settings)
             raw_result = _compact_temporal_result(response, result_run_id=result_run_id, stage_timings=timer.summary())
+            finalization_errors = _temporal_finalization_errors(response)
+            if finalization_errors:
+                error_message = "; ".join(finalization_errors)
+                with session_scope(settings) as session:
+                    mark_job_failed(
+                        job_id=job_id,
+                        error_code="temporal_finalization_incomplete",
+                        error_message=error_message,
+                        raw_result=raw_result,
+                        settings=settings,
+                        session=session,
+                    )
+                return {"job_id": job_id, "status": "failed", "error_message": error_message}
             with session_scope(settings) as session:
                 mark_job_completed(
                     job_id=job_id,

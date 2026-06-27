@@ -1,0 +1,12 @@
+Sat Jun 27 14:13:20 UTC 2026
+# type unacked
+hash
+# hkeys unacked
+2749d830-4f59-4d01-93c3-a79e8b268c00
+# type unacked_index
+zset
+# zrange unacked_index
+2749d830-4f59-4d01-93c3-a79e8b268c00
+1782553949.088248
+# celery meta
+{"status": "STARTED", "result": {"pid": 70726, "hostname": "building_change_worker@Tahas-MacBook-Pro.local"}, "traceback": null, "children": [], "date_done": null, "task_id": "27f5aeb4-fdf0-4151-84eb-5c656ecffd56"}

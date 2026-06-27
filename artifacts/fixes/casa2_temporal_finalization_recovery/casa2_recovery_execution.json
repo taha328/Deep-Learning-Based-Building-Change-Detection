@@ -1,0 +1,46 @@
+{
+  "compact_target": {
+    "artifact_keys": [
+      "additions",
+      "automated_building_blocks",
+      "building_change_buffer_10m",
+      "building_change_buffer_15m",
+      "building_change_buffer_20m"
+    ],
+    "existing_artifact_keys": [
+      "additions",
+      "building_change_buffer_10m",
+      "building_change_buffer_15m",
+      "building_change_buffer_20m"
+    ],
+    "has_metrics": false,
+    "metrics": null,
+    "release_identifier": "WB_2025_R03",
+    "status": "complete"
+  },
+  "job_error_code": "temporal_partial_recovery",
+  "job_terminal_status": "failed",
+  "publication_result": {
+    "artifact_counts": {
+      "additions.geojson": 15528,
+      "automated_building_blocks.geojson": 0,
+      "building_change_buffer_10m.geojson": 10483,
+      "building_change_buffer_15m.geojson": 10483,
+      "building_change_buffer_20m.geojson": 10483
+    },
+    "export_bundle_path": null,
+    "project_dir": "/Users/tahaelouali/Developer/Building_change_app/backend/runtime_cache/temporal_projects/temporal-casa-2-mqw5jysv-ri6q84",
+    "project_id": "temporal-casa-2-mqw5jysv-ri6q84",
+    "project_json": "/Users/tahaelouali/Developer/Building_change_app/backend/runtime_cache/temporal_projects/temporal-casa-2-mqw5jysv-ri6q84/project.json",
+    "project_manifest": "/Users/tahaelouali/Developer/Building_change_app/backend/runtime_cache/temporal_projects/temporal-casa-2-mqw5jysv-ri6q84/project_manifest.json",
+    "project_summary": "/Users/tahaelouali/Developer/Building_change_app/backend/runtime_cache/temporal_projects/temporal-casa-2-mqw5jysv-ri6q84/project_summary.json",
+    "request_id": "43a37e757f6111e5929acc40",
+    "summary_backed_finalization": true,
+    "target_release": "WB_2025_R03"
+  },
+  "recovery_run_id": "temporal-temporal-casa-2-mqw5jysv-ri6q84-74690b17c3524aac84f5076f8bed39fa",
+  "remaining_pending_releases": [
+    "WB_2024_R02",
+    "WB_2026_R05"
+  ]
+}

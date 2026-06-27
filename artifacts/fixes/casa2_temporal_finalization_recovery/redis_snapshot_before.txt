@@ -1,0 +1,11 @@
+# LLEN building_change
+0
+# LRANGE building_change 0 10
+
+# HKEYS unacked
+2749d830-4f59-4d01-93c3-a79e8b268c00
+# HGETALL unacked_index
+WRONGTYPE Operation against a key holding the wrong kind of value
+
+# celery meta
+{"status": "STARTED", "result": {"pid": 70726, "hostname": "building_change_worker@Tahas-MacBook-Pro.local"}, "traceback": null, "children": [], "date_done": null, "task_id": "27f5aeb4-fdf0-4151-84eb-5c656ecffd56"}

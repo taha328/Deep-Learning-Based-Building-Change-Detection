@@ -1,0 +1,24 @@
+........................................................................ [ 12%]
+........................................................................ [ 25%]
+........................................................................ [ 38%]
+....................................................................ssss [ 50%]
+........................................................................ [ 63%]
+...................s.................................................... [ 76%]
+........................................................................ [ 88%]
+................................................................         [100%]
+=============================== warnings summary ===============================
+backend/tests/test_addition_candidate_filters.py::test_tiny_speck_below_min_area_rejected
+  /Users/tahaelouali/Developer/Building_change_app/backend/.venv/lib/python3.11/site-packages/shapely/constructive.py:1353: RuntimeWarning: invalid value encountered in oriented_envelope
+    return lib.oriented_envelope(geometry, **kwargs)
+
+backend/tests/test_inference_reference_imagery_reuse.py::test_cog_validation_rejects_identity_transform
+  /Users/tahaelouali/Developer/Building_change_app/backend/.venv/lib/python3.11/site-packages/rasterio/__init__.py:366: NotGeoreferencedWarning: The given matrix is equal to Affine.identity or its flipped counterpart. GDAL may ignore this matrix and save no geotransform without raising an error. This behavior is somewhat driver-specific.
+    dataset = writer(
+
+backend/tests/test_temporal_reference_imagery.py::test_reference_layers_repair_generates_from_matching_shared_mosaic
+backend/tests/test_temporal_reference_imagery.py::test_reference_layers_repair_matches_shared_mosaic_at_metadata_zoom
+  /Users/tahaelouali/Developer/Building_change_app/backend/src/services/temporal_projects.py:1908: PendingDeprecationWarning: is_tiled will be removed in a future version. Please consider copying the body of this function into your program or module.
+    if not src.is_tiled:
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+563 passed, 5 skipped, 4 warnings in 35.77s

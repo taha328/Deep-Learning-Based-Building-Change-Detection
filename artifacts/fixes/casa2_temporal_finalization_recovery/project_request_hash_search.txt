@@ -1,0 +1,11 @@
+Request hash presence after recovery:
+
+- `project.json`: present
+- `project_manifest.json`: present
+- `project_compact_metadata.json`: absent by design; compact metadata stores milestone status/metrics, not request hash fields
+
+Confirmed request hash:
+
+`43a37e757f6111e5929acc40`
+
+The full raw `rg` output was intentionally not retained because `project.json` is a large single-line JSON file and would create a 235 MB diagnostic artifact.

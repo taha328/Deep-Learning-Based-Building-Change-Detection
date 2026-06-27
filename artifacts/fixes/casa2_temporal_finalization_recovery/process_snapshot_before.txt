@@ -1,0 +1,3 @@
+tahaelouali      70726  98.5  3.2 437733168 528848   ??  Rs   10:52AM  56:32.30 /opt/homebrew/Cellar/python@3.11/3.11.15_1/Frameworks/Python.framework/Versions/3.11/Resources/Python.app/Contents/MacOS/Python -m celery -A src.jobs.celery_app.celery_app worker --loglevel=INFO --queues building_change --pool solo --hostname building_change_worker@%h
+tahaelouali      70696   0.0  0.0 435329552   7632 s000  S+   10:52AM   0:05.19 /Library/Frameworks/Python.framework/Versions/3.13/Resources/Python.app/Contents/MacOS/Python scripts/dev_start_all.py
+tahaelouali      70642   0.0  0.0 435299680    464 s000  S+   10:52AM   0:00.01 bash ./scripts/dev_start_all.sh

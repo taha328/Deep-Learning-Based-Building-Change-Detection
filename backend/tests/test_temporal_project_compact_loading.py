@@ -162,3 +162,57 @@ def test_compact_project_detail_uses_lightweight_metadata_sidecar(tmp_path: Path
     assert milestone["release_date"] == "2026-05-28"
     assert milestone["warnings"] == ["metadata warning"]
     assert milestone["metrics"]["added_area_m2"] == 684677.97
+
+
+def test_compact_project_detail_complete_count_matches_metadata_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(runtime_cache_dir=tmp_path)
+    project_id = "temporal-casa-mixed-status"
+    project_dir = settings.temporal_projects_dir / project_id
+    project_json = project_dir / "project.json"
+    project_json.parent.mkdir(parents=True)
+    project_json.write_text("{not parsed", encoding="utf-8")
+    _write_project_summary(project_dir, project_id)
+    monkeypatch.setattr(
+        service,
+        "_compact_reference_cog_bounds_wgs84",
+        lambda path: [-7.7, 33.4, -7.5, 33.6],
+    )
+
+    baseline_dir = project_dir / "milestones" / "WB_2024_R02"
+    result_dir = project_dir / "milestones" / "WB_2025_R03"
+    future_dir = project_dir / "milestones" / "WB_2026_R05"
+    baseline_dir.mkdir(parents=True)
+    result_dir.mkdir(parents=True)
+    future_dir.mkdir(parents=True)
+    (baseline_dir / "reference_imagery_cog.tif").write_bytes(b"fake-cog")
+    _write_geojson(result_dir / "additions.geojson", 1)
+    _write_json(
+        project_dir / "project_compact_metadata.json",
+        {
+            "project_id": project_id,
+            "project_json_mtime_ns": project_json.stat().st_mtime_ns,
+            "milestones": [
+                {"release_identifier": "WB_2024_R02", "status": "pending", "metrics": None},
+                {
+                    "release_identifier": "WB_2025_R03",
+                    "status": "complete",
+                    "metrics": {"added_area_m2": 12.0, "additions_feature_count": 1},
+                },
+                {"release_identifier": "WB_2026_R05", "status": "pending", "metrics": None},
+            ],
+        },
+    )
+
+    payload = service.load_temporal_project_compact_payload(project_id, settings)
+
+    statuses = {milestone["release_identifier"]: milestone["status"] for milestone in payload["milestones"]}
+    assert statuses == {
+        "WB_2024_R02": "pending",
+        "WB_2025_R03": "complete",
+        "WB_2026_R05": "pending",
+    }
+    assert payload["complete_milestone_count"] == 1
+    assert payload["status"] == "pending"

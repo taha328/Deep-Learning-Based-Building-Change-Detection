@@ -1,0 +1,31 @@
+{
+  "complete_milestone_count": 2,
+  "milestones": [
+    {
+      "artifact_count": 0,
+      "existing_artifacts": [],
+      "has_metrics": true,
+      "release_identifier": "WB_2024_R02",
+      "status": "pending"
+    },
+    {
+      "artifact_count": 4,
+      "existing_artifacts": [
+        "additions",
+        "building_change_buffer_10m",
+        "building_change_buffer_15m",
+        "building_change_buffer_20m"
+      ],
+      "has_metrics": true,
+      "release_identifier": "WB_2025_R03",
+      "status": "complete"
+    },
+    {
+      "artifact_count": 0,
+      "existing_artifacts": [],
+      "has_metrics": false,
+      "release_identifier": "WB_2026_R05",
+      "status": "pending"
+    }
+  ]
+}

@@ -1,0 +1,103 @@
+{
+  "artifact_count": 0,
+  "job": {
+    "celery_task_id": "27f5aeb4-fdf0-4151-84eb-5c656ecffd56",
+    "completed_at": null,
+    "created_at": "2026-06-27T09:23:37.571789+00:00",
+    "error_code": null,
+    "error_message": null,
+    "job_id": "job-aa092d18d777402994b8e8fe24b59893",
+    "message": "Completed",
+    "progress": 92,
+    "raw_result": {
+      "progress_details": {
+        "current_pair_index": 1,
+        "from_release_date": "2024-03-07",
+        "from_release_identifier": "WB_2024_R02",
+        "pair_fraction": 1.0,
+        "pair_stage": "Completed",
+        "temporal_progress_kind": "active_pair",
+        "to_release_date": "2025-03-27",
+        "to_release_identifier": "WB_2025_R03",
+        "total_pair_count": 2
+      }
+    },
+    "result_run_id": null,
+    "stage": "saving_artifacts",
+    "started_at": "2026-06-27T09:52:29.218483+00:00",
+    "status": "running",
+    "updated_at": "2026-06-27T13:43:58.044273+00:00"
+  },
+  "milestones": [
+    {
+      "artifact_count": 0,
+      "error_message": null,
+      "has_metric": false,
+      "pair_request_hash": null,
+      "raw_payload": {
+        "error_message": null,
+        "pair_request_hash": null,
+        "release_date": "2024-03-07",
+        "release_identifier": "WB_2024_R02",
+        "schema": "temporal_milestone_summary_v1",
+        "source_mode": "automated",
+        "status": "pending",
+        "storage": "summary"
+      },
+      "release_identifier": "WB_2024_R02",
+      "status": "pending"
+    },
+    {
+      "artifact_count": 0,
+      "error_message": null,
+      "has_metric": false,
+      "pair_request_hash": null,
+      "raw_payload": {
+        "error_message": null,
+        "pair_request_hash": null,
+        "release_date": "2025-03-27",
+        "release_identifier": "WB_2025_R03",
+        "schema": "temporal_milestone_summary_v1",
+        "source_mode": "automated",
+        "status": "pending",
+        "storage": "summary"
+      },
+      "release_identifier": "WB_2025_R03",
+      "status": "pending"
+    },
+    {
+      "artifact_count": 0,
+      "error_message": null,
+      "has_metric": false,
+      "pair_request_hash": null,
+      "raw_payload": {
+        "error_message": null,
+        "pair_request_hash": null,
+        "release_date": "2026-05-28",
+        "release_identifier": "WB_2026_R05",
+        "schema": "temporal_milestone_summary_v1",
+        "source_mode": "automated",
+        "status": "pending",
+        "storage": "summary"
+      },
+      "release_identifier": "WB_2026_R05",
+      "status": "pending"
+    }
+  ],
+  "project": {
+    "created_at": "2026-06-27T09:23:18.127000+00:00",
+    "name": "CASA 2",
+    "project_dir": "/Users/tahaelouali/Developer/Building_change_app/backend/runtime_cache/temporal_projects/temporal-casa-2-mqw5jysv-ri6q84",
+    "project_id": "temporal-casa-2-mqw5jysv-ri6q84",
+    "raw_payload": {
+      "path": "/Users/tahaelouali/Developer/Building_change_app/backend/runtime_cache/temporal_projects/temporal-casa-2-mqw5jysv-ri6q84/project.json",
+      "schema": "temporal_project_payload_v1",
+      "sha256": "74ededdbebf4ab413ad895eadbf37ee9dc4e10ef10344ad826068c9d69057239",
+      "size_bytes": 5989,
+      "storage": "file"
+    },
+    "updated_at": "2026-06-27T09:23:37+00:00"
+  },
+  "run_count": 0,
+  "run_for_request": null
+}
