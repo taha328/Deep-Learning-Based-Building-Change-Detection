@@ -2,14 +2,11 @@ import { CheckCircle2, Clock3, Loader2, XCircle } from "lucide-react";
 
 import { useI18n } from "@/lib/i18n";
 import { Progress } from "@/components/ui/progress";
+import { TemporalVerticalProgressTimeline } from "@/features/results/TemporalVerticalProgressTimeline";
 import {
   PIPELINE_STAGES,
-  buildTemporalPeriodLabel,
   formatRunStatus,
-  friendlyTemporalStageLabel,
   getStageState,
-  temporalGlobalProgressPercent,
-  temporalPairProgressPercent,
   type RunProgressState,
 } from "@/lib/run-progress";
 import { cn } from "@/lib/utils";
@@ -54,54 +51,16 @@ function tileProgressPercent(progress: RunProgressState): number | null {
   return Math.max(0, Math.min(100, (details.processedTileCount / details.totalTileCount) * 100));
 }
 
-export function RunProgressPanel({ progress }: { progress: RunProgressState }) {
+export function RunProgressPanel({ progress, variant = "default" }: { progress: RunProgressState; variant?: "default" | "temporal" }) {
   const { t } = useI18n();
   const eta = formatEta(progress.etaSeconds);
   const tileEta = formatEta(progress.tileDetails?.etaSeconds ?? null);
   const statusText = formatRunStatus(progress, t);
   const visibleStages = PIPELINE_STAGES.filter((stage) => stage.key !== "queue");
-  const temporalDetails = progress.temporalPairDetails;
-  const globalPercent = temporalGlobalProgressPercent(temporalDetails);
-  const pairPercent = temporalPairProgressPercent(temporalDetails);
   const imagePreparationPercent = tileProgressPercent(progress);
 
-  if (temporalDetails) {
-    const stageLabel = friendlyTemporalStageLabel(temporalDetails.pairStage ?? progress.stageLabel ?? progress.detail);
-    const pairStep =
-      temporalDetails.currentPairIndex !== null && temporalDetails.totalPairCount !== null
-        ? `Étape ${temporalDetails.currentPairIndex} sur ${temporalDetails.totalPairCount}`
-        : "Étape en cours";
-
-    return (
-      <section className="space-y-4 rounded-lg border border-border bg-surface p-4">
-        <div className="space-y-3 rounded-md border border-border bg-card px-3 py-3">
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <p className="text-sm font-medium text-foreground">Progression globale du projet</p>
-              <p className="mt-1 text-sm text-muted-foreground">{pairStep}</p>
-            </div>
-            <p className="text-right text-xs text-muted-foreground">
-              {globalPercent !== null ? `Analyse globale : ${Math.round(globalPercent)} %` : "Analyse globale en cours"}
-            </p>
-          </div>
-          {globalPercent !== null ? <Progress value={globalPercent} className="h-2 bg-secondary" indicatorClassName="bg-primary" /> : null}
-        </div>
-
-        <div className="space-y-3 rounded-md border border-border bg-card px-3 py-3">
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <p className="text-sm font-medium text-foreground">Analyse de la période en cours</p>
-              <p className="mt-1 text-sm text-muted-foreground">{buildTemporalPeriodLabel(temporalDetails)}</p>
-            </div>
-            <p className="text-right text-xs text-muted-foreground">
-              {pairPercent !== null ? `Avancement de cette période : ${Math.round(pairPercent)} %` : "Analyse en cours..."}
-            </p>
-          </div>
-          {pairPercent !== null ? <Progress value={pairPercent} className="h-2 bg-secondary" indicatorClassName="bg-primary" /> : null}
-          <p className="rounded-md border border-border bg-surface px-3 py-2 text-xs text-muted-foreground">{stageLabel}</p>
-        </div>
-      </section>
-    );
+  if (variant === "temporal" || progress.temporalPairDetails) {
+    return <TemporalVerticalProgressTimeline progress={progress} />;
   }
 
   return (

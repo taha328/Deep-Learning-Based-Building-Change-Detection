@@ -2225,7 +2225,7 @@ export function TemporalMosaicPanel({
               title={t("temporal.progress_title")}
               contentClassName="space-y-3"
             >
-                {showRunProgress ? <RunProgressPanel progress={runProgress} /> : null}
+                {showRunProgress ? <RunProgressPanel progress={runProgress} variant="temporal" /> : null}
 
                 {progressMetricsVisible && !selectedMilestone ? (
                   <div className="rounded-lg border border-dashed border-sidebar-border px-4 py-6 text-sm text-foreground">

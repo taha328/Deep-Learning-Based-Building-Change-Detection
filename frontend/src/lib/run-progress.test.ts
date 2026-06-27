@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  TEMPORAL_VERTICAL_TIMELINE_STAGES,
+  buildTemporalProgressTimeline,
   buildTemporalPeriodLabel,
   createActiveRunProgress,
   createCompletedRunProgress,
@@ -19,6 +21,27 @@ function progressPatch(patch: Partial<RunProgressState>): RunProgressState {
     ...createActiveRunProgress(),
     ...patch,
   };
+}
+
+function temporalProgressPatch(patch: Partial<RunProgressState>): RunProgressState {
+  return progressPatch({
+    phase: "running",
+    percent: 92,
+    stageLabel: "inference",
+    detail: "Running tiled local BANDON change detection",
+    rawEvent: "running",
+    temporalPairDetails: {
+      currentPairIndex: 2,
+      totalPairCount: 2,
+      pairFraction: 0.4,
+      pairStage: "Running tiled local BANDON change detection",
+      fromReleaseIdentifier: "WB_2024_R02",
+      toReleaseIdentifier: "WB_2025_R03",
+      fromReleaseDate: "2024-03-21",
+      toReleaseDate: "2025-03-27",
+    },
+    ...patch,
+  });
 }
 
 test("execution progress panel is visible while a run is running", () => {
@@ -146,4 +169,134 @@ test("backend stages map to friendly temporal stage labels", () => {
   assert.equal(friendlyTemporalStageLabel("Vectorizing results"), "Génération des résultats");
   assert.equal(friendlyTemporalStageLabel("Persisting compact job metadata"), "Finalisation");
   assert.equal(friendlyTemporalStageLabel("unexpected backend stage"), "Traitement en cours");
+});
+
+test("temporal timeline keeps finalization active when pair analysis is complete but job is still running", () => {
+  const timeline = buildTemporalProgressTimeline(
+    temporalProgressPatch({
+      percent: 100,
+      stageLabel: "saving_artifacts",
+      detail: "Saving temporal outputs and generated artifacts.",
+      temporalPairDetails: {
+        currentPairIndex: 2,
+        totalPairCount: 2,
+        pairFraction: 1,
+        pairStage: "Saving temporal outputs and generated artifacts.",
+        fromReleaseIdentifier: "WB_2024_R02",
+        toReleaseIdentifier: "WB_2025_R03",
+        fromReleaseDate: "2024-03-21",
+        toReleaseDate: "2025-03-27",
+      },
+    }),
+  );
+
+  assert.equal(timeline.activeStageId, "publication");
+  assert.equal(timeline.ready, false);
+  assert.equal(timeline.finalizing, true);
+  assert.equal(timeline.summaryDetail, "Analyse terminée — finalisation en cours.");
+  assert.equal(timeline.readinessLabel, "Résultats pas encore prêts.");
+  assert.equal(timeline.stages.find((stage) => stage.id === "done")?.state, "pending");
+});
+
+test("temporal timeline marks done only after the job has completed", () => {
+  const running = buildTemporalProgressTimeline(
+    temporalProgressPatch({
+      percent: 100,
+      stageLabel: "saving_artifacts",
+      detail: "Saving temporal outputs and generated artifacts.",
+      temporalPairDetails: {
+        currentPairIndex: 1,
+        totalPairCount: 1,
+        pairFraction: 1,
+        pairStage: "Saving temporal outputs and generated artifacts.",
+        fromReleaseIdentifier: "WB_2024_R02",
+        toReleaseIdentifier: "WB_2025_R03",
+        fromReleaseDate: "2024-03-21",
+        toReleaseDate: "2025-03-27",
+      },
+    }),
+  );
+  const completed = buildTemporalProgressTimeline(
+    temporalProgressPatch({
+      phase: "complete",
+      percent: 100,
+      stageLabel: "completed",
+      detail: "Artifacts are ready.",
+      rawEvent: "completed",
+    }),
+  );
+
+  assert.equal(running.activeStageId, "publication");
+  assert.equal(running.ready, false);
+  assert.equal(completed.activeStageId, "done");
+  assert.equal(completed.ready, true);
+  assert.equal(completed.readinessLabel, "Résultats prêts.");
+  assert.equal(completed.stages.every((stage) => stage.state === "complete"), true);
+});
+
+test("temporal timeline shows queued stage without fake progress", () => {
+  const timeline = buildTemporalProgressTimeline(
+    progressPatch({
+      phase: "queued",
+      percent: 0,
+      stageLabel: "Queued",
+      detail: "Waiting for a worker slot.",
+      rawEvent: "queued",
+      temporalPairDetails: null,
+    }),
+  );
+
+  assert.equal(timeline.activeStageId, "queued");
+  assert.equal(timeline.globalPercent, null);
+  assert.equal(timeline.stages[0].state, "current");
+  assert.equal(timeline.stages[1].state, "pending");
+});
+
+test("temporal timeline marks failed finalization with a useful error state", () => {
+  const timeline = buildTemporalProgressTimeline(
+    temporalProgressPatch({
+      phase: "error",
+      percent: 100,
+      stageLabel: "saving_artifacts",
+      detail: "Finalization failed after publication.",
+      rawEvent: "failed",
+      temporalPairDetails: {
+        currentPairIndex: 1,
+        totalPairCount: 1,
+        pairFraction: 1,
+        pairStage: "Saving temporal outputs and generated artifacts.",
+        fromReleaseIdentifier: "WB_2024_R02",
+        toReleaseIdentifier: "WB_2025_R03",
+        fromReleaseDate: "2024-03-21",
+        toReleaseDate: "2025-03-27",
+      },
+    }),
+  );
+
+  assert.equal(timeline.activeStageId, "publication");
+  assert.equal(timeline.failed, true);
+  assert.equal(timeline.readinessLabel, "Résultats non disponibles.");
+  assert.equal(timeline.stages.find((stage) => stage.id === "publication")?.state, "failed");
+  assert.equal(timeline.stages.find((stage) => stage.id === "done")?.state, "pending");
+});
+
+test("temporal vertical timeline exposes French stage labels", () => {
+  assert.deepEqual(
+    TEMPORAL_VERTICAL_TIMELINE_STAGES.map((stage) => stage.label),
+    [
+      "En attente",
+      "Préparation du projet",
+      "Vérification des tuiles",
+      "Téléchargement des images",
+      "Alignement",
+      "Inférence",
+      "Post-traitement",
+      "Vectorisation",
+      "Publication des couches",
+      "Génération des exports",
+      "Écriture des métadonnées",
+      "Nettoyage",
+      "Terminé",
+    ],
+  );
 });

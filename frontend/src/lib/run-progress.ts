@@ -50,6 +50,52 @@ export interface PipelineStage {
   translationKey: string;
 }
 
+export type TemporalTimelineStageId =
+  | "queued"
+  | "metadata"
+  | "tile_availability"
+  | "download"
+  | "alignment"
+  | "inference"
+  | "postprocessing"
+  | "vectorization"
+  | "publication"
+  | "exports"
+  | "metadata_write"
+  | "cleanup"
+  | "done";
+
+export type TemporalTimelineStageState = "complete" | "current" | "pending" | "failed";
+
+export interface TemporalTimelineStageDefinition {
+  id: TemporalTimelineStageId;
+  label: string;
+  description: string;
+}
+
+export interface TemporalTimelineStage extends TemporalTimelineStageDefinition {
+  state: TemporalTimelineStageState;
+}
+
+export interface TemporalProgressTimeline {
+  stages: TemporalTimelineStage[];
+  activeStageId: TemporalTimelineStageId;
+  summaryLabel: string;
+  summaryDetail: string;
+  readinessLabel: string;
+  readinessDetail: string;
+  currentStageNote: string;
+  pairLabel: string;
+  pairStepLabel: string;
+  globalPercent: number | null;
+  pairPercent: number | null;
+  analysisComplete: boolean;
+  finalizing: boolean;
+  ready: boolean;
+  failed: boolean;
+  cancelled: boolean;
+}
+
 type TranslateFn = (key: string) => string;
 
 // Static labels for backward compatibility, but translationKey should be used for display
@@ -63,6 +109,74 @@ export const PIPELINE_STAGES: PipelineStage[] = [
   { key: "postprocess", label: "Post-processing", minPercent: 72, translationKey: "pipeline.postprocess" },
   { key: "vectorize", label: "Vectorization", minPercent: 82, translationKey: "pipeline.vectorize" },
   { key: "export", label: "Export", minPercent: 92, translationKey: "pipeline.export" },
+];
+
+export const TEMPORAL_VERTICAL_TIMELINE_STAGES: TemporalTimelineStageDefinition[] = [
+  {
+    id: "queued",
+    label: "En attente",
+    description: "Le projet est dans la file d'exécution.",
+  },
+  {
+    id: "metadata",
+    label: "Préparation du projet",
+    description: "Chargement des jalons, paramètres et zone d'étude.",
+  },
+  {
+    id: "tile_availability",
+    label: "Vérification des tuiles",
+    description: "Contrôle de la disponibilité des images Wayback.",
+  },
+  {
+    id: "download",
+    label: "Téléchargement des images",
+    description: "Préparation des mosaïques de référence.",
+  },
+  {
+    id: "alignment",
+    label: "Alignement",
+    description: "Préparation des images comparables entre jalons.",
+  },
+  {
+    id: "inference",
+    label: "Inférence",
+    description: "Détection des changements bâtimentaires.",
+  },
+  {
+    id: "postprocessing",
+    label: "Post-traitement",
+    description: "Nettoyage, filtrage et consolidation des résultats.",
+  },
+  {
+    id: "vectorization",
+    label: "Vectorisation",
+    description: "Conversion des résultats en couches spatiales.",
+  },
+  {
+    id: "publication",
+    label: "Publication des couches",
+    description: "Écriture des couches et artefacts du projet.",
+  },
+  {
+    id: "exports",
+    label: "Génération des exports",
+    description: "Préparation des fichiers QGIS, GeoPackage et rapports disponibles.",
+  },
+  {
+    id: "metadata_write",
+    label: "Écriture des métadonnées",
+    description: "Mise à jour du manifeste, du résumé projet et de la base.",
+  },
+  {
+    id: "cleanup",
+    label: "Nettoyage",
+    description: "Compression ou suppression sécurisée des fichiers temporaires lourds.",
+  },
+  {
+    id: "done",
+    label: "Terminé",
+    description: "Les résultats sont prêts à être consultés.",
+  },
 ];
 
 const DEFAULT_IDLE_STATUS = "Draw an AOI and validate the request.";
@@ -202,6 +316,200 @@ export function temporalGlobalProgressPercent(details: TemporalPairProgressDetai
     return null;
   }
   return clampPercent(((details.currentPairIndex - 1 + details.pairFraction) / details.totalPairCount) * 100);
+}
+
+function timelineStageIndex(stageId: TemporalTimelineStageId): number {
+  return TEMPORAL_VERTICAL_TIMELINE_STAGES.findIndex((stage) => stage.id === stageId);
+}
+
+function normalizedProgressText(progress: RunProgressState): string {
+  return [
+    progress.stageLabel,
+    progress.detail,
+    progress.rawEvent,
+    progress.temporalPairDetails?.pairStage,
+  ]
+    .filter((value): value is string => Boolean(value))
+    .join(" ")
+    .toLowerCase();
+}
+
+function isCompletedProgress(progress: RunProgressState): boolean {
+  return progress.phase === "complete" || isCompletedStatus(progress.rawEvent) || isCompletedStatus(progress.stageLabel);
+}
+
+function isCancelledProgress(progress: RunProgressState): boolean {
+  const text = normalizedProgressText(progress);
+  return progress.rawEvent === "cancel_requested" || /cancel|cancelled|canceled|annul/.test(text);
+}
+
+function activeTemporalStageFromProgress(progress: RunProgressState): TemporalTimelineStageId {
+  const text = normalizedProgressText(progress);
+
+  if (isCompletedProgress(progress)) {
+    return "done";
+  }
+  if (progress.phase === "queued") {
+    return "queued";
+  }
+  if (/cleanup|nettoyage/.test(text)) {
+    return "cleanup";
+  }
+  if (/persist|metadata_write|metadata write|compact job metadata|manifest|summary|database|métadonnée/.test(text)) {
+    return "metadata_write";
+  }
+  if (/export|bundle|geopackage|qgis|report/.test(text)) {
+    return "exports";
+  }
+  if (/saving_artifacts|saving temporal outputs|artifact|publication|publish|layer|couche|building_buffers|buffer/.test(text)) {
+    return "publication";
+  }
+  if (/vector|vectorizing|vectorization/.test(text)) {
+    return "vectorization";
+  }
+  if (/postprocess|post-process|post_traitement|filter|clean|consolid/.test(text)) {
+    return "postprocessing";
+  }
+  if (/alignment|align/.test(text)) {
+    return "alignment";
+  }
+  if (/download|imagery|mosaic|wayback|reference|fetch/.test(text)) {
+    return "download";
+  }
+  if (/tile_availability|tile availability|checking tile|vérification des tuiles/.test(text)) {
+    return "tile_availability";
+  }
+  if (/starting|metadata|preflight|validat|prepar|prépar|project state/.test(text)) {
+    return "metadata";
+  }
+  if (/inference|bandon|detection|tiled|change detection|analyse/.test(text)) {
+    return "inference";
+  }
+
+  const pairPercent = temporalPairProgressPercent(progress.temporalPairDetails);
+  if (pairPercent !== null && pairPercent >= 99.5 && progress.phase !== "complete") {
+    return "publication";
+  }
+  if (progress.temporalPairDetails) {
+    return "inference";
+  }
+  return progress.phase === "idle" ? "queued" : "metadata";
+}
+
+function temporalStageNote(stageId: TemporalTimelineStageId, progress: RunProgressState, analysisComplete: boolean): string {
+  if (isCompletedProgress(progress)) {
+    return "Résultats prêts.";
+  }
+  if (progress.phase === "error") {
+    return "Une erreur est survenue pendant le traitement.";
+  }
+  if (isCancelledProgress(progress)) {
+    return "Traitement annulé ou annulation demandée.";
+  }
+  if (analysisComplete && stageId !== "done") {
+    return "Analyse terminée — finalisation en cours.";
+  }
+  switch (stageId) {
+    case "queued":
+      return "En attente d'un worker disponible.";
+    case "metadata":
+      return "Préparation du projet temporel.";
+    case "tile_availability":
+      return "Vérification des images Wayback nécessaires.";
+    case "download":
+      return "Téléchargement ou réutilisation des images de référence.";
+    case "alignment":
+      return "Alignement des images avant analyse.";
+    case "inference":
+      return "Analyse des changements en cours.";
+    case "postprocessing":
+      return "Post-traitement des détections.";
+    case "vectorization":
+      return "Conversion des résultats en couches spatiales.";
+    case "publication":
+      return "Publication des couches spatiales...";
+    case "exports":
+      return "Génération des exports...";
+    case "metadata_write":
+      return "Écriture des métadonnées du projet...";
+    case "cleanup":
+      return "Nettoyage des fichiers temporaires...";
+    case "done":
+      return "Résultats prêts.";
+  }
+}
+
+export function buildTemporalProgressTimeline(progress: RunProgressState): TemporalProgressTimeline {
+  const pairPercent = temporalPairProgressPercent(progress.temporalPairDetails);
+  const globalPercent = temporalGlobalProgressPercent(progress.temporalPairDetails);
+  const analysisComplete = pairPercent !== null && pairPercent >= 99.5;
+  const failed = progress.phase === "error" || isFailureStatus(progress.rawEvent) || isFailureStatus(progress.stageLabel);
+  const cancelled = isCancelledProgress(progress);
+  const ready = isCompletedProgress(progress);
+  const activeStageId = activeTemporalStageFromProgress(progress);
+  const activeIndex = timelineStageIndex(activeStageId);
+  const finalizing = !ready && !failed && activeIndex >= timelineStageIndex("publication");
+  const pairStepLabel =
+    progress.temporalPairDetails?.currentPairIndex !== null &&
+    progress.temporalPairDetails?.currentPairIndex !== undefined &&
+    progress.temporalPairDetails?.totalPairCount !== null &&
+    progress.temporalPairDetails?.totalPairCount !== undefined
+      ? `Période ${progress.temporalPairDetails.currentPairIndex}/${progress.temporalPairDetails.totalPairCount}`
+      : "Période en cours";
+  const currentStageNote = temporalStageNote(activeStageId, progress, analysisComplete);
+  const stages = TEMPORAL_VERTICAL_TIMELINE_STAGES.map((stage, index): TemporalTimelineStage => {
+    let state: TemporalTimelineStageState = "pending";
+    if (ready || index < activeIndex) {
+      state = "complete";
+    } else if (index === activeIndex) {
+      state = failed || cancelled ? "failed" : "current";
+    }
+    return { ...stage, state };
+  });
+
+  const summaryLabel = ready
+    ? "Résultats prêts"
+    : failed
+      ? "Traitement interrompu"
+      : finalizing
+        ? "Finalisation du projet"
+        : analysisComplete
+          ? "Analyse terminée"
+          : "Analyse en cours";
+  const summaryDetail = ready
+    ? "Les couches et résultats du projet sont disponibles."
+    : failed
+      ? progress.detail || "Une erreur est survenue pendant le traitement."
+      : finalizing || analysisComplete
+        ? "Analyse terminée — finalisation en cours."
+        : progress.phase === "queued"
+          ? "Le projet attend un worker disponible."
+          : "Le backend analyse les périodes sélectionnées.";
+  const readinessLabel = ready ? "Résultats prêts." : failed ? "Résultats non disponibles." : "Résultats pas encore prêts.";
+  const readinessDetail = ready
+    ? "Les couches publiées peuvent être consultées sur la carte."
+    : failed
+      ? progress.detail || "Le traitement doit être relancé après correction."
+      : "Les couches seront disponibles après la publication finale.";
+
+  return {
+    stages,
+    activeStageId,
+    summaryLabel,
+    summaryDetail,
+    readinessLabel,
+    readinessDetail,
+    currentStageNote,
+    pairLabel: buildTemporalPeriodLabel(progress.temporalPairDetails),
+    pairStepLabel,
+    globalPercent,
+    pairPercent,
+    analysisComplete,
+    finalizing,
+    ready,
+    failed,
+    cancelled,
+  };
 }
 
 export function friendlyTemporalStageLabel(stage: string | null | undefined): string {

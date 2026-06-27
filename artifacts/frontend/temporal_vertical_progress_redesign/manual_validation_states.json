@@ -1,0 +1,32 @@
+[
+  {
+    "name": "finalizing",
+    "hasVerticalStages": true,
+    "hasAnalysisDoneFinalizing": true,
+    "hasResultsReady": false,
+    "hasNotReady": true,
+    "hasPublicationActive": true,
+    "hasFailureState": false,
+    "excerpt": "Finalisation\nTerminé\nErreur\n\nProgression du projet\n\nFinalisation du projet\n\nAnalyse terminée — finalisation en cours.\n\n50 % analyse\n\nEn attente\n\nLe projet est dans la file d'exécution.\n\nTerminé\n\nPréparation du projet\n\nChargement des jalons, paramètres et zone d'étude.\n\nTerminé\n\nVérification des tuiles\n\nContrôle de la disponibilité des images Wayback.\n\nTerminé\n\nTéléchargement des images\n\nPréparation des mosaïques de référence.\n\nTerminé\n\nAlignement\n\nPréparation des images comparables entre jalons.\n\nTerminé\n\nInférence\n\nDétection des changements bâtimentaires.\n\nTerminé\n\nPériode 1/2\n\nPériode en cours : 07/03/2024 → 27/03/2025\n\nAnalyse globale 50 %\n\nAnalyse de la période\n100 %\n\nPost-traitement\n\nNettoyage, filtrage et consolidation des résultats.\n\nTerminé\n\nVectorisation\n\nConversion des résultats en couches spatiales.\n\nTerminé\n\nPublication des couches\n\nÉcriture des couches et artefacts du projet.\n\nEn cours\n\nGénération des exports\n\nPréparation des fichiers QGIS, GeoPackage et rapports disponibles.\n\nÀ venir\n\nÉcriture des métadonnées\n\nMise à jour du manifeste, du résumé projet et de la base.\n\nÀ venir\n\nNettoyage\n\nCompression ou suppression sécurisée des fichiers temporaires lourds.\n\nÀ venir\n\nTerminé\n\nLes résultats sont prêts à être consultés.\n\nÀ venir\n\nRésultats pas encore prêts.\n\nLes couches seront disponibles après la publication finale.\n\nAnalyse terminée — finalisation en cours."
+  },
+  {
+    "name": "completed",
+    "hasVerticalStages": true,
+    "hasAnalysisDoneFinalizing": false,
+    "hasResultsReady": true,
+    "hasNotReady": false,
+    "hasPublicationActive": false,
+    "hasFailureState": false,
+    "excerpt": "Finalisation\nTerminé\nErreur\n\nProgression du projet\n\nRésultats prêts\n\nLes couches et résultats du projet sont disponibles.\n\n50 % analyse\n\nEn attente\n\nLe projet est dans la file d'exécution.\n\nTerminé\n\nPréparation du projet\n\nChargement des jalons, paramètres et zone d'étude.\n\nTerminé\n\nVérification des tuiles\n\nContrôle de la disponibilité des images Wayback.\n\nTerminé\n\nTéléchargement des images\n\nPréparation des mosaïques de référence.\n\nTerminé\n\nAlignement\n\nPréparation des images comparables entre jalons.\n\nTerminé\n\nInférence\n\nDétection des changements bâtimentaires.\n\nTerminé\n\nPériode 1/2\n\nPériode en cours : 07/03/2024 → 27/03/2025\n\nAnalyse globale 50 %\n\nAnalyse de la période\n100 %\n\nPost-traitement\n\nNettoyage, filtrage et consolidation des résultats.\n\nTerminé\n\nVectorisation\n\nConversion des résultats en couches spatiales.\n\nTerminé\n\nPublication des couches\n\nÉcriture des couches et artefacts du projet.\n\nTerminé\n\nGénération des exports\n\nPréparation des fichiers QGIS, GeoPackage et rapports disponibles.\n\nTerminé\n\nÉcriture des métadonnées\n\nMise à jour du manifeste, du résumé projet et de la base.\n\nTerminé\n\nNettoyage\n\nCompression ou suppression sécurisée des fichiers temporaires lourds.\n\nTerminé\n\nTerminé\n\nLes résultats sont prêts à être consultés.\n\nTerminé\n\nRésultats prêts.\n\nLes couches publiées peuvent être consultées sur la carte."
+  },
+  {
+    "name": "failed",
+    "hasVerticalStages": true,
+    "hasAnalysisDoneFinalizing": false,
+    "hasResultsReady": false,
+    "hasNotReady": false,
+    "hasPublicationActive": false,
+    "hasFailureState": true,
+    "excerpt": "Finalisation\nTerminé\nErreur\n\nProgression du projet\n\nTraitement interrompu\n\nFinalization failed after publication.\n\n50 % analyse\n\nEn attente\n\nLe projet est dans la file d'exécution.\n\nTerminé\n\nPréparation du projet\n\nChargement des jalons, paramètres et zone d'étude.\n\nTerminé\n\nVérification des tuiles\n\nContrôle de la disponibilité des images Wayback.\n\nTerminé\n\nTéléchargement des images\n\nPréparation des mosaïques de référence.\n\nTerminé\n\nAlignement\n\nPréparation des images comparables entre jalons.\n\nTerminé\n\nInférence\n\nDétection des changements bâtimentaires.\n\nTerminé\n\nPériode 1/2\n\nPériode en cours : 07/03/2024 → 27/03/2025\n\nAnalyse globale 50 %\n\nAnalyse de la période\n100 %\n\nPost-traitement\n\nNettoyage, filtrage et consolidation des résultats.\n\nTerminé\n\nVectorisation\n\nConversion des résultats en couches spatiales.\n\nTerminé\n\nPublication des couches\n\nÉcriture des couches et artefacts du projet.\n\nErreur\n\nGénération des exports\n\nPréparation des fichiers QGIS, GeoPackage et rapports disponibles.\n\nÀ venir\n\nÉcriture des métadonnées\n\nMise à jour du manifeste, du résumé projet et de la base.\n\nÀ venir\n\nNettoyage\n\nCompression ou suppression sécurisée des fichiers temporaires lourds.\n\nÀ venir\n\nTerminé\n\nLes résultats sont prêts à être consultés.\n\nÀ venir\n\nRésultats non disponibles.\n\nFinalization failed after publication."
+  }
+]
