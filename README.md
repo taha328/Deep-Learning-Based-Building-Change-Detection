@@ -78,6 +78,8 @@ Ordinary stops preserve PostgreSQL data, imagery caches, and generated project a
 
 Wayback metadata preflight uses adaptive concurrency by default. It starts at 10 workers and downshifts through `10 -> 8 -> 6 -> 4` when tilemap checks show repeated retry-like connection instability. Set `APP_WAYBACK_METADATA_WORKERS_ADAPTIVE_ENABLED=false` to restore fixed-worker behavior, then tune `APP_WAYBACK_METADATA_WORKERS` for the network.
 
+Large Wayback mosaics are written as BigTIFF-safe, tiled, compressed GeoTIFFs through temporary partial files. Outputs are validated before cache publication so classic TIFF 4 GiB overflows and corrupt partial mosaics are not reused.
+
 ## Citation
 
 ```bibtex

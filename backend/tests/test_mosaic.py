@@ -9,20 +9,24 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image
+import pytest
 import requests
 import rasterio
 from rasterio.transform import from_origin
 
+import src.domain.mosaic as mosaic_module
 from src.config import Settings
 from src.domain.coregistration import CoregistrationDiagnostics, CoregistrationResult
 from src.domain.change_products import derive_new_building_products
 from src.domain.mosaic import (
     MosaicResult,
     _download_tile_with_retries,
+    _write_cached_mosaic,
     _wayback_mosaic_cache_key,
     align_mosaic_pair,
     download_wayback_mosaic,
 )
+from src.domain.raster_write_options import BIGTIFF_THRESHOLD_BYTES, large_geotiff_creation_options
 from src.domain.wayback import WaybackRelease
 
 
@@ -96,6 +100,102 @@ def _wayback_release(identifier: str = "WB_2026_R03", release_num: int = 22869) 
         tile_matrix_sets=("default028mm",),
         resource_url_template="https://example.com/{TileMatrixSet}/tile/{TileMatrix}/{TileRow}/{TileCol}",
     )
+
+
+def test_large_wayback_mosaic_creation_options_force_bigtiff_and_tiling() -> None:
+    options, estimate = large_geotiff_creation_options(
+        width=256 * 240,
+        height=256 * 240,
+        band_count=3,
+        dtype=np.uint8,
+        compression="LZW",
+        predictor=2,
+        force_bigtiff=True,
+    )
+
+    assert estimate == 256 * 240 * 256 * 240 * 3
+    assert options["BIGTIFF"] == "YES"
+    assert options["tiled"] is True
+    assert options["compress"] == "LZW"
+    assert options["predictor"] == 2
+    assert options["blockxsize"] == 512
+    assert options["blockysize"] == 512
+
+
+def test_large_raster_policy_selects_bigtiff_yes_and_small_uses_if_safer() -> None:
+    large_options, large_estimate = large_geotiff_creation_options(
+        width=70_000,
+        height=70_000,
+        band_count=4,
+        dtype=np.uint8,
+        compression="DEFLATE",
+        predictor=2,
+    )
+    small_options, small_estimate = large_geotiff_creation_options(
+        width=512,
+        height=512,
+        band_count=4,
+        dtype=np.uint8,
+        compression="DEFLATE",
+        predictor=2,
+    )
+
+    assert large_estimate > BIGTIFF_THRESHOLD_BYTES
+    assert large_options["BIGTIFF"] == "YES"
+    assert small_estimate < BIGTIFF_THRESHOLD_BYTES
+    assert small_options["BIGTIFF"] == "IF_SAFER"
+
+
+def test_write_cached_mosaic_cleans_partial_on_maximum_tiff_size_failure(tmp_path, monkeypatch) -> None:
+    staging_dir = tmp_path / "staging"
+    canvas = Image.new("RGB", (256, 256), (1, 2, 3))
+    valid_mask = np.ones((256, 256), dtype=np.uint8)
+    original_open = mosaic_module.rasterio.open
+
+    def failing_open(path, mode="r", *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        if mode == "w" and str(path).endswith("mosaic.tif.partial"):
+            Path(path).write_bytes(b"partial classic tiff")
+            raise RuntimeError("TIFFAppendToStrip: Maximum TIFF file size exceeded. Use BIGTIFF=YES creation option.")
+        return original_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(mosaic_module.rasterio, "open", failing_open)
+
+    with pytest.raises(RuntimeError, match="Maximum TIFF file size exceeded"):
+        _write_cached_mosaic(
+            staging_dir=staging_dir,
+            canvas=canvas,
+            valid_mask=valid_mask,
+            transform=from_origin(0, 256, 1, 1),
+            metadata={"tile_count": 1},
+        )
+
+    assert not (staging_dir / "mosaic.tif.partial").exists()
+    assert not (staging_dir / "mosaic.tif").exists()
+    assert not (staging_dir / "metadata.json").exists()
+
+
+def test_write_cached_mosaic_cleans_partial_when_validation_fails(tmp_path, monkeypatch) -> None:
+    staging_dir = tmp_path / "staging"
+    canvas = Image.new("RGB", (256, 256), (1, 2, 3))
+    valid_mask = np.ones((256, 256), dtype=np.uint8)
+
+    def fail_validation(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise ValueError("GDAL cannot reopen written file")
+
+    monkeypatch.setattr(mosaic_module, "validate_geotiff_file", fail_validation)
+
+    with pytest.raises(RuntimeError, match="GDAL cannot reopen written file"):
+        _write_cached_mosaic(
+            staging_dir=staging_dir,
+            canvas=canvas,
+            valid_mask=valid_mask,
+            transform=from_origin(0, 256, 1, 1),
+            metadata={"tile_count": 1},
+        )
+
+    assert not (staging_dir / "mosaic.tif.partial").exists()
+    assert not (staging_dir / "mosaic.tif").exists()
+    assert not (staging_dir / "metadata.json").exists()
 
 
 def test_download_wayback_mosaic_tolerates_partial_missing_tiles(tmp_path, monkeypatch) -> None:
@@ -633,6 +733,58 @@ def test_download_wayback_mosaic_atomic_publish_under_concurrency(tmp_path, monk
     assert metadata["reusable"] is True
     assert metadata["actual_available_tile_count"] == 1
     assert all(result.png_path == cache_dir / "mosaic.png" for result in results)
+
+
+def test_download_wayback_mosaic_does_not_reuse_corrupt_cached_tiff(tmp_path, monkeypatch) -> None:
+    settings = Settings(
+        runtime_cache_dir=tmp_path / "runtime",
+        tile_matrix_set="default028mm",
+        zoom=19,
+        download_workers=1,
+    )
+    release = _wayback_release()
+    monkeypatch.setattr("src.domain.mosaic.tile_range_for_bbox", lambda bbox, zoom: (0, 0, 0, 0))
+
+    first_calls = {"count": 0}
+
+    def first_download(url: str, timeout_sec: int):
+        del url, timeout_sec
+        first_calls["count"] += 1
+        return _tile_bytes((90, 45, 15))
+
+    monkeypatch.setattr("src.domain.mosaic._download_tile", first_download)
+    first = download_wayback_mosaic(
+        release,
+        {"west": 0, "south": 0, "east": 1, "north": 1},
+        settings=settings,
+        out_dir=tmp_path / "request_a",
+        label="t1",
+        max_tiles=1,
+    )
+    assert first_calls["count"] == 1
+    first.geotiff_path.write_bytes(b"not a valid geotiff")
+
+    second_calls = {"count": 0}
+
+    def second_download(url: str, timeout_sec: int):
+        del url, timeout_sec
+        second_calls["count"] += 1
+        return _tile_bytes((90, 45, 15))
+
+    monkeypatch.setattr("src.domain.mosaic._download_tile", second_download)
+    second = download_wayback_mosaic(
+        release,
+        {"west": 0, "south": 0, "east": 1, "north": 1},
+        settings=settings,
+        out_dir=tmp_path / "request_b",
+        label="t1",
+        max_tiles=1,
+    )
+
+    assert second_calls["count"] == 1
+    with rasterio.open(second.geotiff_path) as src:
+        assert src.width == 256
+        assert src.height == 256
 
 
 def test_download_tile_with_retries_recovers_from_transient_timeout(monkeypatch) -> None:

@@ -611,6 +611,26 @@ def test_ensure_reference_imagery_cog_rejects_ungeoreferenced_source(tmp_path: P
         raise AssertionError("Ungeoreferenced source raster should not be promoted to COG reference imagery")
 
 
+def test_ensure_reference_imagery_cog_removes_temp_when_validation_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_raster_path = tmp_path / "source.tif"
+    cog_path = tmp_path / "cog" / "reference_imagery_cog.tif"
+    _write_rgb_raster(source_raster_path)
+
+    def fail_validation(*args, **kwargs):  # noqa: ANN002, ANN003
+        raise ValueError("GDAL cannot reopen written reference COG")
+
+    monkeypatch.setattr(reference_imagery_service, "validate_geotiff_file", fail_validation)
+
+    with pytest.raises(RuntimeError, match="GDAL cannot reopen written reference COG"):
+        reference_imagery_service.ensure_reference_imagery_cog(source_raster_path, cog_path)
+
+    assert not cog_path.exists()
+    assert not cog_path.with_suffix(".tmp.tif").exists()
+
+
 def test_render_reference_tile_png_returns_transparent_pixels_from_dataset_mask(tmp_path: Path) -> None:
     source_raster_path = tmp_path / "source.tif"
     valid_mask_path = tmp_path / "source_valid_mask.tif"

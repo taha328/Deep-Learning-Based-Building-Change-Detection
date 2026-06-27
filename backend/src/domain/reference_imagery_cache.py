@@ -8,6 +8,8 @@ from pathlib import Path
 import shutil
 from typing import Any, Literal
 
+from src.domain.raster_write_options import validate_geotiff_file
+
 
 REFERENCE_IMAGERY_CACHE_KEY_VERSION = 1
 REFERENCE_IMAGERY_COG_FILENAME = "reference_imagery_cog.tif"
@@ -98,6 +100,13 @@ def valid_existing_canonical_cog(canonical_cog_path: Path, *, reference_imagery_
     if not canonical_cog_path.is_file():
         return False
     if canonical_cog_path.stat().st_size <= 0:
+        return False
+    try:
+        validate_geotiff_file(
+            canonical_cog_path,
+            min_band_count=4,
+        )
+    except Exception:
         return False
     if reference_imagery_key is None:
         return True

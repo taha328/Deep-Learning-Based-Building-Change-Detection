@@ -25,6 +25,10 @@ from rasterio.transform import from_bounds
 
 from src.config import Settings
 from src.domain.coregistration import CoregistrationDiagnostics, coregister_t1_to_t2_reprojection_only
+from src.domain.raster_write_options import (
+    large_geotiff_creation_options,
+    validate_geotiff_file,
+)
 from src.domain.tiling import tile_bounds_3857, tile_range_for_bbox
 from src.domain.wayback import WaybackRelease
 from src.domain.wayback_metrics import record_tile_download, set_gauge
@@ -423,15 +427,126 @@ def _load_cached_mosaic_metadata(
         height=height,
     ):
         return None
+    if not _valid_cached_mosaic_rasters(
+        cache_tif_path=cache_tif_path,
+        cache_valid_mask_path=cache_valid_mask_path,
+        width=width,
+        height=height,
+    ):
+        return None
     return metadata
 
 
-def _cache_block_size(size: int) -> int:
-    if size >= 512:
-        return 512
-    if size >= 256:
-        return 256
-    return max(16, ((size + 15) // 16) * 16)
+def _valid_cached_mosaic_rasters(
+    *,
+    cache_tif_path: Path,
+    cache_valid_mask_path: Path,
+    width: int,
+    height: int,
+) -> bool:
+    try:
+        validate_geotiff_file(
+            cache_tif_path,
+            expected_width=width,
+            expected_height=height,
+            min_band_count=3,
+        )
+        validate_geotiff_file(
+            cache_valid_mask_path,
+            expected_width=width,
+            expected_height=height,
+            min_band_count=1,
+        )
+    except Exception as exc:
+        logger.warning(
+            "WAYBACK_MOSAIC_CACHE_INVALID_RASTER cacheTifPath=%s validMaskPath=%s error=%s",
+            cache_tif_path,
+            cache_valid_mask_path,
+            exc,
+        )
+        return False
+    return True
+
+
+def _log_mosaic_size_estimate(
+    *,
+    path: Path,
+    width: int,
+    height: int,
+    band_count: int,
+    dtype: object,
+    tile_count: int,
+    compression: str,
+    estimated_uncompressed_bytes: int,
+) -> None:
+    logger.info(
+        "WAYBACK_MOSAIC_SIZE_ESTIMATE path=%s width=%s height=%s bands=%s dtype=%s compression=%s "
+        "tileCount=%s estimatedUncompressedBytes=%s",
+        path,
+        width,
+        height,
+        band_count,
+        np.dtype(dtype).name,
+        compression,
+        tile_count,
+        estimated_uncompressed_bytes,
+    )
+
+
+def _write_geotiff_atomic(
+    *,
+    path: Path,
+    profile: dict[str, object],
+    write_dataset: Callable[[object], None],
+    expected_width: int,
+    expected_height: int,
+    min_band_count: int,
+    log_prefix: str,
+) -> None:
+    temp_path = path.with_suffix(path.suffix + ".partial")
+    if temp_path.exists():
+        temp_path.unlink()
+    try:
+        logger.info(
+            "%s_WRITE_START path=%s tempPath=%s width=%s height=%s bands=%s dtype=%s bigTiff=%s compression=%s",
+            log_prefix,
+            path,
+            temp_path,
+            profile.get("width"),
+            profile.get("height"),
+            profile.get("count"),
+            profile.get("dtype"),
+            profile.get("BIGTIFF"),
+            profile.get("compress"),
+        )
+        with rasterio.open(temp_path, "w", **profile) as dst:
+            write_dataset(dst)
+        validation = validate_geotiff_file(
+            temp_path,
+            expected_width=expected_width,
+            expected_height=expected_height,
+            min_band_count=min_band_count,
+        )
+        logger.info(
+            "%s_VALIDATE_DONE path=%s tempPath=%s validation=%s",
+            log_prefix,
+            path,
+            temp_path,
+            validation,
+        )
+        os.replace(temp_path, path)
+        logger.info("%s_WRITE_DONE path=%s", log_prefix, path)
+    except Exception as exc:
+        logger.exception(
+            "%s_WRITE_FAILED path=%s tempPath=%s error=%s hint=BigTIFF/large-raster-write-failed",
+            log_prefix,
+            path,
+            temp_path,
+            exc,
+        )
+        if temp_path.exists():
+            temp_path.unlink(missing_ok=True)
+        raise RuntimeError(f"{log_prefix} BigTIFF/large raster writing failed for {path}: {exc}") from exc
 
 
 def _write_cached_mosaic(
@@ -470,39 +585,94 @@ def _write_cached_mosaic(
         canvas.save(png_path)
         metadata["preview_png_downsampled"] = False
     arr = np.asarray(canvas)
-    with rasterio.open(
-        tif_path,
-        "w",
-        driver="GTiff",
+    tif_options, tif_estimate = large_geotiff_creation_options(
         width=arr.shape[1],
         height=arr.shape[0],
-        count=3,
+        band_count=3,
         dtype=arr.dtype,
-        crs="EPSG:3857",
-        transform=transform,
-        compress="LZW",
-        tiled=True,
-        blockxsize=_cache_block_size(arr.shape[1]),
-        blockysize=_cache_block_size(arr.shape[0]),
-    ) as dst:
+        compression="LZW",
+        predictor=2,
+        force_bigtiff=True,
+    )
+    _log_mosaic_size_estimate(
+        path=tif_path,
+        width=arr.shape[1],
+        height=arr.shape[0],
+        band_count=3,
+        dtype=arr.dtype,
+        tile_count=tile_count,
+        compression="LZW",
+        estimated_uncompressed_bytes=tif_estimate,
+    )
+    logger.info("WAYBACK_MOSAIC_GTIFF_OPTIONS path=%s options=%s", tif_path, tif_options)
+    tif_profile = {
+        "driver": "GTiff",
+        "width": arr.shape[1],
+        "height": arr.shape[0],
+        "count": 3,
+        "dtype": arr.dtype,
+        "crs": "EPSG:3857",
+        "transform": transform,
+        **tif_options,
+    }
+
+    def _write_rgb(dst: object) -> None:
         for band_index in range(3):
             dst.write(arr[:, :, band_index], band_index + 1)
-    with rasterio.open(
-        valid_mask_path,
-        "w",
-        driver="GTiff",
+
+    _write_geotiff_atomic(
+        path=tif_path,
+        profile=tif_profile,
+        write_dataset=_write_rgb,
+        expected_width=arr.shape[1],
+        expected_height=arr.shape[0],
+        min_band_count=3,
+        log_prefix="WAYBACK_MOSAIC",
+    )
+
+    mask_options, mask_estimate = large_geotiff_creation_options(
         width=valid_mask.shape[1],
         height=valid_mask.shape[0],
-        count=1,
+        band_count=1,
         dtype=valid_mask.dtype,
-        crs="EPSG:3857",
-        transform=transform,
-        compress="LZW",
-        tiled=True,
-        blockxsize=_cache_block_size(valid_mask.shape[1]),
-        blockysize=_cache_block_size(valid_mask.shape[0]),
-    ) as dst:
+        compression="LZW",
+        predictor=2,
+        force_bigtiff=True,
+    )
+    _log_mosaic_size_estimate(
+        path=valid_mask_path,
+        width=valid_mask.shape[1],
+        height=valid_mask.shape[0],
+        band_count=1,
+        dtype=valid_mask.dtype,
+        tile_count=tile_count,
+        compression="LZW",
+        estimated_uncompressed_bytes=mask_estimate,
+    )
+    logger.info("WAYBACK_MOSAIC_GTIFF_OPTIONS path=%s options=%s", valid_mask_path, mask_options)
+    mask_profile = {
+        "driver": "GTiff",
+        "width": valid_mask.shape[1],
+        "height": valid_mask.shape[0],
+        "count": 1,
+        "dtype": valid_mask.dtype,
+        "crs": "EPSG:3857",
+        "transform": transform,
+        **mask_options,
+    }
+
+    def _write_mask(dst: object) -> None:
         dst.write(valid_mask, 1)
+
+    _write_geotiff_atomic(
+        path=valid_mask_path,
+        profile=mask_profile,
+        write_dataset=_write_mask,
+        expected_width=valid_mask.shape[1],
+        expected_height=valid_mask.shape[0],
+        min_band_count=1,
+        log_prefix="WAYBACK_MOSAIC",
+    )
     metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
 

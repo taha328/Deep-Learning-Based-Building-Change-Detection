@@ -74,6 +74,14 @@ APP_WAYBACK_METADATA_WORKERS=10
 
 For very unstable networks, keep adaptive mode off and set a lower fixed value such as `APP_WAYBACK_METADATA_WORKERS=4`. The older `APP_WAYBACK_TILEMAP_PREFLIGHT_WORKERS` override is still honored in fixed mode for targeted preflight-only rollback.
 
+## Large raster writes
+
+Large AOIs can produce Wayback mosaics above the classic TIFF size limit. The Wayback mosaic cache writes intermediate `mosaic.tif` and `valid_mask.tif` as tiled, LZW-compressed GeoTIFFs with `BIGTIFF=YES`, 512-pixel blocks where dimensions allow, and atomic `.partial` temp files. Each raster is reopened and a read window is validated before it is renamed into the cache staging directory.
+
+Reference imagery outputs are also tiled and compressed. `reference_imagery_cog.tif` uses DEFLATE compression, predictor 2, the existing 256-pixel reference tile block size, and an explicit BigTIFF policy: `BIGTIFF=YES` when the estimated uncompressed 4-band output is at least 4 GiB, otherwise `BIGTIFF=IF_SAFER`.
+
+If GDAL fails during a mosaic or reference COG write, only the temporary partial file is removed. Existing valid cache outputs are preserved until a newly written file has passed validation and is atomically renamed. Cache reuse requires the TIFF files to reopen successfully, so corrupt or partial mosaics are rebuilt instead of reused.
+
 ## MapProxy integration path
 
 For larger deployments, place MapProxy or another WMTS-aware cache in front of the ESRI Wayback WMTS service and set:

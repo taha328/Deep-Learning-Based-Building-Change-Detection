@@ -26,6 +26,7 @@ from rasterio.warp import transform_bounds
 from rio_tiler.errors import TileOutsideBounds
 from rio_tiler.io import Reader
 
+from src.domain.raster_write_options import large_geotiff_creation_options, validate_geotiff_file
 from src.domain.reference_imagery_cache import (
     append_reference_imagery_materialization,
     build_aoi_hash,
@@ -476,61 +477,115 @@ def ensure_reference_imagery_cog(
                 if source_band_count < 3:
                     raise ValueError(f"Reference imagery source raster must have at least three RGB bands: {source_raster_path}")
                 profile = src.profile.copy()
+                cog_options, estimated_uncompressed_bytes = large_geotiff_creation_options(
+                    width=src.width,
+                    height=src.height,
+                    band_count=4,
+                    dtype=profile.get("dtype", src.dtypes[0]),
+                    compression="DEFLATE",
+                    predictor=2,
+                    block_size=DEFAULT_TILE_SIZE,
+                )
+                logger.info(
+                    "REFERENCE_COG_SIZE_ESTIMATE project_id=%s release_identifier=%s source_path=%s cog_path=%s "
+                    "width=%s height=%s bands=4 dtype=%s compression=DEFLATE estimatedUncompressedBytes=%s",
+                    project_id or "unknown",
+                    release_identifier or "unknown",
+                    source_raster_path,
+                    cog_path,
+                    src.width,
+                    src.height,
+                    profile.get("dtype", src.dtypes[0]),
+                    estimated_uncompressed_bytes,
+                )
+                logger.info(
+                    "REFERENCE_COG_GTIFF_OPTIONS project_id=%s release_identifier=%s cog_path=%s options=%s",
+                    project_id or "unknown",
+                    release_identifier or "unknown",
+                    cog_path,
+                    cog_options,
+                )
                 profile.update(
                     driver="GTiff",
                     count=4,
                     nodata=None,
-                    tiled=True,
-                    blockxsize=DEFAULT_TILE_SIZE,
-                    blockysize=DEFAULT_TILE_SIZE,
-                    compress="DEFLATE",
-                    predictor=2,
                     interleave="pixel",
-                    BIGTIFF="IF_SAFER",
+                    **cog_options,
                 )
-                with rasterio.open(temp_path, "w", **profile) as dst:
-                    aoi_mask = None
-                    if aoi_geojson is not None:
-                        aoi_mask = np.where(rasterize_aoi_mask_like(source_raster_path, aoi_geojson), 255, 0).astype(np.uint8)
-                        if aoi_mask.shape != (src.height, src.width):
-                            aoi_mask = None
-                    valid_src = rasterio.open(valid_mask_path) if valid_mask_path is not None and valid_mask_path.is_file() else None
-                    has_source_alpha = bool(src.count >= 4 and src.colorinterp and src.colorinterp[3] == ColorInterp.alpha)
-                    has_source_internal_mask = any("per_dataset" in [flag.name for flag in flags] for flags in src.mask_flag_enums)
-                    has_authoritative_mask = bool(has_source_alpha or has_source_internal_mask or valid_src is not None or aoi_mask is not None)
-                    fallback_used = False
-                    alpha_zero_count = 0
-                    alpha_255_count = 0
-                    try:
-                        for _block_index, window in src.block_windows(1):
-                            rgb = src.read([1, 2, 3], window=window)
-                            dst.write(rgb, indexes=[1, 2, 3], window=window)
-                            if src.count >= 4 and src.colorinterp and src.colorinterp[3] == ColorInterp.alpha:
-                                alpha = src.read(4, window=window).astype(np.uint8)
-                            else:
-                                alpha = src.dataset_mask(window=window).astype(np.uint8)
+                try:
+                    with rasterio.open(temp_path, "w", **profile) as dst:
+                        aoi_mask = None
+                        if aoi_geojson is not None:
+                            aoi_mask = np.where(rasterize_aoi_mask_like(source_raster_path, aoi_geojson), 255, 0).astype(np.uint8)
+                            if aoi_mask.shape != (src.height, src.width):
+                                aoi_mask = None
+                        valid_src = rasterio.open(valid_mask_path) if valid_mask_path is not None and valid_mask_path.is_file() else None
+                        has_source_alpha = bool(src.count >= 4 and src.colorinterp and src.colorinterp[3] == ColorInterp.alpha)
+                        has_source_internal_mask = any("per_dataset" in [flag.name for flag in flags] for flags in src.mask_flag_enums)
+                        has_authoritative_mask = bool(has_source_alpha or has_source_internal_mask or valid_src is not None or aoi_mask is not None)
+                        fallback_used = False
+                        alpha_zero_count = 0
+                        alpha_255_count = 0
+                        try:
+                            for _block_index, window in src.block_windows(1):
+                                rgb = src.read([1, 2, 3], window=window)
+                                dst.write(rgb, indexes=[1, 2, 3], window=window)
+                                if src.count >= 4 and src.colorinterp and src.colorinterp[3] == ColorInterp.alpha:
+                                    alpha = src.read(4, window=window).astype(np.uint8)
+                                else:
+                                    alpha = src.dataset_mask(window=window).astype(np.uint8)
+                                if valid_src is not None:
+                                    valid = valid_src.read(1, window=window)
+                                    if valid.shape == alpha.shape:
+                                        alpha = np.minimum(alpha, np.where(valid > 0, 255, 0).astype(np.uint8))
+                                if aoi_mask is not None:
+                                    row_start = int(window.row_off)
+                                    row_stop = row_start + int(window.height)
+                                    col_start = int(window.col_off)
+                                    col_stop = col_start + int(window.width)
+                                    alpha = np.minimum(alpha, aoi_mask[row_start:row_stop, col_start:col_stop])
+                                if not has_authoritative_mask and not np.any(alpha == 0):
+                                    fallback_alpha = np.where(np.any(rgb != 0, axis=0), 255, 0).astype(np.uint8)
+                                    if np.any(fallback_alpha == 0):
+                                        alpha = fallback_alpha
+                                        fallback_used = True
+                                alpha_zero_count += int((alpha == 0).sum())
+                                alpha_255_count += int((alpha == 255).sum())
+                                dst.write(alpha, 4, window=window)
+                        finally:
                             if valid_src is not None:
-                                valid = valid_src.read(1, window=window)
-                                if valid.shape == alpha.shape:
-                                    alpha = np.minimum(alpha, np.where(valid > 0, 255, 0).astype(np.uint8))
-                            if aoi_mask is not None:
-                                row_start = int(window.row_off)
-                                row_stop = row_start + int(window.height)
-                                col_start = int(window.col_off)
-                                col_stop = col_start + int(window.width)
-                                alpha = np.minimum(alpha, aoi_mask[row_start:row_stop, col_start:col_stop])
-                            if not has_authoritative_mask and not np.any(alpha == 0):
-                                fallback_alpha = np.where(np.any(rgb != 0, axis=0), 255, 0).astype(np.uint8)
-                                if np.any(fallback_alpha == 0):
-                                    alpha = fallback_alpha
-                                    fallback_used = True
-                            alpha_zero_count += int((alpha == 0).sum())
-                            alpha_255_count += int((alpha == 255).sum())
-                            dst.write(alpha, 4, window=window)
-                    finally:
-                        if valid_src is not None:
-                            valid_src.close()
-                    dst.colorinterp = (ColorInterp.red, ColorInterp.green, ColorInterp.blue, ColorInterp.alpha)
+                                valid_src.close()
+                        dst.colorinterp = (ColorInterp.red, ColorInterp.green, ColorInterp.blue, ColorInterp.alpha)
+                        if src.descriptions:
+                            dst.descriptions = tuple(list(src.descriptions[:3]) + ["Alpha"])
+                        if src.units:
+                            dst.units = tuple(list(src.units[:3]) + [""])
+                        dst.update_tags(
+                            ns="building_change",
+                            reference_cog_format_version=str(REFERENCE_COG_FORMAT_VERSION),
+                            valid_mask_mtime_ns="" if valid_mask_mtime_ns is None else str(valid_mask_mtime_ns),
+                        )
+                        overview_factors = _overview_factors(dst.width, dst.height)
+                        if overview_factors:
+                            dst.build_overviews(overview_factors, Resampling.average)
+                            dst.update_tags(ns="rio_overview", resampling="average")
+                    validation = validate_geotiff_file(
+                        temp_path,
+                        expected_width=src.width,
+                        expected_height=src.height,
+                        min_band_count=4,
+                    )
+                    inspected = _inspect_reference_cog(temp_path)
+                    if inspected.format_version != REFERENCE_COG_FORMAT_VERSION or not inspected.has_alpha_band:
+                        raise ValueError(f"Reference imagery COG validation failed for {temp_path}")
+                    logger.info(
+                        "REFERENCE_COG_VALIDATE_DONE project_id=%s release_identifier=%s cog_path=%s temp_path=%s validation=%s",
+                        project_id or "unknown",
+                        release_identifier or "unknown",
+                        cog_path,
+                        temp_path,
+                        validation,
+                    )
                     logger.info(
                         "REFERENCE_COG_ALPHA_CONFIRMED project_id=%s release_identifier=%s cog_path=%s band_count=4 alpha_zero_count=%s alpha_255_count=%s duration_ms=%s",
                         project_id or "unknown",
@@ -549,19 +604,19 @@ def ensure_reference_imagery_cog(
                             alpha_zero_count,
                             alpha_255_count,
                         )
-                    if src.descriptions:
-                        dst.descriptions = tuple(list(src.descriptions[:3]) + ["Alpha"])
-                    if src.units:
-                        dst.units = tuple(list(src.units[:3]) + [""])
-                    dst.update_tags(
-                        ns="building_change",
-                        reference_cog_format_version=str(REFERENCE_COG_FORMAT_VERSION),
-                        valid_mask_mtime_ns="" if valid_mask_mtime_ns is None else str(valid_mask_mtime_ns),
+                except Exception as exc:
+                    logger.exception(
+                        "REFERENCE_COG_WRITE_FAILED project_id=%s release_identifier=%s cog_path=%s temp_path=%s "
+                        "error=%s hint=BigTIFF/large-raster-write-failed",
+                        project_id or "unknown",
+                        release_identifier or "unknown",
+                        cog_path,
+                        temp_path,
+                        exc,
                     )
-                    overview_factors = _overview_factors(dst.width, dst.height)
-                    if overview_factors:
-                        dst.build_overviews(overview_factors, Resampling.average)
-                        dst.update_tags(ns="rio_overview", resampling="average")
+                    if temp_path.exists():
+                        temp_path.unlink(missing_ok=True)
+                    raise RuntimeError(f"REFERENCE_COG BigTIFF/large raster writing failed for {cog_path}: {exc}") from exc
         os.replace(temp_path, cog_path)
         logger.info(
             "COG_CREATED path=%s durationMs=%s",
