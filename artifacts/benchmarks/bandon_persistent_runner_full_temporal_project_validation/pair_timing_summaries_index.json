@@ -1,0 +1,28 @@
+[
+  {
+    "checkpoint_load_count_total": 1.0,
+    "fallback_or_mixed_mode": false,
+    "from_release_identifier": "WB_2018_R03",
+    "model_load_count_total": 1.0,
+    "model_reused_ratio": 0.967,
+    "pair_index": 1,
+    "persistent_worker_rss_peak_mb": 667.578,
+    "record_count": 30,
+    "run_id": "1dab0a57fc2e07716170d389",
+    "timing_summary_path": "/Users/tahaelouali/Developer/Building_change_app/artifacts/benchmarks/bandon_persistent_runner_full_temporal_project_validation/runtime/tiled_20260627T084048Z/requests/1dab0a57fc2e07716170d389/timing_summary.json",
+    "to_release_identifier": "WB_2021_R04"
+  },
+  {
+    "checkpoint_load_count_total": 1.0,
+    "fallback_or_mixed_mode": false,
+    "from_release_identifier": "WB_2021_R04",
+    "model_load_count_total": 1.0,
+    "model_reused_ratio": 0.967,
+    "pair_index": 2,
+    "persistent_worker_rss_peak_mb": 654.609,
+    "record_count": 30,
+    "run_id": "c3cc7bd1b1612bc9947dd4ca",
+    "timing_summary_path": "/Users/tahaelouali/Developer/Building_change_app/artifacts/benchmarks/bandon_persistent_runner_full_temporal_project_validation/runtime/tiled_20260627T084048Z/requests/c3cc7bd1b1612bc9947dd4ca/timing_summary.json",
+    "to_release_identifier": "WB_2026_R05"
+  }
+]

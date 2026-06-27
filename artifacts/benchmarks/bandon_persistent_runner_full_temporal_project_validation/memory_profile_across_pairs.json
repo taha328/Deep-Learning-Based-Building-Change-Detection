@@ -1,0 +1,1125 @@
+{
+  "memory_growth_detected": false,
+  "rss_after_each_pair_worker_peak_mb": [
+    667.578,
+    654.609
+  ],
+  "rss_peak_mb": 1170.937,
+  "rss_project_end_mb": 981.656,
+  "rss_project_start_mb": 229.172,
+  "rss_slope_mb_per_1000_tiles": -432.2999999999979,
+  "rss_slope_mb_per_pair": -12.968999999999937,
+  "sample_count": 145,
+  "samples": [
+    {
+      "label": "project_start",
+      "process_rss_mb": 229.172,
+      "process_tree_rss_mb": 229.172,
+      "timestamp": "2026-06-27T08:41:03.916947Z"
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 248.328,
+      "process_tree_rss_mb": 248.328,
+      "timestamp": "2026-06-27T08:41:08.968320Z"
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 248.328,
+      "process_tree_rss_mb": 248.328,
+      "timestamp": "2026-06-27T08:41:14.018796Z"
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 250.172,
+      "process_tree_rss_mb": 250.172,
+      "timestamp": "2026-06-27T08:41:19.095784Z"
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 249.719,
+      "process_tree_rss_mb": 249.719,
+      "timestamp": "2026-06-27T08:41:24.151748Z"
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 326.828,
+      "process_tree_rss_mb": 326.844,
+      "timestamp": "2026-06-27T08:41:29.206921Z"
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 333.281,
+      "process_tree_rss_mb": 334.328,
+      "timestamp": "2026-06-27T08:41:34.252743Z"
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 341.0,
+      "process_tree_rss_mb": 341.0,
+      "timestamp": "2026-06-27T08:41:39.319494Z"
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 513.547,
+      "process_tree_rss_mb": 530.547,
+      "timestamp": "2026-06-27T08:41:47.109731Z"
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 600.359,
+      "process_tree_rss_mb": 600.359,
+      "timestamp": "2026-06-27T08:41:52.191475Z"
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 607.453,
+      "process_tree_rss_mb": 607.453,
+      "timestamp": "2026-06-27T08:41:57.257281Z"
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 866.156,
+      "process_tree_rss_mb": 866.172,
+      "timestamp": "2026-06-27T08:42:02.338660Z"
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 876.422,
+      "process_tree_rss_mb": 876.469,
+      "timestamp": "2026-06-27T08:42:07.402256Z"
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 379.422,
+      "process_tree_rss_mb": 741.438,
+      "timestamp": "2026-06-27T08:42:12.465695Z"
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 381.844,
+      "process_tree_rss_mb": 921.688,
+      "timestamp": "2026-06-27T08:42:17.547941Z"
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 1,
+      "process_rss_mb": 407.203,
+      "process_tree_rss_mb": 947.047,
+      "processed_tiles": 1,
+      "timestamp": "2026-06-27T08:42:17.851259Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 1,
+      "process_rss_mb": 418.5,
+      "process_tree_rss_mb": 993.531,
+      "processed_tiles": 2,
+      "timestamp": "2026-06-27T08:42:21.237932Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 422.719,
+      "process_tree_rss_mb": 957.343,
+      "timestamp": "2026-06-27T08:42:22.628982Z"
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 1,
+      "process_rss_mb": 373.562,
+      "process_tree_rss_mb": 988.906,
+      "processed_tiles": 3,
+      "timestamp": "2026-06-27T08:42:24.548504Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 374.469,
+      "process_tree_rss_mb": 990.937,
+      "timestamp": "2026-06-27T08:42:27.730794Z"
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 1,
+      "process_rss_mb": 374.562,
+      "process_tree_rss_mb": 990.937,
+      "processed_tiles": 4,
+      "timestamp": "2026-06-27T08:42:27.913121Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 1,
+      "process_rss_mb": 374.562,
+      "process_tree_rss_mb": 993.25,
+      "processed_tiles": 5,
+      "timestamp": "2026-06-27T08:42:31.190929Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 342.844,
+      "process_tree_rss_mb": 961.906,
+      "timestamp": "2026-06-27T08:42:32.818709Z"
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 1,
+      "process_rss_mb": 342.938,
+      "process_tree_rss_mb": 962.454,
+      "processed_tiles": 6,
+      "timestamp": "2026-06-27T08:42:34.630190Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 346.938,
+      "process_tree_rss_mb": 966.532,
+      "timestamp": "2026-06-27T08:42:37.915268Z"
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 1,
+      "process_rss_mb": 346.984,
+      "process_tree_rss_mb": 966.578,
+      "processed_tiles": 7,
+      "timestamp": "2026-06-27T08:42:38.145434Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 1,
+      "process_rss_mb": 347.016,
+      "process_tree_rss_mb": 966.704,
+      "processed_tiles": 8,
+      "timestamp": "2026-06-27T08:42:41.568188Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 334.109,
+      "process_tree_rss_mb": 954.062,
+      "timestamp": "2026-06-27T08:42:42.996418Z"
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 1,
+      "process_rss_mb": 338.125,
+      "process_tree_rss_mb": 972.953,
+      "processed_tiles": 9,
+      "timestamp": "2026-06-27T08:42:45.007071Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 338.141,
+      "process_tree_rss_mb": 973.875,
+      "timestamp": "2026-06-27T08:42:48.084445Z"
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 1,
+      "process_rss_mb": 342.141,
+      "process_tree_rss_mb": 977.875,
+      "processed_tiles": 10,
+      "timestamp": "2026-06-27T08:42:48.397124Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 1,
+      "process_rss_mb": 342.188,
+      "process_tree_rss_mb": 977.954,
+      "processed_tiles": 11,
+      "timestamp": "2026-06-27T08:42:51.772979Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 342.391,
+      "process_tree_rss_mb": 978.453,
+      "timestamp": "2026-06-27T08:42:53.167615Z"
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 1,
+      "process_rss_mb": 342.406,
+      "process_tree_rss_mb": 989.094,
+      "processed_tiles": 12,
+      "timestamp": "2026-06-27T08:42:55.213980Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 342.406,
+      "process_tree_rss_mb": 989.172,
+      "timestamp": "2026-06-27T08:42:58.257029Z"
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 1,
+      "process_rss_mb": 343.0,
+      "process_tree_rss_mb": 989.781,
+      "processed_tiles": 13,
+      "timestamp": "2026-06-27T08:42:58.593190Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 1,
+      "process_rss_mb": 343.016,
+      "process_tree_rss_mb": 989.844,
+      "processed_tiles": 14,
+      "timestamp": "2026-06-27T08:43:02.015753Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 343.016,
+      "process_tree_rss_mb": 989.86,
+      "timestamp": "2026-06-27T08:43:03.338736Z"
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 1,
+      "process_rss_mb": 343.031,
+      "process_tree_rss_mb": 1009.359,
+      "processed_tiles": 15,
+      "timestamp": "2026-06-27T08:43:05.399519Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 343.094,
+      "process_tree_rss_mb": 1010.641,
+      "timestamp": "2026-06-27T08:43:08.417466Z"
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 1,
+      "process_rss_mb": 344.125,
+      "process_tree_rss_mb": 1011.672,
+      "processed_tiles": 16,
+      "timestamp": "2026-06-27T08:43:08.898208Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 1,
+      "process_rss_mb": 344.469,
+      "process_tree_rss_mb": 1012.047,
+      "processed_tiles": 17,
+      "timestamp": "2026-06-27T08:43:12.695574Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 344.469,
+      "process_tree_rss_mb": 1012.063,
+      "timestamp": "2026-06-27T08:43:13.509701Z"
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 1,
+      "process_rss_mb": 344.5,
+      "process_tree_rss_mb": 965.156,
+      "processed_tiles": 18,
+      "timestamp": "2026-06-27T08:43:16.747724Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 344.5,
+      "process_tree_rss_mb": 967.922,
+      "timestamp": "2026-06-27T08:43:18.597992Z"
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 1,
+      "process_rss_mb": 344.5,
+      "process_tree_rss_mb": 973.469,
+      "processed_tiles": 19,
+      "timestamp": "2026-06-27T08:43:21.125580Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 344.516,
+      "process_tree_rss_mb": 973.485,
+      "timestamp": "2026-06-27T08:43:23.686835Z"
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 1,
+      "process_rss_mb": 344.516,
+      "process_tree_rss_mb": 975.078,
+      "processed_tiles": 20,
+      "timestamp": "2026-06-27T08:43:24.813965Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 1,
+      "process_rss_mb": 345.281,
+      "process_tree_rss_mb": 980.578,
+      "processed_tiles": 21,
+      "timestamp": "2026-06-27T08:43:28.633104Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 345.281,
+      "process_tree_rss_mb": 980.594,
+      "timestamp": "2026-06-27T08:43:28.771117Z"
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 1,
+      "process_rss_mb": 345.359,
+      "process_tree_rss_mb": 980.656,
+      "processed_tiles": 22,
+      "timestamp": "2026-06-27T08:43:32.724676Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 345.359,
+      "process_tree_rss_mb": 980.75,
+      "timestamp": "2026-06-27T08:43:33.860787Z"
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 1,
+      "process_rss_mb": 345.375,
+      "process_tree_rss_mb": 980.906,
+      "processed_tiles": 23,
+      "timestamp": "2026-06-27T08:43:36.552600Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 345.375,
+      "process_tree_rss_mb": 980.984,
+      "timestamp": "2026-06-27T08:43:38.942480Z"
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 1,
+      "process_rss_mb": 345.375,
+      "process_tree_rss_mb": 980.984,
+      "processed_tiles": 24,
+      "timestamp": "2026-06-27T08:43:40.267737Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 345.375,
+      "process_tree_rss_mb": 981.234,
+      "timestamp": "2026-06-27T08:43:44.033132Z"
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 1,
+      "process_rss_mb": 345.375,
+      "process_tree_rss_mb": 981.234,
+      "processed_tiles": 25,
+      "timestamp": "2026-06-27T08:43:44.083707Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 1,
+      "process_rss_mb": 345.406,
+      "process_tree_rss_mb": 981.453,
+      "processed_tiles": 26,
+      "timestamp": "2026-06-27T08:43:47.999568Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 345.406,
+      "process_tree_rss_mb": 981.453,
+      "timestamp": "2026-06-27T08:43:49.114413Z"
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 1,
+      "process_rss_mb": 345.484,
+      "process_tree_rss_mb": 981.531,
+      "processed_tiles": 27,
+      "timestamp": "2026-06-27T08:43:51.906292Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 345.5,
+      "process_tree_rss_mb": 981.547,
+      "timestamp": "2026-06-27T08:43:54.200168Z"
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 1,
+      "process_rss_mb": 345.531,
+      "process_tree_rss_mb": 981.593,
+      "processed_tiles": 28,
+      "timestamp": "2026-06-27T08:43:55.819292Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 345.531,
+      "process_tree_rss_mb": 981.593,
+      "timestamp": "2026-06-27T08:43:59.296245Z"
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 1,
+      "process_rss_mb": 345.531,
+      "process_tree_rss_mb": 981.593,
+      "processed_tiles": 29,
+      "timestamp": "2026-06-27T08:43:59.454121Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 1,
+      "process_rss_mb": 345.562,
+      "process_tree_rss_mb": 981.624,
+      "processed_tiles": 30,
+      "timestamp": "2026-06-27T08:44:02.983917Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 367.766,
+      "process_tree_rss_mb": 367.766,
+      "timestamp": "2026-06-27T08:44:04.376442Z"
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 400.141,
+      "process_tree_rss_mb": 400.141,
+      "timestamp": "2026-06-27T08:44:09.422936Z"
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 448.672,
+      "process_tree_rss_mb": 448.672,
+      "timestamp": "2026-06-27T08:44:14.471219Z"
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 451.891,
+      "process_tree_rss_mb": 451.891,
+      "timestamp": "2026-06-27T08:44:19.522684Z"
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 521.312,
+      "process_tree_rss_mb": 521.359,
+      "timestamp": "2026-06-27T08:44:24.585262Z"
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 529.844,
+      "process_tree_rss_mb": 529.844,
+      "timestamp": "2026-06-27T08:44:29.662952Z"
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 537.188,
+      "process_tree_rss_mb": 537.188,
+      "timestamp": "2026-06-27T08:44:34.723155Z"
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 928.531,
+      "process_tree_rss_mb": 928.531,
+      "timestamp": "2026-06-27T08:44:41.727529Z"
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 932.469,
+      "process_tree_rss_mb": 863.641,
+      "timestamp": "2026-06-27T08:44:46.792438Z"
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 511.109,
+      "process_tree_rss_mb": 973.906,
+      "timestamp": "2026-06-27T08:44:52.283940Z"
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 2,
+      "process_rss_mb": 530.672,
+      "process_tree_rss_mb": 1062.391,
+      "processed_tiles": 1,
+      "timestamp": "2026-06-27T08:44:52.964343Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 2,
+      "process_rss_mb": 538.453,
+      "process_tree_rss_mb": 1091.641,
+      "processed_tiles": 2,
+      "timestamp": "2026-06-27T08:44:56.404601Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 538.453,
+      "process_tree_rss_mb": 1092.265,
+      "timestamp": "2026-06-27T08:44:57.387948Z"
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 2,
+      "process_rss_mb": 522.516,
+      "process_tree_rss_mb": 1097.188,
+      "processed_tiles": 3,
+      "timestamp": "2026-06-27T08:44:59.820820Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 522.531,
+      "process_tree_rss_mb": 1102.906,
+      "timestamp": "2026-06-27T08:45:02.496433Z"
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 2,
+      "process_rss_mb": 522.562,
+      "process_tree_rss_mb": 1103.062,
+      "processed_tiles": 4,
+      "timestamp": "2026-06-27T08:45:03.270048Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 2,
+      "process_rss_mb": 522.578,
+      "process_tree_rss_mb": 1104.219,
+      "processed_tiles": 5,
+      "timestamp": "2026-06-27T08:45:06.706832Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 522.578,
+      "process_tree_rss_mb": 1104.406,
+      "timestamp": "2026-06-27T08:45:07.598611Z"
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 2,
+      "process_rss_mb": 520.547,
+      "process_tree_rss_mb": 1110.672,
+      "processed_tiles": 6,
+      "timestamp": "2026-06-27T08:45:10.287742Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 520.578,
+      "process_tree_rss_mb": 1110.875,
+      "timestamp": "2026-06-27T08:45:12.698653Z"
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 2,
+      "process_rss_mb": 520.766,
+      "process_tree_rss_mb": 1112.125,
+      "processed_tiles": 7,
+      "timestamp": "2026-06-27T08:45:13.946590Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 2,
+      "process_rss_mb": 520.797,
+      "process_tree_rss_mb": 1125.188,
+      "processed_tiles": 8,
+      "timestamp": "2026-06-27T08:45:17.453319Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 520.812,
+      "process_tree_rss_mb": 1125.281,
+      "timestamp": "2026-06-27T08:45:17.799954Z"
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 2,
+      "process_rss_mb": 518.531,
+      "process_tree_rss_mb": 1123.0,
+      "processed_tiles": 9,
+      "timestamp": "2026-06-27T08:45:21.048387Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 518.531,
+      "process_tree_rss_mb": 1123.062,
+      "timestamp": "2026-06-27T08:45:22.898194Z"
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 2,
+      "process_rss_mb": 518.531,
+      "process_tree_rss_mb": 1123.062,
+      "processed_tiles": 10,
+      "timestamp": "2026-06-27T08:45:24.534347Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 518.562,
+      "process_tree_rss_mb": 1130.515,
+      "timestamp": "2026-06-27T08:45:27.999161Z"
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 2,
+      "process_rss_mb": 519.094,
+      "process_tree_rss_mb": 1130.75,
+      "processed_tiles": 11,
+      "timestamp": "2026-06-27T08:45:28.184478Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 2,
+      "process_rss_mb": 516.172,
+      "process_tree_rss_mb": 1131.484,
+      "processed_tiles": 12,
+      "timestamp": "2026-06-27T08:45:31.848069Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 516.172,
+      "process_tree_rss_mb": 1136.453,
+      "timestamp": "2026-06-27T08:45:33.095839Z"
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 2,
+      "process_rss_mb": 516.172,
+      "process_tree_rss_mb": 1136.531,
+      "processed_tiles": 13,
+      "timestamp": "2026-06-27T08:45:35.442278Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 516.172,
+      "process_tree_rss_mb": 1139.891,
+      "timestamp": "2026-06-27T08:45:38.206897Z"
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 2,
+      "process_rss_mb": 516.172,
+      "process_tree_rss_mb": 1139.891,
+      "processed_tiles": 14,
+      "timestamp": "2026-06-27T08:45:38.967229Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 2,
+      "process_rss_mb": 516.172,
+      "process_tree_rss_mb": 1147.125,
+      "processed_tiles": 15,
+      "timestamp": "2026-06-27T08:45:42.483461Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 516.188,
+      "process_tree_rss_mb": 1147.157,
+      "timestamp": "2026-06-27T08:45:43.313274Z"
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 2,
+      "process_rss_mb": 516.188,
+      "process_tree_rss_mb": 1147.157,
+      "processed_tiles": 16,
+      "timestamp": "2026-06-27T08:45:46.093483Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 516.188,
+      "process_tree_rss_mb": 1147.188,
+      "timestamp": "2026-06-27T08:45:48.415881Z"
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 2,
+      "process_rss_mb": 516.219,
+      "process_tree_rss_mb": 1150.907,
+      "processed_tiles": 17,
+      "timestamp": "2026-06-27T08:45:49.815759Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 2,
+      "process_rss_mb": 516.25,
+      "process_tree_rss_mb": 1153.297,
+      "processed_tiles": 18,
+      "timestamp": "2026-06-27T08:45:53.452280Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 516.25,
+      "process_tree_rss_mb": 1153.297,
+      "timestamp": "2026-06-27T08:45:53.524766Z"
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 2,
+      "process_rss_mb": 516.25,
+      "process_tree_rss_mb": 1153.953,
+      "processed_tiles": 19,
+      "timestamp": "2026-06-27T08:45:57.088628Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 516.25,
+      "process_tree_rss_mb": 1154.0,
+      "timestamp": "2026-06-27T08:45:58.622360Z"
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 2,
+      "process_rss_mb": 516.266,
+      "process_tree_rss_mb": 1154.016,
+      "processed_tiles": 20,
+      "timestamp": "2026-06-27T08:46:00.650973Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 516.266,
+      "process_tree_rss_mb": 1154.172,
+      "timestamp": "2026-06-27T08:46:03.732130Z"
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 2,
+      "process_rss_mb": 516.297,
+      "process_tree_rss_mb": 1154.203,
+      "processed_tiles": 21,
+      "timestamp": "2026-06-27T08:46:04.138744Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 2,
+      "process_rss_mb": 516.312,
+      "process_tree_rss_mb": 1170.593,
+      "processed_tiles": 22,
+      "timestamp": "2026-06-27T08:46:07.826204Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 516.312,
+      "process_tree_rss_mb": 1170.609,
+      "timestamp": "2026-06-27T08:46:08.824041Z"
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 2,
+      "process_rss_mb": 516.328,
+      "process_tree_rss_mb": 1170.937,
+      "processed_tiles": 23,
+      "timestamp": "2026-06-27T08:46:11.378220Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 516.328,
+      "process_tree_rss_mb": 1163.047,
+      "timestamp": "2026-06-27T08:46:13.927879Z"
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 2,
+      "process_rss_mb": 516.328,
+      "process_tree_rss_mb": 1163.062,
+      "processed_tiles": 24,
+      "timestamp": "2026-06-27T08:46:14.897838Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 2,
+      "process_rss_mb": 516.328,
+      "process_tree_rss_mb": 1145.516,
+      "processed_tiles": 25,
+      "timestamp": "2026-06-27T08:46:18.412527Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 516.359,
+      "process_tree_rss_mb": 1145.547,
+      "timestamp": "2026-06-27T08:46:19.030032Z"
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 2,
+      "process_rss_mb": 516.375,
+      "process_tree_rss_mb": 1145.594,
+      "processed_tiles": 26,
+      "timestamp": "2026-06-27T08:46:21.919633Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 516.375,
+      "process_tree_rss_mb": 1145.609,
+      "timestamp": "2026-06-27T08:46:24.134249Z"
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 2,
+      "process_rss_mb": 516.375,
+      "process_tree_rss_mb": 1145.625,
+      "processed_tiles": 27,
+      "timestamp": "2026-06-27T08:46:25.712759Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 516.375,
+      "process_tree_rss_mb": 1145.656,
+      "timestamp": "2026-06-27T08:46:29.241129Z"
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 2,
+      "process_rss_mb": 516.375,
+      "process_tree_rss_mb": 1145.656,
+      "processed_tiles": 28,
+      "timestamp": "2026-06-27T08:46:29.306327Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 2,
+      "process_rss_mb": 516.375,
+      "process_tree_rss_mb": 1145.703,
+      "processed_tiles": 29,
+      "timestamp": "2026-06-27T08:46:32.916694Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 516.375,
+      "process_tree_rss_mb": 1145.703,
+      "timestamp": "2026-06-27T08:46:34.339981Z"
+    },
+    {
+      "label": "progress",
+      "message": "Running tiled local BANDON change detection",
+      "pair_index": 2,
+      "process_rss_mb": 516.375,
+      "process_tree_rss_mb": 1145.719,
+      "processed_tiles": 30,
+      "timestamp": "2026-06-27T08:46:36.476576Z",
+      "total_tiles": 30
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 602.062,
+      "process_tree_rss_mb": 602.062,
+      "timestamp": "2026-06-27T08:46:39.438467Z"
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 658.5,
+      "process_tree_rss_mb": 658.5,
+      "timestamp": "2026-06-27T08:46:44.495165Z"
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 664.359,
+      "process_tree_rss_mb": 664.359,
+      "timestamp": "2026-06-27T08:46:49.553262Z"
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 734.766,
+      "process_tree_rss_mb": 734.891,
+      "timestamp": "2026-06-27T08:46:54.612980Z"
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 795.281,
+      "process_tree_rss_mb": 795.281,
+      "timestamp": "2026-06-27T08:46:59.681849Z"
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 796.516,
+      "process_tree_rss_mb": 796.516,
+      "timestamp": "2026-06-27T08:47:04.743705Z"
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 798.578,
+      "process_tree_rss_mb": 798.578,
+      "timestamp": "2026-06-27T08:47:09.808133Z"
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 784.875,
+      "process_tree_rss_mb": 784.875,
+      "timestamp": "2026-06-27T08:47:14.881262Z"
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 955.703,
+      "process_tree_rss_mb": 955.703,
+      "timestamp": "2026-06-27T08:47:19.963832Z"
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 958.891,
+      "process_tree_rss_mb": 958.891,
+      "timestamp": "2026-06-27T08:47:25.028265Z"
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 968.297,
+      "process_tree_rss_mb": 969.234,
+      "timestamp": "2026-06-27T08:47:30.088552Z"
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 1002.172,
+      "process_tree_rss_mb": 1006.844,
+      "timestamp": "2026-06-27T08:47:35.161306Z"
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 1007.625,
+      "process_tree_rss_mb": 1007.625,
+      "timestamp": "2026-06-27T08:47:40.270297Z"
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 927.906,
+      "process_tree_rss_mb": 927.906,
+      "timestamp": "2026-06-27T08:47:45.338434Z"
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 932.422,
+      "process_tree_rss_mb": 932.422,
+      "timestamp": "2026-06-27T08:47:50.404276Z"
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 1055.469,
+      "process_tree_rss_mb": 1060.188,
+      "timestamp": "2026-06-27T08:47:55.483006Z"
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 1011.859,
+      "process_tree_rss_mb": 1011.859,
+      "timestamp": "2026-06-27T08:48:00.565243Z"
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 899.062,
+      "process_tree_rss_mb": 899.062,
+      "timestamp": "2026-06-27T08:48:05.629538Z"
+    },
+    {
+      "label": "interval",
+      "process_rss_mb": 907.188,
+      "process_tree_rss_mb": 906.922,
+      "timestamp": "2026-06-27T08:48:10.699078Z"
+    },
+    {
+      "label": "project_end",
+      "process_rss_mb": 981.656,
+      "process_tree_rss_mb": 981.656,
+      "timestamp": "2026-06-27T08:48:15.556423Z"
+    }
+  ]
+}

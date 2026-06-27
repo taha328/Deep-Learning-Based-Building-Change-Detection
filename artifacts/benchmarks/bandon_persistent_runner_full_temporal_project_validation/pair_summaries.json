@@ -1,0 +1,40 @@
+[
+  {
+    "checkpoint_load_count_total": 1.0,
+    "fallback_or_mixed_mode": false,
+    "feature_count": 266,
+    "from_release_identifier": "WB_2018_R03",
+    "model_load_count_total": 1.0,
+    "model_reused_ratio": 0.967,
+    "pair_index": 1,
+    "passed": true,
+    "processed_tiles": 30,
+    "run_id": "1dab0a57fc2e07716170d389",
+    "seconds_per_tile_mean": 3.786259154071255,
+    "seconds_per_tile_p95": 4.241702,
+    "status": "complete",
+    "tiles_per_second": 0.2580894810590497,
+    "to_release_identifier": "WB_2021_R04",
+    "total_tiles": 30,
+    "wall_time_seconds": 116.23875516699627
+  },
+  {
+    "checkpoint_load_count_total": 1.0,
+    "fallback_or_mixed_mode": false,
+    "feature_count": 809,
+    "from_release_identifier": "WB_2021_R04",
+    "model_load_count_total": 1.0,
+    "model_reused_ratio": 0.967,
+    "pair_index": 2,
+    "passed": true,
+    "processed_tiles": 30,
+    "run_id": "c3cc7bd1b1612bc9947dd4ca",
+    "seconds_per_tile_mean": 3.7240970902338932,
+    "seconds_per_tile_p95": 3.757625,
+    "status": "complete",
+    "tiles_per_second": 0.26112567652478375,
+    "to_release_identifier": "WB_2026_R05",
+    "total_tiles": 30,
+    "wall_time_seconds": 114.88720833300613
+  }
+]

@@ -1,0 +1,67 @@
+{
+  "aoi_area_m2": 4149625.3,
+  "aoi_source": "bbox:[-7.6176452637, 33.487581245, -7.5956726074, 33.505904621]",
+  "api_used": "src.core_api.run_temporal_project_api",
+  "branch": "codex/inference-persistent-runner-benchmarks",
+  "change_threshold": 0.35,
+  "checkpoint_path": "/Users/tahaelouali/Developer/Building_change_app/vendor/BANDON-mps/checkpoints/mtgcdnet_iter_40000.pth",
+  "checkpoint_sha256": "e1f5c92cb0951fecea1ba74bc5fa86db013d6f8085c2741fe7d60f84e9505813",
+  "cli_per_tile_available": true,
+  "command": "validate_temporal_project_persistent_runner.py --output-dir artifacts/benchmarks/bandon_persistent_runner_full_temporal_project_validation --runtime-dir artifacts/benchmarks/bandon_persistent_runner_full_temporal_project_validation/runtime/tiled_20260627T084048Z --source-project-json backend/runtime_cache/temporal_projects/temporal-test-mqox4hjy-yje2r5/project.json --aoi-bbox -7.6176452637 33.487581245 -7.5956726074 33.505904621 --validation-project-id temporal-persistent-runner-tiled-validation-20260627T084048Z --validation-project-name Persistent runner tiled temporal validation --milestones WB_2018_R03 WB_2021_R04 WB_2026_R05 --branch codex/inference-persistent-runner-benchmarks --commit 84ee5fdcbacb7b6eca441002d789c4ce8d7fea3f --git-status clean before validation; backend/benchmarks/validate_temporal_project_persistent_runner.py added as validation utility --preflight-tests rtk env APP_BANDON_INFERENCE_MODE=persistent_runner APP_INFERENCE_TIMING_ENABLED=true APP_INFERENCE_VERBOSE_TILE_LOGS=false backend/.venv/bin/python -m pytest backend/tests -q => 560 passed, 5 skipped, 4 warnings",
+  "commit": "84ee5fdcbacb7b6eca441002d789c4ce8d7fea3f",
+  "device": "auto",
+  "ended_at": "2026-06-27T08:48:16.085226Z",
+  "error_message": null,
+  "expected_pairs": [
+    {
+      "estimated_area_m2": 4149625.3,
+      "estimated_total_wayback_tiles": 544,
+      "from_release": "WB_2018_R03",
+      "index": 1,
+      "tile_count_per_scene": 272,
+      "to_release": "WB_2021_R04"
+    },
+    {
+      "estimated_area_m2": 4149625.3,
+      "estimated_total_wayback_tiles": 544,
+      "from_release": "WB_2021_R04",
+      "index": 2,
+      "tile_count_per_scene": 272,
+      "to_release": "WB_2026_R05"
+    }
+  ],
+  "full_pair_artifacts_present": true,
+  "git_status": "clean before validation; backend/benchmarks/validate_temporal_project_persistent_runner.py added as validation utility",
+  "job_id": "temporal-validation-temporal-persistent-runner-tiled-validation-20260627T084048Z",
+  "medium_artifacts_present": true,
+  "milestones": [
+    "WB_2018_R03",
+    "WB_2021_R04",
+    "WB_2026_R05"
+  ],
+  "number_of_milestones": 3,
+  "number_of_pairs": 2,
+  "persistent_runner_default": true,
+  "post_backend_tests": "rtk env APP_BANDON_INFERENCE_MODE=persistent_runner APP_INFERENCE_TIMING_ENABLED=true APP_INFERENCE_VERBOSE_TILE_LOGS=false backend/.venv/bin/python -m pytest backend/tests -q => 560 passed, 5 skipped, 4 warnings",
+  "post_completion_request_cleanup_enabled": false,
+  "post_completion_request_cleanup_mode": "off",
+  "post_frontend_build": "rtk npm run build --prefix frontend => passed (large chunk warning)",
+  "post_frontend_tests": "rtk npm test --prefix frontend => 112 passed",
+  "post_py_compile": "rtk backend/.venv/bin/python -m py_compile backend/src/domain/*.py backend/src/config.py backend/benchmarks/validate_temporal_project_persistent_runner.py => passed",
+  "preflight_tests": "rtk env APP_BANDON_INFERENCE_MODE=persistent_runner APP_INFERENCE_TIMING_ENABLED=true APP_INFERENCE_VERBOSE_TILE_LOGS=false backend/.venv/bin/python -m pytest backend/tests -q => 560 passed, 5 skipped, 4 warnings",
+  "project_id": "temporal-persistent-runner-tiled-validation-20260627T084048Z",
+  "project_status": "success",
+  "request_cache_dir": "/Users/tahaelouali/Developer/Building_change_app/artifacts/benchmarks/bandon_persistent_runner_full_temporal_project_validation/runtime/tiled_20260627T084048Z/requests",
+  "required_env": {
+    "APP_BANDON_INFERENCE_MODE": "persistent_runner",
+    "APP_INFERENCE_TIMING_ENABLED": "true",
+    "APP_INFERENCE_VERBOSE_TILE_LOGS": "false"
+  },
+  "runtime_cache_dir": "/Users/tahaelouali/Developer/Building_change_app/artifacts/benchmarks/bandon_persistent_runner_full_temporal_project_validation/runtime/tiled_20260627T084048Z",
+  "started_at": "2026-06-27T08:41:03.916319Z",
+  "tile_overlap": 128,
+  "tile_size": 1024,
+  "tiles_per_second_project": 0.1389842845489173,
+  "total_tiles_all_pairs": 60,
+  "total_wall_time_seconds": 431.703
+}

@@ -1,0 +1,68 @@
+{
+  "exports": {
+    "geojson": {
+      "exists": true,
+      "feature_count": 3372,
+      "path": "/Users/tahaelouali/Developer/Building_change_app/artifacts/benchmarks/bandon_persistent_runner_full_temporal_project_validation/runtime/tiled_20260627T084048Z/temporal_projects/temporal-persistent-runner-tiled-validation-20260627T084048Z/exports/results.geojson",
+      "readable": true,
+      "sha256": "ca977dfd4085e26e705b0d8d881f86a41483b46c8a8094c7d1f6d1b02a4fa25c",
+      "size_bytes": 19168327,
+      "type": "FeatureCollection"
+    },
+    "qgis_bundle": {
+      "entry_count": 4,
+      "exists": true,
+      "has_manifest": true,
+      "has_qgz": true,
+      "path": "/Users/tahaelouali/Developer/Building_change_app/artifacts/benchmarks/bandon_persistent_runner_full_temporal_project_validation/runtime/tiled_20260627T084048Z/temporal_projects/temporal-persistent-runner-tiled-validation-20260627T084048Z/Persistent_runner_tiled_temporal_validation_2018-03_2026-05_export_QGIS.zip",
+      "readable": true,
+      "sha256": "0accf06dce9b9dc2b68b322c5ebf3f3adc8a3ac23f6c824af9df811c393f603e",
+      "size_bytes": 42139799
+    },
+    "tsv": {
+      "exists": true,
+      "header": [
+        "project_id",
+        "project_name",
+        "date",
+        "layer_type",
+        "area_m2",
+        "centroid_lon",
+        "centroid_lat"
+      ],
+      "path": "/Users/tahaelouali/Developer/Building_change_app/artifacts/benchmarks/bandon_persistent_runner_full_temporal_project_validation/runtime/tiled_20260627T084048Z/temporal_projects/temporal-persistent-runner-tiled-validation-20260627T084048Z/exports/results_powerbi.tsv",
+      "readable": true,
+      "row_count": 9,
+      "sha256": "81b9f0d4435c5bbbe10413dcbb396dfe0a33653fa96bec5a483166e1873053cc",
+      "size_bytes": 1531
+    },
+    "xlsx": {
+      "exists": true,
+      "path": "/Users/tahaelouali/Developer/Building_change_app/artifacts/benchmarks/bandon_persistent_runner_full_temporal_project_validation/runtime/tiled_20260627T084048Z/temporal_projects/temporal-persistent-runner-tiled-validation-20260627T084048Z/exports/results.xlsx",
+      "readable": true,
+      "sha256": "0107b43ca30d7e7fc77ffbe0ac653b64dd4d0a97260b6ec70996acd6f3a74a54",
+      "sheet_dimensions": {
+        "D\u00e9tails blocs": {
+          "max_column": 6,
+          "max_row": 126
+        },
+        "Jalons": {
+          "max_column": 16,
+          "max_row": 4
+        },
+        "Synth\u00e8se": {
+          "max_column": 2,
+          "max_row": 6
+        }
+      },
+      "sheet_names": [
+        "Synth\u00e8se",
+        "Jalons",
+        "D\u00e9tails blocs"
+      ],
+      "size_bytes": 14577
+    }
+  },
+  "passed": true,
+  "project_id": "temporal-persistent-runner-tiled-validation-20260627T084048Z"
+}
