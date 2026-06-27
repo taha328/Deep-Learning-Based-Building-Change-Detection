@@ -12,6 +12,11 @@ The backend prefers z18 Wayback imagery for inference and falls back to the clos
 - `APP_WAYBACK_TILE_READ_TIMEOUT=60`
 - `APP_WAYBACK_TILE_MAX_RETRIES=4`
 - `APP_WAYBACK_TILE_BACKOFF_BASE=1.0`
+- `APP_WAYBACK_METADATA_WORKERS_ADAPTIVE_ENABLED=true`
+- `APP_WAYBACK_METADATA_WORKERS_INITIAL=10`
+- `APP_WAYBACK_METADATA_WORKERS_MIN=4`
+- `APP_WAYBACK_METADATA_WORKERS_STEP=2`
+- `APP_WAYBACK_METADATA_WORKERS=10`
 - `APP_WAYBACK_TILE_PROGRESS_EVERY_TILES=50`
 - `APP_WAYBACK_TILE_PROGRESS_EVERY_SECONDS=5`
 - `APP_WAYBACK_TILE_CACHE_BACKEND=sqlite`
@@ -49,6 +54,25 @@ Celery job progress includes tile download details:
 - tile rate and ETA
 
 The backend exposes a minimal Prometheus-compatible `/metrics` endpoint with Wayback tile counters and download duration summaries.
+
+## Metadata preflight concurrency
+
+Large temporal AOIs can require tens of thousands of Wayback tilemap metadata checks before imagery download starts. By default, metadata preflight starts at 10 workers and watches each observation window for retry-like connection instability. When repeated connection resets, broken pipes, invalid-argument socket errors, timeouts, or exhausted retry failures appear, the scheduler downshifts for the remaining unchecked tiles:
+
+```text
+10 -> 8 -> 6 -> 4
+```
+
+Successful checks are not repeated after a downshift, and the preflight cache key does not include worker count. The cache remains keyed by release, tile service, zoom, AOI, and tile range.
+
+Rollback to the previous fixed-worker behavior:
+
+```env
+APP_WAYBACK_METADATA_WORKERS_ADAPTIVE_ENABLED=false
+APP_WAYBACK_METADATA_WORKERS=10
+```
+
+For very unstable networks, keep adaptive mode off and set a lower fixed value such as `APP_WAYBACK_METADATA_WORKERS=4`. The older `APP_WAYBACK_TILEMAP_PREFLIGHT_WORKERS` override is still honored in fixed mode for targeted preflight-only rollback.
 
 ## MapProxy integration path
 

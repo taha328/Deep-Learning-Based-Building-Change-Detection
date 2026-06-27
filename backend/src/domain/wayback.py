@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date
@@ -19,6 +21,12 @@ from shapely.ops import unary_union
 from src.config import Settings
 from src.domain.tiling import tile_range_for_bbox
 from src.utils.geometry import parse_aoi_geometry, reproject_geometry
+
+
+LOGGER = logging.getLogger(__name__)
+WAYBACK_TILE_PREFLIGHT_ADAPTIVE_WINDOW_SIZE = 1000
+WAYBACK_TILE_PREFLIGHT_DOWNSHIFT_MIN_ERROR_COUNT = 2
+WAYBACK_TILE_PREFLIGHT_DOWNSHIFT_ERROR_RATE = 0.02
 
 
 @dataclass(frozen=True)
@@ -60,6 +68,17 @@ class TileAvailabilitySummary:
             "preflight_complete": self.preflight_complete,
             "availability_fraction": self.availability_fraction,
         }
+
+
+@dataclass(frozen=True)
+class _TileCheckWindowMetrics:
+    attempted: int
+    succeeded: int
+    failed: int
+    connection_errors: int
+    timeout_errors: int
+    retry_exhausted_errors: int
+    elapsed_ms: float
 
 
 def build_session(settings: Settings) -> requests.Session:
@@ -447,8 +466,14 @@ def preflight_wayback_tile_availability(
     *,
     zoom: int,
     max_workers: int,
+    adaptive_enabled: bool = False,
+    adaptive_min_workers: int | None = None,
+    adaptive_step: int = 2,
+    adaptive_window_size: int = WAYBACK_TILE_PREFLIGHT_ADAPTIVE_WINDOW_SIZE,
 ) -> TileAvailabilitySummary:
     if release.release_num is None:
+        session.wayback_preflight_final_workers = 0  # type: ignore[attr-defined]
+        session.wayback_preflight_downshift_count = 0  # type: ignore[attr-defined]
         return TileAvailabilitySummary(
             candidate_count=0,
             available_count=0,
@@ -475,17 +500,158 @@ def preflight_wayback_tile_availability(
         payload = response.json()
         return tile, bool(payload.get("data") and payload["data"][0] == 1)
 
+    def _is_retry_exhausted_error(exc: BaseException) -> bool:
+        message = repr(exc).lower()
+        return "retry(total=0" in message or "max retries exceeded" in message or "maxretryerror" in message
+
+    def _is_timeout_error(exc: BaseException) -> bool:
+        message = repr(exc).lower()
+        return isinstance(exc, requests.Timeout) or "connecttimeout" in message or "timeout" in message
+
+    def _is_connection_error(exc: BaseException) -> bool:
+        message = repr(exc).lower()
+        if isinstance(exc, (requests.ConnectionError, requests.Timeout, OSError)):
+            return True
+        return any(
+            marker in message
+            for marker in (
+                "connection reset",
+                "broken pipe",
+                "invalid argument",
+                "retry(total=0",
+                "max retries exceeded",
+                "maxretryerror",
+            )
+        )
+
+    def _downshift_reason(metrics: _TileCheckWindowMetrics) -> str | None:
+        if metrics.attempted <= 0:
+            return None
+        if metrics.retry_exhausted_errors > 0:
+            return "retry_exhausted"
+        if metrics.timeout_errors >= WAYBACK_TILE_PREFLIGHT_DOWNSHIFT_MIN_ERROR_COUNT:
+            return "timeout_instability"
+        if metrics.connection_errors >= WAYBACK_TILE_PREFLIGHT_DOWNSHIFT_MIN_ERROR_COUNT:
+            return "connection_instability"
+        if metrics.attempted >= 100:
+            timeout_rate = metrics.timeout_errors / metrics.attempted
+            connection_rate = metrics.connection_errors / metrics.attempted
+            if timeout_rate >= WAYBACK_TILE_PREFLIGHT_DOWNSHIFT_ERROR_RATE:
+                return "timeout_instability"
+            if connection_rate >= WAYBACK_TILE_PREFLIGHT_DOWNSHIFT_ERROR_RATE:
+                return "connection_instability"
+        return None
+
+    def _run_tile_window(window_tiles: list[tuple[int, int]], worker_count: int) -> _TileCheckWindowMetrics:
+        nonlocal failed_check_count
+        if not window_tiles:
+            return _TileCheckWindowMetrics(
+                attempted=0,
+                succeeded=0,
+                failed=0,
+                connection_errors=0,
+                timeout_errors=0,
+                retry_exhausted_errors=0,
+                elapsed_ms=0.0,
+            )
+        succeeded = 0
+        failed = 0
+        connection_errors = 0
+        timeout_errors = 0
+        retry_exhausted_errors = 0
+        window_start = time.perf_counter_ns()
+        effective_workers = max(1, min(worker_count, len(window_tiles)))
+        with ThreadPoolExecutor(max_workers=effective_workers) as executor:
+            future_map = {executor.submit(_check_tile, tile): tile for tile in window_tiles}
+            for future in as_completed(future_map):
+                try:
+                    tile, is_available = future.result()
+                except (requests.RequestException, OSError) as exc:
+                    failed += 1
+                    if _is_connection_error(exc):
+                        connection_errors += 1
+                    if _is_timeout_error(exc):
+                        timeout_errors += 1
+                    if _is_retry_exhausted_error(exc):
+                        retry_exhausted_errors += 1
+                    continue
+                succeeded += 1
+                if is_available:
+                    available_tiles.add(tile)
+        failed_check_count += failed
+        return _TileCheckWindowMetrics(
+            attempted=len(window_tiles),
+            succeeded=succeeded,
+            failed=failed,
+            connection_errors=connection_errors,
+            timeout_errors=timeout_errors,
+            retry_exhausted_errors=retry_exhausted_errors,
+            elapsed_ms=(time.perf_counter_ns() - window_start) / 1_000_000,
+        )
+
     worker_count = max(1, min(max_workers, len(candidate_tiles) or 1))
-    with ThreadPoolExecutor(max_workers=worker_count) as executor:
-        future_map = {executor.submit(_check_tile, tile): tile for tile in candidate_tiles}
-        for future in as_completed(future_map):
-            try:
-                tile, is_available = future.result()
-            except requests.RequestException:
-                failed_check_count += 1
+    min_worker_count = max(1, adaptive_min_workers if adaptive_min_workers is not None else worker_count)
+    min_worker_count = min(min_worker_count, worker_count)
+    adaptive_step = max(1, adaptive_step)
+    adaptive_window_size = max(1, adaptive_window_size)
+    downshift_count = 0
+
+    if not adaptive_enabled:
+        _run_tile_window(candidate_tiles, worker_count)
+    else:
+        for start_index in range(0, len(candidate_tiles), adaptive_window_size):
+            window_tiles = candidate_tiles[start_index:start_index + adaptive_window_size]
+            metrics = _run_tile_window(window_tiles, worker_count)
+            LOGGER.info(
+                "PREFLIGHT_ADAPTIVE_WINDOW release=%s zoom=%s workers=%s attempted=%s succeeded=%s failed=%s "
+                "connectionErrors=%s timeoutErrors=%s elapsedMs=%.3f",
+                release.identifier,
+                zoom,
+                worker_count,
+                metrics.attempted,
+                metrics.succeeded,
+                metrics.failed,
+                metrics.connection_errors,
+                metrics.timeout_errors,
+                metrics.elapsed_ms,
+            )
+            reason = _downshift_reason(metrics)
+            if reason is None:
+                LOGGER.info(
+                    "PREFLIGHT_WORKERS_STABLE release=%s zoom=%s workers=%s reason=window_within_threshold",
+                    release.identifier,
+                    zoom,
+                    worker_count,
+                )
                 continue
-            if is_available:
-                available_tiles.add(tile)
+            if worker_count <= min_worker_count:
+                LOGGER.warning(
+                    "PREFLIGHT_WORKERS_MIN_REACHED release=%s zoom=%s workers=%s reason=still_unstable",
+                    release.identifier,
+                    zoom,
+                    worker_count,
+                )
+                continue
+            next_worker_count = max(min_worker_count, worker_count - adaptive_step)
+            LOGGER.warning(
+                "PREFLIGHT_WORKERS_DOWNSHIFT release=%s zoom=%s fromWorkers=%s toWorkers=%s reason=%s",
+                release.identifier,
+                zoom,
+                worker_count,
+                next_worker_count,
+                reason,
+            )
+            worker_count = next_worker_count
+            downshift_count += 1
+            if worker_count <= min_worker_count:
+                LOGGER.warning(
+                    "PREFLIGHT_WORKERS_MIN_REACHED release=%s zoom=%s workers=%s reason=still_unstable",
+                    release.identifier,
+                    zoom,
+                    worker_count,
+                )
+    session.wayback_preflight_final_workers = worker_count  # type: ignore[attr-defined]
+    session.wayback_preflight_downshift_count = downshift_count  # type: ignore[attr-defined]
 
     candidate_count = len(candidate_tiles)
     available_count = len(available_tiles)

@@ -157,7 +157,8 @@ def test_release_resolution_uses_tile_preflight_cache_on_second_lookup(tmp_path,
     monkeypatch.setattr("src.services.processing.build_session", lambda settings: object())
     monkeypatch.setattr("src.services.processing.summarize_wayback_metadata", lambda *args, **kwargs: metadata_summary)
 
-    def fake_preflight(session, release_value, bbox, *, zoom, max_workers):
+    def fake_preflight(session, release_value, bbox, *, zoom, max_workers, **kwargs):
+        del kwargs
         del session, release_value, bbox, max_workers
         calls.append(zoom)
         return _tilemap_summary(available_count=1)

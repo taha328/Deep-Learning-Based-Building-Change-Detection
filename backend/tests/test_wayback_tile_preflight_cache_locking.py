@@ -35,6 +35,10 @@ def _settings(
     cache_enabled: bool = True,
     metadata_workers: int = 7,
     preflight_workers: int | None = None,
+    adaptive_enabled: bool = True,
+    adaptive_initial: int = 10,
+    adaptive_min: int = 4,
+    adaptive_step: int = 2,
 ) -> Settings:
     return Settings(
         runtime_cache_dir=tmp_path,
@@ -42,6 +46,10 @@ def _settings(
         min_zoom=19,
         metadata_grid_size=1,
         wayback_metadata_workers=metadata_workers,
+        wayback_metadata_workers_adaptive_enabled=adaptive_enabled,
+        wayback_metadata_workers_initial=adaptive_initial,
+        wayback_metadata_workers_min=adaptive_min,
+        wayback_metadata_workers_step=adaptive_step,
         wayback_tilemap_preflight_workers=preflight_workers,
         wayback_tile_preflight_cache_enabled=cache_enabled,
         wayback_tilemap_preflight_enabled=True,
@@ -115,7 +123,8 @@ def test_live_preflight_runs_outside_cache_lock(tmp_path, monkeypatch) -> None:
         finally:
             lock_held = False
 
-    def fake_preflight(session, release_value, bbox, *, zoom, max_workers):
+    def fake_preflight(session, release_value, bbox, *, zoom, max_workers, **kwargs):
+        del kwargs
         del session, release_value, bbox, zoom, max_workers
         assert lock_held is False
         return _tilemap()
@@ -371,13 +380,70 @@ def test_startup_cleanup_warns_and_continues_on_delete_race(tmp_path, monkeypatc
     assert "WAYBACK_PREFLIGHT_LOCK_CLEANUP_WARNING" in caplog.text
 
 
-def test_preflight_workers_default_to_metadata_workers(tmp_path, monkeypatch) -> None:
-    settings = _settings(tmp_path, cache_enabled=False, metadata_workers=7, preflight_workers=None)
+def test_adaptive_preflight_workers_start_at_initial_workers(tmp_path, monkeypatch) -> None:
+    settings = _settings(
+        tmp_path,
+        cache_enabled=False,
+        metadata_workers=7,
+        adaptive_initial=10,
+        adaptive_min=4,
+        adaptive_step=2,
+    )
     captured_workers: list[int] = []
+    captured_adaptive: list[dict[str, object]] = []
 
-    def fake_preflight(session, release_value, bbox, *, zoom, max_workers):
+    def fake_preflight(
+        session,
+        release_value,
+        bbox,
+        *,
+        zoom,
+        max_workers,
+        adaptive_enabled,
+        adaptive_min_workers,
+        adaptive_step,
+    ):
         del session, release_value, bbox, zoom
         captured_workers.append(max_workers)
+        captured_adaptive.append(
+            {
+                "adaptive_enabled": adaptive_enabled,
+                "adaptive_min_workers": adaptive_min_workers,
+                "adaptive_step": adaptive_step,
+            }
+        )
+        return _tilemap()
+
+    monkeypatch.setattr("src.services.processing.build_session", lambda settings: _DummySession())
+    monkeypatch.setattr("src.services.processing.preflight_wayback_tile_availability", fake_preflight)
+
+    _preflight_release_tile_availability_for_request(settings, release=_release(), aoi_bbox=_bbox(), zoom=19)
+
+    assert captured_workers == [10]
+    assert captured_adaptive == [
+        {
+            "adaptive_enabled": True,
+            "adaptive_min_workers": 4,
+            "adaptive_step": 2,
+        }
+    ]
+
+
+def test_fixed_preflight_workers_default_to_metadata_workers_when_adaptive_disabled(tmp_path, monkeypatch) -> None:
+    settings = _settings(
+        tmp_path,
+        cache_enabled=False,
+        metadata_workers=7,
+        preflight_workers=None,
+        adaptive_enabled=False,
+    )
+    captured_workers: list[int] = []
+    captured_adaptive: list[bool] = []
+
+    def fake_preflight(session, release_value, bbox, *, zoom, max_workers, adaptive_enabled, **kwargs):
+        del session, release_value, bbox, zoom, kwargs
+        captured_workers.append(max_workers)
+        captured_adaptive.append(adaptive_enabled)
         return _tilemap()
 
     monkeypatch.setattr("src.services.processing.build_session", lambda settings: _DummySession())
@@ -386,13 +452,21 @@ def test_preflight_workers_default_to_metadata_workers(tmp_path, monkeypatch) ->
     _preflight_release_tile_availability_for_request(settings, release=_release(), aoi_bbox=_bbox(), zoom=19)
 
     assert captured_workers == [7]
+    assert captured_adaptive == [False]
 
 
 def test_explicit_preflight_workers_override_metadata_workers(tmp_path, monkeypatch) -> None:
-    settings = _settings(tmp_path, cache_enabled=False, metadata_workers=7, preflight_workers=3)
+    settings = _settings(
+        tmp_path,
+        cache_enabled=False,
+        metadata_workers=7,
+        preflight_workers=3,
+        adaptive_enabled=False,
+    )
     captured_workers: list[int] = []
 
-    def fake_preflight(session, release_value, bbox, *, zoom, max_workers):
+    def fake_preflight(session, release_value, bbox, *, zoom, max_workers, **kwargs):
+        del kwargs
         del session, release_value, bbox, zoom
         captured_workers.append(max_workers)
         return _tilemap()
@@ -403,3 +477,39 @@ def test_explicit_preflight_workers_override_metadata_workers(tmp_path, monkeypa
     _preflight_release_tile_availability_for_request(settings, release=_release(), aoi_bbox=_bbox(), zoom=19)
 
     assert captured_workers == [3]
+
+
+def test_adaptive_preflight_logs_final_worker_count(tmp_path, monkeypatch, caplog) -> None:
+    settings = _settings(tmp_path, cache_enabled=False, adaptive_initial=10, adaptive_min=4, adaptive_step=2)
+
+    def fake_preflight(session, release_value, bbox, *, zoom, max_workers, **kwargs):
+        del release_value, bbox, zoom, max_workers, kwargs
+        session.wayback_preflight_final_workers = 8
+        session.wayback_preflight_downshift_count = 1
+        return _tilemap()
+
+    monkeypatch.setattr("src.services.processing.build_session", lambda settings: _DummySession())
+    monkeypatch.setattr("src.services.processing.preflight_wayback_tile_availability", fake_preflight)
+
+    caplog.set_level("INFO")
+    _preflight_release_tile_availability_for_request(settings, release=_release(), aoi_bbox=_bbox(), zoom=19)
+
+    assert "PREFLIGHT_ADAPTIVE_POLICY" in caplog.text
+    assert "source=adaptive_initial" in caplog.text
+    assert "finalWorkers=8 downshiftCount=1" in caplog.text
+
+
+def test_adaptive_worker_config_clamps_invalid_values(tmp_path, caplog) -> None:
+    caplog.set_level("WARNING")
+
+    settings = Settings(
+        runtime_cache_dir=tmp_path,
+        wayback_metadata_workers_initial=2,
+        wayback_metadata_workers_min=4,
+        wayback_metadata_workers_step=0,
+    )
+
+    assert settings.wayback_metadata_workers_initial == 4
+    assert settings.wayback_metadata_workers_min == 4
+    assert settings.wayback_metadata_workers_step == 1
+    assert "WAYBACK_METADATA_WORKERS_ADAPTIVE_CONFIG_CLAMPED" in caplog.text

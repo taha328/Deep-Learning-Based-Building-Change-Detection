@@ -67,6 +67,10 @@ class Settings(BaseModel):
     download_retry_backoff_max_sec: float = 8.0
     metadata_grid_size: int = 5
     wayback_metadata_workers: int = 10
+    wayback_metadata_workers_adaptive_enabled: bool = True
+    wayback_metadata_workers_initial: int = 10
+    wayback_metadata_workers_min: int = 4
+    wayback_metadata_workers_step: int = 2
     wayback_releases_cache_enabled: bool = True
     wayback_releases_cache_ttl_seconds: int = 86400
     wayback_releases_stale_if_error_enabled: bool = True
@@ -305,6 +309,25 @@ class Settings(BaseModel):
             raise ValueError("wayback_heavy_batch_tile_threshold must be greater than or equal to 1.")
         if self.wayback_tilemap_preflight_workers is not None and self.wayback_tilemap_preflight_workers < 1:
             raise ValueError("wayback_tilemap_preflight_workers must be greater than or equal to 1.")
+        adaptive_initial = max(1, self.wayback_metadata_workers_initial)
+        adaptive_min = max(1, self.wayback_metadata_workers_min)
+        adaptive_step = max(1, self.wayback_metadata_workers_step)
+        if adaptive_initial < adaptive_min:
+            adaptive_initial = adaptive_min
+        if (
+            adaptive_initial != self.wayback_metadata_workers_initial
+            or adaptive_min != self.wayback_metadata_workers_min
+            or adaptive_step != self.wayback_metadata_workers_step
+        ):
+            LOGGER.warning(
+                "WAYBACK_METADATA_WORKERS_ADAPTIVE_CONFIG_CLAMPED initialWorkers=%s minWorkers=%s step=%s",
+                adaptive_initial,
+                adaptive_min,
+                adaptive_step,
+            )
+            self.wayback_metadata_workers_initial = adaptive_initial
+            self.wayback_metadata_workers_min = adaptive_min
+            self.wayback_metadata_workers_step = adaptive_step
         if self.wayback_tile_preflight_stale_lock_seconds <= 0:
             raise ValueError("wayback_tile_preflight_stale_lock_seconds must be greater than 0.")
         if self.inference_tile_size < 128:
@@ -464,6 +487,17 @@ def _int_env(name: str, default: int) -> int:
     return int(value) if value else default
 
 
+def _safe_int_env(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if not value:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        LOGGER.warning("Invalid integer for %s=%r; using default %s", name, value, default)
+        return default
+
+
 def _int_env_any(names: tuple[str, ...], default: int) -> int:
     for name in names:
         value = os.getenv(name)
@@ -582,6 +616,22 @@ def get_settings() -> Settings:
         ),
         metadata_grid_size=_int_env("APP_METADATA_GRID_SIZE", base.metadata_grid_size),
         wayback_metadata_workers=_int_env("APP_WAYBACK_METADATA_WORKERS", base.wayback_metadata_workers),
+        wayback_metadata_workers_adaptive_enabled=_bool_env(
+            "APP_WAYBACK_METADATA_WORKERS_ADAPTIVE_ENABLED",
+            base.wayback_metadata_workers_adaptive_enabled,
+        ),
+        wayback_metadata_workers_initial=_safe_int_env(
+            "APP_WAYBACK_METADATA_WORKERS_INITIAL",
+            base.wayback_metadata_workers_initial,
+        ),
+        wayback_metadata_workers_min=_safe_int_env(
+            "APP_WAYBACK_METADATA_WORKERS_MIN",
+            base.wayback_metadata_workers_min,
+        ),
+        wayback_metadata_workers_step=_safe_int_env(
+            "APP_WAYBACK_METADATA_WORKERS_STEP",
+            base.wayback_metadata_workers_step,
+        ),
         wayback_releases_cache_enabled=_bool_env_any(
             ("WAYBACK_RELEASES_CACHE_ENABLED", "APP_WAYBACK_RELEASES_CACHE_ENABLED"),
             base.wayback_releases_cache_enabled,

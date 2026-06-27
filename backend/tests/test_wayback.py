@@ -111,6 +111,107 @@ def test_preflight_wayback_tile_availability_marks_incomplete_when_requests_fail
     assert result.missing_count == 0
 
 
+def test_adaptive_preflight_stable_windows_remain_at_initial_workers(monkeypatch, caplog) -> None:
+    release = WaybackRelease(
+        identifier="WB_2026_R03",
+        release_date=pd.Timestamp("2026-03-25").date(),
+        label="WB_2026_R03",
+        release_num=22869,
+        tile_matrix_sets=("default028mm",),
+        resource_url_template="https://wayback.example.com/arcgis/rest/services/World_Imagery/MapServer/tile/22869/{TileMatrix}/{TileRow}/{TileCol}",
+    )
+    session = requests.Session()
+    session.headers.update({"User-Agent": "test"})
+    session.request_timeout_sec = 10  # type: ignore[attr-defined]
+
+    monkeypatch.setattr("src.domain.wayback.tile_range_for_bbox", lambda bbox, zoom: (0, 19, 0, 0))
+
+    def fake_get(url: str, *, headers: dict[str, str], timeout: int):
+        del url, headers, timeout
+        return _JsonResponse({"data": [1]})
+
+    monkeypatch.setattr(session, "get", fake_get)
+
+    caplog.set_level("INFO")
+    result = preflight_wayback_tile_availability(
+        session,
+        release,
+        {"west": 0, "south": 0, "east": 1, "north": 1},
+        zoom=19,
+        max_workers=10,
+        adaptive_enabled=True,
+        adaptive_min_workers=4,
+        adaptive_step=2,
+        adaptive_window_size=10,
+    )
+
+    assert result.available_count == 20
+    assert result.failed_check_count == 0
+    assert session.wayback_preflight_final_workers == 10  # type: ignore[attr-defined]
+    assert session.wayback_preflight_downshift_count == 0  # type: ignore[attr-defined]
+    assert "PREFLIGHT_WORKERS_STABLE release=WB_2026_R03 zoom=19 workers=10" in caplog.text
+    assert "PREFLIGHT_WORKERS_DOWNSHIFT" not in caplog.text
+
+
+def test_adaptive_preflight_repeated_instability_downshifts_to_min_without_repeating_tiles(
+    monkeypatch,
+    caplog,
+) -> None:
+    release = WaybackRelease(
+        identifier="WB_2026_R03",
+        release_date=pd.Timestamp("2026-03-25").date(),
+        label="WB_2026_R03",
+        release_num=22869,
+        tile_matrix_sets=("default028mm",),
+        resource_url_template="https://wayback.example.com/arcgis/rest/services/World_Imagery/MapServer/tile/22869/{TileMatrix}/{TileRow}/{TileCol}",
+    )
+    session = requests.Session()
+    session.headers.update({"User-Agent": "test"})
+    session.request_timeout_sec = 10  # type: ignore[attr-defined]
+    attempted_tiles: list[int] = []
+    failure_tiles = {0, 1, 10, 11, 20, 21, 30, 31}
+
+    monkeypatch.setattr("src.domain.wayback.tile_range_for_bbox", lambda bbox, zoom: (0, 39, 0, 0))
+
+    def fake_get(url: str, *, headers: dict[str, str], timeout: int):
+        del headers, timeout
+        tile_x = int(url.rsplit("/", 1)[-1])
+        attempted_tiles.append(tile_x)
+        if tile_x in failure_tiles:
+            if tile_x % 10 == 0:
+                raise OSError(22, "Invalid argument")
+            raise requests.ConnectionError("Connection reset by peer")
+        return _JsonResponse({"data": [1]})
+
+    monkeypatch.setattr(session, "get", fake_get)
+
+    caplog.set_level("INFO")
+    result = preflight_wayback_tile_availability(
+        session,
+        release,
+        {"west": 0, "south": 0, "east": 1, "north": 1},
+        zoom=19,
+        max_workers=10,
+        adaptive_enabled=True,
+        adaptive_min_workers=4,
+        adaptive_step=2,
+        adaptive_window_size=10,
+    )
+
+    assert sorted(attempted_tiles) == list(range(40))
+    assert len(attempted_tiles) == len(set(attempted_tiles))
+    assert result.available_count == 32
+    assert result.failed_check_count == 8
+    assert result.preflight_complete is False
+    assert session.wayback_preflight_final_workers == 4  # type: ignore[attr-defined]
+    assert session.wayback_preflight_downshift_count == 3  # type: ignore[attr-defined]
+    assert "fromWorkers=10 toWorkers=8 reason=connection_instability" in caplog.text
+    assert "fromWorkers=8 toWorkers=6 reason=connection_instability" in caplog.text
+    assert "fromWorkers=6 toWorkers=4 reason=connection_instability" in caplog.text
+    assert "toWorkers=2" not in caplog.text
+    assert "PREFLIGHT_WORKERS_MIN_REACHED release=WB_2026_R03 zoom=19 workers=4" in caplog.text
+
+
 def test_summarize_wayback_metadata_reports_polygon_capture_regions(monkeypatch) -> None:
     monkeypatch.setattr(
         "src.domain.wayback._metadata_layer_lookup",

@@ -796,10 +796,39 @@ def _summarize_release_metadata_for_request(
     return summary
 
 
-def _effective_wayback_tilemap_preflight_workers(settings: Settings) -> tuple[int, str]:
+@dataclass(frozen=True)
+class WaybackTilemapPreflightWorkerPolicy:
+    adaptive_enabled: bool
+    initial_workers: int
+    min_workers: int
+    step: int
+    source: str
+
+
+def _effective_wayback_tilemap_preflight_worker_policy(settings: Settings) -> WaybackTilemapPreflightWorkerPolicy:
+    if settings.wayback_metadata_workers_adaptive_enabled:
+        return WaybackTilemapPreflightWorkerPolicy(
+            adaptive_enabled=True,
+            initial_workers=settings.wayback_metadata_workers_initial,
+            min_workers=settings.wayback_metadata_workers_min,
+            step=settings.wayback_metadata_workers_step,
+            source="adaptive_initial",
+        )
     if settings.wayback_tilemap_preflight_workers is not None:
-        return settings.wayback_tilemap_preflight_workers, "explicit"
-    return settings.wayback_metadata_workers, "wayback_metadata_workers_default"
+        return WaybackTilemapPreflightWorkerPolicy(
+            adaptive_enabled=False,
+            initial_workers=settings.wayback_tilemap_preflight_workers,
+            min_workers=settings.wayback_tilemap_preflight_workers,
+            step=1,
+            source="explicit",
+        )
+    return WaybackTilemapPreflightWorkerPolicy(
+        adaptive_enabled=False,
+        initial_workers=settings.wayback_metadata_workers,
+        min_workers=settings.wayback_metadata_workers,
+        step=1,
+        source="wayback_metadata_workers_default",
+    )
 
 
 def _preflight_release_tile_availability_for_request(
@@ -827,7 +856,7 @@ def _preflight_release_tile_availability_for_request(
     cache_hit = False
     tilemap: TileAvailabilitySummary | None = None
     lock_path = wayback_tile_preflight_cache_lock_path(cache_path)
-    worker_count, worker_source = _effective_wayback_tilemap_preflight_workers(settings)
+    worker_policy = _effective_wayback_tilemap_preflight_worker_policy(settings)
 
     def _candidate_tile_count() -> int:
         x_min, x_max, y_min, y_max = tile_range_for_bbox(aoi_bbox, zoom)
@@ -906,12 +935,21 @@ def _preflight_release_tile_availability_for_request(
 
     def _live_preflight() -> TileAvailabilitySummary:
         candidate_count = _candidate_tile_count()
+        if worker_policy.adaptive_enabled:
+            LOGGER.info(
+                "PREFLIGHT_ADAPTIVE_POLICY release=%s zoom=%s enabled=true initialWorkers=%s minWorkers=%s step=%s",
+                release.identifier,
+                zoom,
+                worker_policy.initial_workers,
+                worker_policy.min_workers,
+                worker_policy.step,
+            )
         LOGGER.info(
             "PREFLIGHT_WORKERS_EFFECTIVE release=%s zoom=%s workers=%s source=%s metadataWorkers=%s",
             release.identifier,
             zoom,
-            worker_count,
-            worker_source,
+            worker_policy.initial_workers,
+            worker_policy.source,
             settings.wayback_metadata_workers,
         )
         LOGGER.info(
@@ -920,7 +958,7 @@ def _preflight_release_tile_availability_for_request(
             zoom,
             cache_key,
             candidate_count,
-            worker_count,
+            worker_policy.initial_workers,
         )
         remote_start = time.perf_counter_ns()
         session_setup_start = time.perf_counter_ns()
@@ -948,15 +986,22 @@ def _preflight_release_tile_availability_for_request(
                 release,
                 aoi_bbox,
                 zoom=zoom,
-                max_workers=worker_count,
+                max_workers=worker_policy.initial_workers,
+                adaptive_enabled=worker_policy.adaptive_enabled,
+                adaptive_min_workers=worker_policy.min_workers,
+                adaptive_step=worker_policy.step,
             )
+            final_workers = getattr(session, "wayback_preflight_final_workers", worker_policy.initial_workers)
+            downshift_count = getattr(session, "wayback_preflight_downshift_count", 0)
             LOGGER.info(
                 "PREFLIGHT_REMOTE_COMPLETE release=%s zoom=%s cacheKey=%s candidateTileCount=%s "
-                "availableTileCount=%s failedCheckCount=%s durationMs=%.3f",
+                "finalWorkers=%s downshiftCount=%s availableTileCount=%s failedCheckCount=%s durationMs=%.3f",
                 release.identifier,
                 zoom,
                 cache_key,
                 summary.candidate_count,
+                final_workers,
+                downshift_count,
                 summary.available_count,
                 summary.failed_check_count,
                 _elapsed_ms(remote_start),

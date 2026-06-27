@@ -125,7 +125,7 @@ def test_resolve_release_records_tile_preflight_when_enabled(tmp_path, monkeypat
     )
     monkeypatch.setattr(
         "src.services.processing.preflight_wayback_tile_availability",
-        lambda session, release, bbox, *, zoom, max_workers: _tilemap_summary(
+        lambda session, release, bbox, *, zoom, max_workers, **kwargs: _tilemap_summary(
             available_count=1 if zoom == 18 else 0,
             failed_check_count=0 if zoom == 18 else 1,
         ),
