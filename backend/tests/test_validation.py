@@ -109,7 +109,7 @@ def test_validation_does_not_warn_when_threshold_overrides_are_absent() -> None:
     assert prepared is not None
     assert not any("threshold overrides were ignored" in warning for warning in response.warnings)
     assert response.details["change_threshold"] == settings.change_threshold
-    assert response.details["threshold_source"] == "backend_settings_env"
+    assert response.details["threshold_source"] == "default"
 
 
 def test_validation_warns_when_aoi_exceeds_inference_patch_guidance() -> None:

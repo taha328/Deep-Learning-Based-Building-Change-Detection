@@ -63,7 +63,7 @@ def _log_worker_effective_backend(
     job_kind: str,
     settings: Settings,
     change_threshold_override: float | None = None,
-    threshold_source: str = "backend_settings_env",
+    threshold_source: str = "default",
 ) -> None:
     runtime = resolve_inference_runtime(settings)
     checkpoint_path = runtime.checkpoint_path
@@ -246,7 +246,7 @@ def run_temporal_project_job(
         project_id,
         job_id,
         run_request_payload.get("change_threshold") if run_request_payload else settings.change_threshold,
-        "request_override" if run_request_payload and run_request_payload.get("change_threshold") is not None else "backend_settings_env",
+        "request_override" if run_request_payload and run_request_payload.get("change_threshold") is not None else "default",
     )
     change_threshold_override = (
         float(run_request_payload["change_threshold"])
@@ -258,7 +258,7 @@ def run_temporal_project_job(
         job_kind="temporal_project",
         settings=settings,
         change_threshold_override=change_threshold_override,
-        threshold_source="request_override" if change_threshold_override is not None else "backend_settings_env",
+        threshold_source="request_override" if change_threshold_override is not None else "default",
     )
     cleanup_wayback_preflight_locks(
         "temporal_project_celery_task_start",

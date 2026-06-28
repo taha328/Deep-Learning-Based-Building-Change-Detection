@@ -152,10 +152,6 @@ export function drawingGeometryCommit(purpose: DrawingToolPurpose, polygon: Poly
 }
 
 export function shouldShowProjectAoiOverlay(context: ProjectAoiOverlayContext): boolean {
-  if (context.drawingMode !== "idle" || context.isRunning) {
-    return true;
-  }
-  return context.workflowMode === "temporal"
-    ? context.temporalOverlayVisible
-    : !context.pairwiseResultComplete;
+  void context;
+  return true;
 }

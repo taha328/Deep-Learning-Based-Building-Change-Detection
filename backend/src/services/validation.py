@@ -13,7 +13,7 @@ from src.domain.tiling import (
     tile_range_for_bbox,
 )
 from src.domain.wayback import WaybackRelease
-from src.schemas import RunRequest, ValidationRequest, ValidationResponse
+from src.schemas import RunRequest, ValidationRequest, ValidationResponse, change_threshold_was_explicit
 from src.utils.geometry import bounds_dict, geodesic_area_m2, normalized_aoi_geojson, parse_aoi_geometry
 from src.utils.hashing import build_request_hash
 
@@ -40,7 +40,7 @@ def _find_release(releases: list[WaybackRelease], identifier: str) -> WaybackRel
 
 
 def _validate_thresholds(request: ValidationRequest, settings: Settings) -> tuple[float, float]:
-    change_threshold = request.change_threshold if request.change_threshold is not None else settings.change_threshold
+    change_threshold = request.change_threshold if change_threshold_was_explicit(request) else settings.change_threshold
     semantic_threshold = settings.semantic_threshold
     if not 0.0 <= change_threshold <= 1.0:
         raise ValueError("change_threshold must be between 0.0 and 1.0.")
@@ -110,7 +110,7 @@ def validate_request(
 
     t1_release = _find_release(releases, request.t1_release)
     t2_release = _find_release(releases, request.t2_release)
-    threshold_source = "request_override" if request.change_threshold is not None else "backend_settings_env"
+    threshold_source = "request_override" if change_threshold_was_explicit(request) else "default"
     if request.semantic_threshold is not None:
         warnings.append(
             "Request semantic_threshold override was ignored because current local backends do not apply it to final outputs."

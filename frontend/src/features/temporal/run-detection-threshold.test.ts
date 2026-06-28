@@ -9,14 +9,14 @@ import {
   parseChangeThresholdInput,
 } from "./run-detection-threshold.ts";
 
-test("change threshold defaults to 0.3", () => {
-  assert.equal(DEFAULT_CHANGE_THRESHOLD, 0.3);
+test("change threshold defaults to 0.5", () => {
+  assert.equal(DEFAULT_CHANGE_THRESHOLD, 0.5);
 });
 
 test("invalid threshold values are clamped before the request", () => {
   assert.equal(normalizeChangeThreshold(0), 0.01);
   assert.equal(normalizeChangeThreshold(1), 0.99);
-  assert.equal(normalizeChangeThreshold(Number.NaN), 0.3);
+  assert.equal(normalizeChangeThreshold(Number.NaN), 0.5);
 });
 
 test("temporal run request includes normalized change_threshold without semantic threshold", () => {

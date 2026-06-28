@@ -136,7 +136,7 @@ class Settings(BaseModel):
     generate_full_mosaic_png_for_heavy_batch: bool = False
     mosaic_preview_max_dimension: int = 4096
     scene_segmentation_concurrency: int = 2
-    change_threshold: float = 0.35
+    change_threshold: float = 0.5
     semantic_threshold: float = 0.35
     default_min_new_building_pixels: int = 30
     addition_min_area_m2: float = 8.0

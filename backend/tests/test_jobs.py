@@ -220,6 +220,50 @@ def test_start_temporal_job_requires_existing_project(monkeypatch, tmp_path, cap
     assert f"TEMPORAL_JOB_THRESHOLD_ENQUEUED projectId=temporal-test jobId={response.job_id} changeThreshold=0.3" in messages
 
 
+def test_start_temporal_job_omitted_threshold_logs_default_without_payload_override(
+    monkeypatch,
+    tmp_path,
+    caplog,
+) -> None:
+    session = _FakeJobSession(project=SimpleNamespace(id=uuid.uuid4(), project_id="temporal-test"))
+    settings = Settings(
+        runtime_cache_dir=tmp_path,
+        jobs_enabled=True,
+        redis_url="redis://localhost:6379/0",
+        change_threshold=0.5,
+    )
+
+    monkeypatch.setattr(jobs_service, "assert_redis_available", lambda settings: None)
+    monkeypatch.setattr(jobs_service, "session_scope", lambda *_args, **_kwargs: _job_session_scope(session))
+    monkeypatch.setattr(
+        jobs_service,
+        "get_temporal_project",
+        lambda *_args, **_kwargs: SimpleNamespace(milestones=[SimpleNamespace(release_identifier="WB_2026_R01")]),
+    )
+    sent: dict[str, object] = {}
+    monkeypatch.setattr(
+        jobs_service.celery_app,
+        "send_task",
+        lambda *args, **kwargs: (sent.update(args=args, kwargs=kwargs) or SimpleNamespace(id="celery-task-2")),
+    )
+
+    with caplog.at_level("INFO"):
+        response = start_temporal_project_job(
+            "temporal-test",
+            settings=settings,
+            run_request=TemporalProjectRunRequest(),
+        )
+
+    assert response.job_id.startswith("job-")
+    assert session.job is not None
+    assert session.job.raw_request == {"project_id": "temporal-test"}
+    assert "change_threshold" not in session.job.raw_request
+    assert sent["kwargs"]["kwargs"]["run_request_payload"] == {}
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert f"TEMPORAL_JOB_THRESHOLD_RECEIVED projectId=temporal-test jobId={response.job_id} changeThreshold=0.5" in messages
+    assert f"TEMPORAL_JOB_THRESHOLD_ENQUEUED projectId=temporal-test jobId={response.job_id} changeThreshold=0.5" in messages
+
+
 def test_start_temporal_job_does_not_enqueue_unreloadable_project(monkeypatch, tmp_path) -> None:
     session = _FakeJobSession(project=SimpleNamespace(id=uuid.uuid4(), project_id="temporal-missing"))
     settings = Settings(runtime_cache_dir=tmp_path, jobs_enabled=True, redis_url="redis://localhost:6379/0")
@@ -624,7 +668,7 @@ def test_worker_effective_runtime_log_uses_selected_checkpoint_and_canonical_thr
     assert "backend=bandon_mps" in messages
     assert "checkpointEnvVar=APP_BANDON_CHECKPOINT_PATH" in messages
     assert f"checkpointPath={bandon_checkpoint.resolve()}" in messages
-    assert "thresholdsSource=backend_settings_env semantic=0.42 change=0.37" in messages
+    assert "thresholdsSource=default semantic=0.42 change=0.37" in messages
 
 
 def test_worker_effective_runtime_log_uses_temporal_request_threshold_override(tmp_path, caplog) -> None:

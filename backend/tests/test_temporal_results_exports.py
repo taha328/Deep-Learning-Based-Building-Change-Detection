@@ -25,10 +25,11 @@ from src.config import Settings
 from src.schemas import TemporalMilestone, TemporalMilestoneMetrics, TemporalProject
 from src.services.temporal_exports import (
     _filesystem_safe_label,
+    _pad_bounds,
     _qgis_layer_style,
-    _qgis_project_extent,
     _temporal_milestone_color_map,
     _temporal_shapefile_export_layers,
+    _transform_qgis_extent,
     build_temporal_results_export_file,
 )
 from src.services.temporal_projects import save_temporal_project
@@ -86,6 +87,30 @@ def _feature_collection_from_bounds(*bounds_items: tuple[float, float, float, fl
             for index, bounds in enumerate(bounds_items)
         ],
     }
+
+
+def _xml_extent_bounds(node: ET.Element) -> tuple[float, float, float, float]:
+    return tuple(float(node.findtext(key)) for key in ("xmin", "ymin", "xmax", "ymax"))
+
+
+def _expected_qgis_startup_extent(root: ET.Element) -> tuple[float, float, float, float]:
+    layer_bounds: list[tuple[float, float, float, float]] = []
+    for layer in root.findall(".//projectlayers/maplayer"):
+        extent = layer.find("extent")
+        assert extent is not None
+        bounds = _xml_extent_bounds(extent)
+        if layer.findtext("provider") == "gdal":
+            layer_bounds.append(bounds)
+        else:
+            layer_bounds.append(_transform_qgis_extent(bounds, "EPSG:4326"))
+    assert layer_bounds
+    union = (
+        min(bounds[0] for bounds in layer_bounds),
+        min(bounds[1] for bounds in layer_bounds),
+        max(bounds[2] for bounds in layer_bounds),
+        max(bounds[3] for bounds in layer_bounds),
+    )
+    return _pad_bounds(union)
 
 
 def _settings(tmp_path: Path) -> Settings:
@@ -601,7 +626,7 @@ def test_temporal_results_shapefile_invalidates_legacy_cache_without_version_met
 
     assert regenerated.read_bytes().startswith(b"PK")
     metadata = json.loads((export_dir / "results_shapefile.zip.metadata.json").read_text())
-    assert metadata["version"] == "zone-clipped-mutually-exclusive-qgz-v13"
+    assert metadata["version"] == "zone-clipped-mutually-exclusive-qgz-v14-startup-extent"
 
 
 def test_temporal_results_qgz_has_valid_ids_extents_paths_groups_and_visibility(tmp_path: Path) -> None:
@@ -609,6 +634,9 @@ def test_temporal_results_qgz_has_valid_ids_extents_paths_groups_and_visibility(
     path = build_temporal_results_export_file("temporal-export-formats-test", "shapefile", settings=settings)
     extract_root = tmp_path / "extracted"
     with zipfile.ZipFile(path) as archive:
+        assert "README.txt" in archive.namelist()
+        readme = archive.read("README.txt").decode("utf-8")
+        assert "s'ouvre directement sur l'etendue des resultats exportes" in readme
         archive.extractall(extract_root)
     qgz_path = next(extract_root.glob("*.qgz"))
     assert qgz_path.stat().st_size > 1024
@@ -656,8 +684,14 @@ def test_temporal_results_qgz_has_valid_ids_extents_paths_groups_and_visibility(
     assert root.findtext(".//projectViewSettings/defaultViewExtent/srs/spatialrefsys/authid") == "EPSG:3857"
     assert root.findtext("projectionsEnabled") == "1"
     assert root.findtext("./properties/SpatialRefSys/ProjectionsEnabled") == "1"
-    expected_project_bounds = _qgis_project_extent((-7.0, 33.0, -6.999, 33.001))
+    map_canvas_extent = root.find(".//projectViewSettings/mapCanvasExtent")
+    default_view_extent = root.find(".//projectViewSettings/defaultViewExtent")
+    assert map_canvas_extent is not None
+    assert default_view_extent is not None
+    expected_project_bounds = _expected_qgis_startup_extent(root)
     assert canvas_bounds == pytest.approx(expected_project_bounds)
+    assert _xml_extent_bounds(map_canvas_extent) == pytest.approx(expected_project_bounds)
+    assert _xml_extent_bounds(default_view_extent) == pytest.approx(expected_project_bounds)
 
     for group in root.findall(".//layer-tree-group/layer-tree-group"):
         child_ids = [node.attrib["id"] for node in group.findall("layer-tree-layer")]
@@ -830,8 +864,14 @@ def test_custom_perimeter_clips_geojson_and_adds_styled_qgis_export_zone(tmp_pat
     canvas_extent = root.find(".//mapcanvas/extent")
     assert canvas_extent is not None
     canvas_bounds = tuple(float(canvas_extent.findtext(key)) for key in ("xmin", "ymin", "xmax", "ymax"))
-    expected_custom_bounds = _qgis_project_extent(tuple(shape(custom_geometry).intersection(shape(_project().aoi_geojson)).bounds))
+    map_canvas_extent = root.find(".//projectViewSettings/mapCanvasExtent")
+    default_view_extent = root.find(".//projectViewSettings/defaultViewExtent")
+    assert map_canvas_extent is not None
+    assert default_view_extent is not None
+    expected_custom_bounds = _expected_qgis_startup_extent(root)
     assert canvas_bounds == pytest.approx(expected_custom_bounds)
+    assert _xml_extent_bounds(map_canvas_extent) == pytest.approx(expected_custom_bounds)
+    assert _xml_extent_bounds(default_view_extent) == pytest.approx(expected_custom_bounds)
     assert abs(canvas_bounds[0]) > 180
     assert abs(canvas_bounds[1]) > 90
     assert root.findtext(".//projectCrs/spatialrefsys/authid") == "EPSG:3857"

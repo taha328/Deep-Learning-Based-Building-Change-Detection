@@ -48,7 +48,6 @@ import {
   drawingPreviewFeatureCollection,
   isNearFirstVertex,
   resolveDrawingClick,
-  shouldShowProjectAoiOverlay,
 } from "@/features/map/map-drawing";
 import type {
   TemporalAddedOverlayPresentation,
@@ -542,6 +541,26 @@ function sourceData(map: maplibregl.Map, sourceId: string, data: FeatureCollecti
   if (source) {
     source.setData(data);
   }
+}
+
+function syncAoiMapSource(map: maplibregl.Map, polygon: Polygon | null) {
+  if (!map.isStyleLoaded()) {
+    devLog("AOI_RENDER_DEFERRED_MAP_NOT_READY", {
+      hasAoi: Boolean(polygon),
+    });
+    return;
+  }
+  ensureOperationalLayers(map);
+  devLog("AOI_MAP_LAYER_READY", {
+    hasFillLayer: Boolean(map.getLayer("aoi-fill")),
+    hasLineLayer: Boolean(map.getLayer("aoi-line")),
+  });
+  const data = polygonFeatureCollection(polygon);
+  sourceData(map, "aoi", data);
+  devLog(polygon ? "AOI_MAP_SOURCE_UPDATED" : "AOI_MAP_SOURCE_CLEARED", {
+    featureCount: data.features.length,
+    geometryType: polygon?.type ?? null,
+  });
 }
 
 function browserSupportsWebGL(): boolean {
@@ -3416,9 +3435,7 @@ function syncMapPresentation(
     return;
   }
 
-  ensureOperationalLayers(map);
-
-  sourceData(map, "aoi", polygonFeatureCollection(params.aoi));
+  syncAoiMapSource(map, useAppStore.getState().aoi);
   sourceData(map, "export-perimeter", polygonFeatureCollection(params.exportGeometry));
   sourceData(map, "detected-polygons", params.detectedPolygons);
   sourceData(map, "building-blocks", params.buildingBlocks);
@@ -3864,14 +3881,6 @@ export function MapView({
   const hasPairwiseLayerContext = workflowMode === "pairwise" && Boolean(result?.success);
   const hasTemporalMosaicLayerContext =
     workflowMode === "temporal" && Boolean(temporalPresentation) && (temporalPresentation?.milestoneCount ?? 0) >= 2;
-  const projectAoiOverlayVisible = shouldShowProjectAoiOverlay({
-    drawingMode,
-    isRunning,
-    workflowMode,
-    pairwiseResultComplete: Boolean(result?.success),
-    temporalOverlayVisible: temporalPresentation?.projectAoiOverlayVisible ?? true,
-  });
-
   const detectedPolygons = useMemo(
     () =>
       workflowMode === "pairwise"
@@ -6174,7 +6183,7 @@ export function MapView({
     }
 
     latestPresentationRef.current = {
-      aoi: projectAoiOverlayVisible ? aoi : null,
+      aoi,
       exportGeometry,
       draftVertices,
       detectedPolygons,
@@ -6193,7 +6202,6 @@ export function MapView({
     syncMapPresentation(map, latestPresentationRef.current);
   }, [
     aoi,
-    projectAoiOverlayVisible,
     exportGeometry,
     draftVertices,
     detectedPolygons,
@@ -6211,6 +6219,31 @@ export function MapView({
     drawingMode,
     selectedTemporalMilestoneReady,
   ]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || mapError || !map.isStyleLoaded()) {
+      return;
+    }
+    syncAoiMapSource(map, aoi);
+    moveDrawingLayersToTop(map);
+  }, [aoi, mapError, mapStyleRevision]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || mapError) {
+      return;
+    }
+    const syncCurrentAoi = (polygon: Polygon | null) => {
+      if (!map.isStyleLoaded()) {
+        return;
+      }
+      syncAoiMapSource(map, polygon);
+      moveDrawingLayersToTop(map);
+    };
+    syncCurrentAoi(useAppStore.getState().aoi);
+    return useAppStore.subscribe((state) => syncCurrentAoi(state.aoi));
+  }, [mapError, mapStyleRevision]);
 
   useEffect(() => {
     const map = mapRef.current;

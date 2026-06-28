@@ -3,7 +3,11 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
+
 from src.execution_profiles import PipelineExecutionConfig
+
+
+DEFAULT_CHANGE_THRESHOLD = 0.5
 
 
 ModeName = Literal["fast_preview", "full_run"]
@@ -165,7 +169,7 @@ class ValidationRequest(BaseModel):
     t2_release: str
     mode: ModeName
     inference_backend: InferenceBackendName | None = None
-    change_threshold: float | None = Field(default=None, ge=0.01, le=0.99)
+    change_threshold: float = Field(default=DEFAULT_CHANGE_THRESHOLD, ge=0.01, le=0.99)
     semantic_threshold: float | None = None
     min_new_building_pixels: int | None = None
     min_new_building_area_m2: float | None = None
@@ -206,7 +210,7 @@ class ValidationResponse(BaseModel):
 class RunRequest(ValidationRequest):
     model_config = ConfigDict(extra="forbid")
 
-    change_threshold: float | None = Field(default=None, ge=0.01, le=0.99)
+    change_threshold: float = Field(default=DEFAULT_CHANGE_THRESHOLD, ge=0.01, le=0.99)
     semantic_threshold: float | None = None
     old_building_mask_dilation_pixels: int = 2
     new_building_core_distance_pixels: int = 2
@@ -498,12 +502,16 @@ class TemporalProjectRunResponse(BaseModel):
 class TemporalProjectRunRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    change_threshold: float | None = Field(
-        default=None,
+    change_threshold: float = Field(
+        default=DEFAULT_CHANGE_THRESHOLD,
         ge=0.01,
         le=0.99,
         validation_alias=AliasChoices("change_threshold", "changeThreshold"),
     )
+
+
+def change_threshold_was_explicit(request: BaseModel | None) -> bool:
+    return request is not None and "change_threshold" in request.model_fields_set
 
 
 class TemporalProjectReference(BaseModel):

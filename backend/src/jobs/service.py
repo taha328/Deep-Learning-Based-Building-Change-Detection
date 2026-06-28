@@ -23,7 +23,7 @@ from src.repositories.job_repository import (
     mark_job_failed,
     normalize_job_status,
 )
-from src.schemas import RunRequest, TemporalProjectRunRequest
+from src.schemas import RunRequest, TemporalProjectRunRequest, change_threshold_was_explicit
 from src.services.temporal_projects import get_temporal_project
 
 
@@ -34,9 +34,9 @@ def _temporal_threshold_log_values(
     run_request: TemporalProjectRunRequest | None,
     settings: Settings,
 ) -> tuple[float, str]:
-    if run_request is not None and run_request.change_threshold is not None:
+    if change_threshold_was_explicit(run_request):
         return run_request.change_threshold, "request_override"
-    return settings.change_threshold, "backend_settings_env"
+    return settings.change_threshold, "default"
 
 
 def _broker_url(settings: Settings) -> str:
@@ -132,7 +132,7 @@ def start_temporal_project_job(
             session=session,
             project_db_id=project.id,
             project_id=project_id,
-            raw_request={"project_id": project_id, **(run_request.model_dump(exclude_none=True) if run_request else {})},
+            raw_request={"project_id": project_id, **(run_request.model_dump(exclude_none=True, exclude_unset=True) if run_request else {})},
         ).job_id
     assert job_id is not None
     threshold, threshold_source = _temporal_threshold_log_values(run_request, settings)
@@ -154,7 +154,7 @@ def start_temporal_project_job(
             args=[job_id, project_id],
             kwargs={
                 "settings_payload": None,
-                "run_request_payload": run_request.model_dump(exclude_none=True) if run_request else None,
+                "run_request_payload": run_request.model_dump(exclude_none=True, exclude_unset=True) if run_request else None,
             },
             queue=settings.celery_task_default_queue,
         )

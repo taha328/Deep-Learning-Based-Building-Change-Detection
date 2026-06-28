@@ -1,4 +1,4 @@
-export const DEFAULT_CHANGE_THRESHOLD = 0.3;
+export const DEFAULT_CHANGE_THRESHOLD = 0.5;
 export const MIN_CHANGE_THRESHOLD = 0.01;
 export const MAX_CHANGE_THRESHOLD = 0.99;
 

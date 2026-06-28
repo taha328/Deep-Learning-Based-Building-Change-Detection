@@ -94,6 +94,7 @@ def _sample_project(project_id: str = "temporal-demo") -> TemporalProject:
 
 
 def test_temporal_run_request_validates_change_threshold_range() -> None:
+    assert TemporalProjectRunRequest().change_threshold == 0.5
     assert TemporalProjectRunRequest(change_threshold=0.35).change_threshold == 0.35
     assert TemporalProjectRunRequest.model_validate({"changeThreshold": 0.3}).change_threshold == 0.3
     with pytest.raises(ValidationError):

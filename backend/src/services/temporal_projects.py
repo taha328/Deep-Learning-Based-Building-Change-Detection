@@ -65,6 +65,7 @@ from src.schemas import (
     TemporalProjectSummary,
     TemporalProjectValidationResponse,
     ValidationRequest,
+    change_threshold_was_explicit,
     validate_stored_temporal_project,
 )
 from src.runtime_paths import temporal_project_dir
@@ -4938,18 +4939,16 @@ def _prepare_temporal_pair_request(
     request_hash_context: dict[str, object] | None,
     existing_footprint_geojson: dict[str, Any] | None = None,
 ):
-    validation_request = ValidationRequest(
-        aoi_geojson=aoi_geojson,
-        t1_release=previous_release_identifier,
-        t2_release=milestone_release_identifier,
-        mode="full_run",
-        existing_footprint_geojson=existing_footprint_geojson,
-        change_threshold=(
-            float(request_hash_context["change_threshold"])
-            if request_hash_context and request_hash_context.get("threshold_source") == "request_override"
-            else None
-        ),
-    )
+    validation_request_kwargs: dict[str, Any] = {
+        "aoi_geojson": aoi_geojson,
+        "t1_release": previous_release_identifier,
+        "t2_release": milestone_release_identifier,
+        "mode": "full_run",
+        "existing_footprint_geojson": existing_footprint_geojson,
+    }
+    if request_hash_context and request_hash_context.get("threshold_source") == "request_override":
+        validation_request_kwargs["change_threshold"] = float(request_hash_context["change_threshold"])
+    validation_request = ValidationRequest(**validation_request_kwargs)
     validation_response, prepared = validate_request(
         validation_request,
         releases=releases,
@@ -6028,17 +6027,15 @@ def _timeline_requests(
             continue
 
         pair_source_release_id = previous_successful_release_id or previous_release_id
-        validation_request = ValidationRequest(
-            aoi_geojson=project.aoi_geojson,
-            t1_release=pair_source_release_id,
-            t2_release=release.identifier,
-            mode="full_run",
-            change_threshold=(
-                float(request_hash_context["change_threshold"])
-                if request_hash_context and request_hash_context.get("threshold_source") == "request_override"
-                else None
-            ),
-        )
+        validation_request_kwargs: dict[str, Any] = {
+            "aoi_geojson": project.aoi_geojson,
+            "t1_release": pair_source_release_id,
+            "t2_release": release.identifier,
+            "mode": "full_run",
+        }
+        if request_hash_context and request_hash_context.get("threshold_source") == "request_override":
+            validation_request_kwargs["change_threshold"] = float(request_hash_context["change_threshold"])
+        validation_request = ValidationRequest(**validation_request_kwargs)
         validation_response, prepared = validate_request(
             validation_request,
             releases=releases,
@@ -6634,16 +6631,16 @@ def run_temporal_project(
             continue
 
         cached_response = _load_cached_run_response(settings, prepared.request_hash)
-        response = cached_response if cached_response is not None else pair_runner(
-            RunRequest(
-                aoi_geojson=run_request.aoi_geojson,
-                t1_release=run_request.t1_release,
-                t2_release=run_request.t2_release,
-                mode=run_request.mode,
-                existing_footprint_geojson=run_request.existing_footprint_geojson,
-                change_threshold=run_request.change_threshold,
-            )
-        )
+        run_request_kwargs: dict[str, Any] = {
+            "aoi_geojson": run_request.aoi_geojson,
+            "t1_release": run_request.t1_release,
+            "t2_release": run_request.t2_release,
+            "mode": run_request.mode,
+            "existing_footprint_geojson": run_request.existing_footprint_geojson,
+        }
+        if change_threshold_was_explicit(run_request):
+            run_request_kwargs["change_threshold"] = run_request.change_threshold
+        response = cached_response if cached_response is not None else pair_runner(RunRequest(**run_request_kwargs))
         if response is None or not response.success:
             milestone.status = "error"
             milestone.error_message = (response.error_message if response is not None else None) or "Temporal pair run failed."

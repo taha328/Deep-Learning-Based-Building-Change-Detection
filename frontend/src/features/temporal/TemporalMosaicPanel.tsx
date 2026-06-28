@@ -11,7 +11,6 @@ import {
   Loader2,
   Pentagon,
   Plus,
-  Save,
   Trash2,
   Upload,
 } from "lucide-react";
@@ -1759,13 +1758,6 @@ export function TemporalMosaicPanel({
     handleAddMilestone(release);
   };
 
-  const handleSave = async () => {
-    if (!project) {
-      return;
-    }
-    await persistProject(project);
-  };
-
   const handleRun = async () => {
     if (!project) {
       return;
@@ -2016,17 +2008,6 @@ export function TemporalMosaicPanel({
                     }
                     className="border-sidebar-border bg-card text-card-foreground placeholder:text-muted-foreground"
                   />
-                </div>
-
-                <div className="grid grid-cols-2 gap-3">
-                  <Button variant="outline" className="border-sidebar-border bg-sidebar" onClick={() => void handleSave()} disabled={!project || runBusy}>
-                    {saveProjectMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
-                    {t("temporal.save_button")}
-                  </Button>
-                  <Button variant="outline" className="border-sidebar-border bg-sidebar" onClick={() => void handleDownloadBundle()} disabled={!project?.project_id}>
-                    <Download className="mr-2 h-4 w-4" />
-                    {t("temporal.export_button")}
-                  </Button>
                 </div>
             </WorkflowSectionCard>
           </div>

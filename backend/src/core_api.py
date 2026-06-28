@@ -25,6 +25,7 @@ from src.schemas import (
     TemporalProjectValidationResponse,
     ValidationRequest,
     ValidationResponse,
+    change_threshold_was_explicit,
 )
 from src.services.processing import run_detection
 from src.services.releases import list_releases, list_releases_response
@@ -44,10 +45,18 @@ ProgressCallback = Callable[[float, str, dict[str, object] | None], None]
 LOGGER = logging.getLogger(__name__)
 
 
-def _request_hash_context_with_threshold(backend, settings: Settings, change_threshold: float | None) -> dict[str, object]:
+def _request_hash_context_with_threshold(
+    backend,
+    settings: Settings,
+    change_threshold: float,
+    *,
+    threshold_explicit: bool,
+) -> dict[str, object]:
     context = backend.request_hash_context(settings)
-    if change_threshold is not None:
-        context.update(change_threshold=change_threshold, threshold_source="request_override")
+    context.update(
+        change_threshold=change_threshold,
+        threshold_source="request_override" if threshold_explicit else "default",
+    )
     return context
 
 
@@ -123,7 +132,12 @@ def validate_request_api(
         releases=list_releases(resolved_settings),
         settings=backend.configure_settings(resolved_settings),
         remote_patch_budget_enabled=backend.enforce_remote_patch_budget(),
-        request_hash_context=_request_hash_context_with_threshold(backend, resolved_settings, request.change_threshold),
+        request_hash_context=_request_hash_context_with_threshold(
+            backend,
+            resolved_settings,
+            request.change_threshold,
+            threshold_explicit=change_threshold_was_explicit(request),
+        ),
     )
     return validation
 
@@ -166,7 +180,12 @@ def run_detection_api(
         inference_runner=backend.create_inference_runner(configured_settings),
         model_backend=backend.model_backend,
         remote_patch_budget_enabled=backend.enforce_remote_patch_budget(),
-        request_hash_context=_request_hash_context_with_threshold(backend, configured_settings, request.change_threshold),
+        request_hash_context=_request_hash_context_with_threshold(
+            backend,
+            configured_settings,
+            request.change_threshold,
+            threshold_explicit=change_threshold_was_explicit(request),
+        ),
     )
     if resolved_settings.persistence_backend == "postgres":
         from src.repositories.run_repository import save_detection_run
@@ -252,10 +271,16 @@ def run_temporal_project_api(
         )
 
     configured_settings = backend.configure_settings(resolved_settings)
-    change_threshold = run_request.change_threshold if run_request is not None else None
-    if change_threshold is not None:
+    threshold_explicit = change_threshold_was_explicit(run_request)
+    change_threshold = run_request.change_threshold if run_request is not None else configured_settings.change_threshold
+    if threshold_explicit:
         configured_settings = configured_settings.model_copy(update={"change_threshold": change_threshold})
-    request_hash_context = _request_hash_context_with_threshold(backend, configured_settings, change_threshold)
+    request_hash_context = _request_hash_context_with_threshold(
+        backend,
+        configured_settings,
+        change_threshold,
+        threshold_explicit=threshold_explicit,
+    )
     release_dates = _release_date_lookup(project, configured_settings)
     pair_positions = _temporal_pair_positions(project)
     total_pair_count = max(len(project.milestones) - 1, 0)
@@ -265,7 +290,7 @@ def run_temporal_project_api(
         project_id,
         job_id,
         configured_settings.change_threshold,
-        "request_override" if change_threshold is not None else "backend_settings_env",
+        "request_override" if threshold_explicit else "default",
     )
 
     def _pair_runner(request: RunRequest) -> RunResponse:

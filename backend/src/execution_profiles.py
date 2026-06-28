@@ -50,7 +50,7 @@ class InferenceRuntimeConfig(BaseModel):
     checkpoint_path: Path
     change_threshold: float
     semantic_threshold: float
-    threshold_source: Literal["backend_settings_env"] = "backend_settings_env"
+    threshold_source: Literal["default", "request_override"] = "default"
     device: ModelDeviceName
     repo_dir: Path
     config_path: Path

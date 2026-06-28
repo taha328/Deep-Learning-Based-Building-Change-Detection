@@ -135,19 +135,19 @@ test("project AOI overlay remains visible while drawing, editing, or running", (
   }), true);
 });
 
-test("project AOI overlay is hidden after completed results without affecting result visibility state", () => {
+test("project AOI overlay remains visible after completed results and temporal panel changes", () => {
   assert.equal(shouldShowProjectAoiOverlay({
     drawingMode: "idle",
     isRunning: false,
     workflowMode: "pairwise",
     pairwiseResultComplete: true,
     temporalOverlayVisible: true,
-  }), false);
+  }), true);
   assert.equal(shouldShowProjectAoiOverlay({
     drawingMode: "idle",
     isRunning: false,
     workflowMode: "temporal",
     pairwiseResultComplete: false,
     temporalOverlayVisible: false,
-  }), false);
+  }), true);
 });

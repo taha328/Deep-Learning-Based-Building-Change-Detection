@@ -20,3 +20,19 @@ test("frontend contracts and project creation do not send latest-source fields",
   assert.doesNotMatch(contracts, /latest_source|latestMilestoneSource|currentMapboxSatellite/);
   assert.doesNotMatch(settings, /latest_source|latestMilestoneSource|currentMapboxSatellite/);
 });
+
+test("overview omits save and export buttons while download exports remain available", () => {
+  const panel = source("./TemporalMosaicPanel.tsx");
+  const overview = panel.slice(
+    panel.indexOf('activePanel === "overview"'),
+    panel.indexOf('activePanel === "releases"'),
+  );
+
+  assert.doesNotMatch(overview, /temporal\.save_button/);
+  assert.doesNotMatch(overview, /temporal\.export_button/);
+  assert.doesNotMatch(overview, /handleSave|handleDownloadBundle/);
+  assert.match(panel, /activePanel === "downloads"/);
+  assert.match(panel, /temporal\.download_bundle/);
+  assert.match(panel, /temporal\.download_results/);
+  assert.match(panel, /handleDownloadResults/);
+});

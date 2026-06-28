@@ -79,7 +79,7 @@ TEMPORAL_RESULTS_EXPORT_LABELS = {
 
 TOPOJSON_DEFAULT_QUANTIZATION = 1_000_000
 TOPOJSON_EXPORT_VERSION = "clean-quantized-v3"
-SHAPEFILE_EXPORT_VERSION = "zone-clipped-mutually-exclusive-qgz-v13"
+SHAPEFILE_EXPORT_VERSION = "zone-clipped-mutually-exclusive-qgz-v14-startup-extent"
 QGIS_PROJECT_CRS = "EPSG:3857"
 QGIS_VECTOR_CRS = "EPSG:4326"
 QGIS_PROJECT_EXTENT_PADDING_RATIO = 0.075
@@ -199,6 +199,13 @@ class TemporalQgisRaster:
     layer_id: str
     display_name: str
     bounds_3857: Bounds
+
+
+@dataclass(frozen=True)
+class QgisProjectInitialExtent:
+    bounds_3857: Bounds
+    source_count: int
+    used_fallback: bool = False
 
 
 Bounds = tuple[float, float, float, float]
@@ -1919,6 +1926,36 @@ def _union_bounds(bounds: list[Bounds]) -> Bounds:
     )
 
 
+def _validate_bounds(bounds: Bounds) -> Bounds:
+    xmin, ymin, xmax, ymax = (float(value) for value in bounds)
+    if not all(math.isfinite(value) for value in (xmin, ymin, xmax, ymax)):
+        raise ValueError(f"QGIS extent contains non-finite values: {bounds}")
+    if xmin >= xmax or ymin >= ymax:
+        raise ValueError(f"QGIS extent is empty or unordered: {bounds}")
+    return xmin, ymin, xmax, ymax
+
+
+def _pad_bounds(bounds: Bounds, ratio: float = QGIS_PROJECT_EXTENT_PADDING_RATIO) -> Bounds:
+    xmin, ymin, xmax, ymax = _validate_bounds(bounds)
+    width = max(xmax - xmin, 1.0)
+    height = max(ymax - ymin, 1.0)
+    x_padding = width * ratio
+    y_padding = height * ratio
+    return xmin - x_padding, ymin - y_padding, xmax + x_padding, ymax + y_padding
+
+
+def _transform_qgis_extent(bounds: Bounds, source_crs: str, target_crs: str = QGIS_PROJECT_CRS) -> Bounds:
+    bounds = _validate_bounds(bounds)
+    if source_crs.upper() == target_crs.upper():
+        return bounds
+    transformed = reproject_geometry(
+        box(*bounds),
+        source_crs,
+        target_crs,
+    )
+    return _validate_bounds(tuple(float(value) for value in transformed.bounds))
+
+
 def _qgis_srs_xml(authid: str = QGIS_VECTOR_CRS, indent: str = "      ") -> list[str]:
     if authid == QGIS_PROJECT_CRS:
         return [
@@ -1966,17 +2003,95 @@ def _extent_xml(bounds: Bounds, indent: str = "      ") -> list[str]:
 
 
 def _qgis_project_extent(vector_extent_wgs84: Bounds) -> Bounds:
-    projected = reproject_geometry(
-        box(*vector_extent_wgs84),
-        QGIS_VECTOR_CRS,
+    return _pad_bounds(_transform_qgis_extent(vector_extent_wgs84, QGIS_VECTOR_CRS, QGIS_PROJECT_CRS))
+
+
+def compute_qgis_project_initial_extent(
+    project_id: str,
+    validations: list[ExportedLayerValidation],
+    rasters: list[TemporalQgisRaster],
+    *,
+    fallback_extent_wgs84: Bounds | None = None,
+) -> QgisProjectInitialExtent:
+    logger.info(
+        "QGIS_PROJECT_EXTENT_COMPUTE_START projectId=%s vectorLayerCount=%s rasterLayerCount=%s projectCrs=%s",
+        project_id,
+        len(validations),
+        len(rasters),
         QGIS_PROJECT_CRS,
     )
-    xmin, ymin, xmax, ymax = (float(value) for value in projected.bounds)
-    width = max(xmax - xmin, 1.0)
-    height = max(ymax - ymin, 1.0)
-    x_padding = width * QGIS_PROJECT_EXTENT_PADDING_RATIO
-    y_padding = height * QGIS_PROJECT_EXTENT_PADDING_RATIO
-    return xmin - x_padding, ymin - y_padding, xmax + x_padding, ymax + y_padding
+    project_crs_bounds: list[Bounds] = []
+    for validation in validations:
+        if not validation.is_valid_for_qgis_project or validation.feature_count <= 0:
+            logger.info(
+                "QGIS_PROJECT_LAYER_EXTENT_SKIPPED projectId=%s layer=%s reason=%s",
+                project_id,
+                validation.display_name,
+                validation.reason or "invalid_or_empty",
+            )
+            continue
+        layer_bounds = (validation.xmin, validation.ymin, validation.xmax, validation.ymax)
+        logger.info(
+            "QGIS_PROJECT_LAYER_EXTENT projectId=%s layer=%s source=vector crs=%s xmin=%s ymin=%s xmax=%s ymax=%s",
+            project_id,
+            validation.display_name,
+            validation.crs_authid,
+            *layer_bounds,
+        )
+        transformed = _transform_qgis_extent(layer_bounds, validation.crs_authid, QGIS_PROJECT_CRS)
+        logger.info(
+            "QGIS_PROJECT_EXTENT_TRANSFORMED projectId=%s layer=%s source=vector sourceCrs=%s targetCrs=%s xmin=%s ymin=%s xmax=%s ymax=%s",
+            project_id,
+            validation.display_name,
+            validation.crs_authid,
+            QGIS_PROJECT_CRS,
+            *transformed,
+        )
+        project_crs_bounds.append(transformed)
+
+    for raster in rasters:
+        try:
+            raster_bounds = _validate_bounds(raster.bounds_3857)
+        except ValueError as exc:
+            logger.info(
+                "QGIS_PROJECT_LAYER_EXTENT_SKIPPED projectId=%s layer=%s source=raster reason=%s",
+                project_id,
+                raster.display_name,
+                exc,
+            )
+            continue
+        logger.info(
+            "QGIS_PROJECT_LAYER_EXTENT projectId=%s layer=%s source=raster crs=%s xmin=%s ymin=%s xmax=%s ymax=%s",
+            project_id,
+            raster.display_name,
+            QGIS_PROJECT_CRS,
+            *raster_bounds,
+        )
+        project_crs_bounds.append(raster_bounds)
+
+    if project_crs_bounds:
+        combined = _union_bounds(project_crs_bounds)
+        padded = _pad_bounds(combined)
+        logger.info(
+            "QGIS_PROJECT_INITIAL_EXTENT_SET projectId=%s crs=%s sourceCount=%s paddingRatio=%s xmin=%s ymin=%s xmax=%s ymax=%s",
+            project_id,
+            QGIS_PROJECT_CRS,
+            len(project_crs_bounds),
+            QGIS_PROJECT_EXTENT_PADDING_RATIO,
+            *padded,
+        )
+        return QgisProjectInitialExtent(bounds_3857=padded, source_count=len(project_crs_bounds))
+
+    if fallback_extent_wgs84 is None:
+        raise ValueError("Cannot compute QGIS initial extent from empty layers and no fallback extent.")
+    fallback = _qgis_project_extent(fallback_extent_wgs84)
+    logger.warning(
+        "QGIS_PROJECT_INITIAL_EXTENT_FALLBACK projectId=%s crs=%s reason=no_non_empty_export_layers xmin=%s ymin=%s xmax=%s ymax=%s",
+        project_id,
+        QGIS_PROJECT_CRS,
+        *fallback,
+    )
+    return QgisProjectInitialExtent(bounds_3857=fallback, source_count=0, used_fallback=True)
 
 
 def _default_visible_layer_names(layers: list[TemporalShapefileLayer]) -> set[str]:
@@ -2126,10 +2241,10 @@ def _temporal_shapefile_qgs_xml(
     project: TemporalProject,
     layers: list[TemporalShapefileLayer],
     validations: list[ExportedLayerValidation],
-    project_extent_wgs84: Bounds,
+    project_extent_3857: Bounds,
     rasters: list[TemporalQgisRaster],
 ) -> str:
-    project_extent_3857 = _qgis_project_extent(project_extent_wgs84)
+    project_extent_3857 = _validate_bounds(project_extent_3857)
     layer_ids = {layer.filename: f"{layer.filename}_{index}" for index, layer in enumerate(layers, start=1)}
     validation_by_name = {validation.display_name: validation for validation in validations}
     visible_names = _default_visible_layer_names(layers)
@@ -2191,6 +2306,10 @@ def _temporal_shapefile_qgs_xml(
     lines.extend(_extent_xml(project_extent_3857, "    "))
     lines.extend(_qgis_srs_xml(QGIS_PROJECT_CRS, "    "))
     lines.extend(["    <rotation>0</rotation>", "    <renderMapTile>0</renderMapTile>", "  </mapcanvas>", "  <projectViewSettings>"])
+    lines.extend(["    <mapCanvasExtent>"])
+    lines.extend(_extent_xml(project_extent_3857, "      ")[1:-1])
+    lines.extend(_qgis_srs_xml(QGIS_PROJECT_CRS, "      "))
+    lines.extend(["    </mapCanvasExtent>"])
     lines.extend(["    <defaultViewExtent>"])
     lines.extend(_extent_xml(project_extent_3857, "      ")[1:-1])
     lines.extend(_qgis_srs_xml(QGIS_PROJECT_CRS, "      "))
@@ -2298,15 +2417,22 @@ def _write_temporal_shapefile_qgz(
     project: TemporalProject,
     layers: list[TemporalShapefileLayer],
     validations: list[ExportedLayerValidation],
-    project_extent_wgs84: Bounds,
+    project_extent_3857: Bounds,
     rasters: list[TemporalQgisRaster],
 ) -> str:
     logger.info("EXPORT_QGZ_GENERATE_START projectId=%s backend=styled_xml", project.project_id)
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
         archive.writestr(
             f"{path.stem}.qgs",
-            _temporal_shapefile_qgs_xml(project, layers, validations, project_extent_wgs84, rasters),
+            _temporal_shapefile_qgs_xml(project, layers, validations, project_extent_3857, rasters),
         )
+    logger.info(
+        "QGIS_PROJECT_QGZ_WRITTEN projectId=%s path=%s bytes=%s crs=%s",
+        project.project_id,
+        path,
+        path.stat().st_size if path.exists() else 0,
+        QGIS_PROJECT_CRS,
+    )
     return "styled_xml"
 
 
@@ -2445,22 +2571,27 @@ def build_temporal_results_shapefile_zip(project_id: str, settings: Settings | N
                 *group_extent,
                 len(group_layers),
             )
-        project_extent = _union_bounds(
+        vector_extent = _union_bounds(
             [(item.xmin, item.ymin, item.xmax, item.ymax) for item in validated_layers]
         )
-        projected_extent = _qgis_project_extent(project_extent)
+        initial_extent = compute_qgis_project_initial_extent(
+            project_id,
+            validated_layers,
+            rasters,
+            fallback_extent_wgs84=tuple(shape(project.aoi_geojson).bounds) if project.aoi_geojson else None,
+        )
         logger.info(
             "EXPORT_QGZ_SOURCE_VECTOR_EXTENT projectId=%s crs=%s xmin=%s ymin=%s xmax=%s ymax=%s",
             project_id,
             QGIS_VECTOR_CRS,
-            *project_extent,
+            *vector_extent,
         )
         logger.info(
             "EXPORT_QGZ_PROJECT_EXTENT projectId=%s crs=%s paddingRatio=%s xmin=%s ymin=%s xmax=%s ymax=%s",
             project_id,
             QGIS_PROJECT_CRS,
             QGIS_PROJECT_EXTENT_PADDING_RATIO,
-            *projected_extent,
+            *initial_extent.bounds_3857,
         )
         logger.info(
             "EXPORT_QGZ_LAYER_ORDER projectId=%s order=%s",
@@ -2483,7 +2614,7 @@ def build_temporal_results_shapefile_zip(project_id: str, settings: Settings | N
             project,
             written_layers,
             validated_layers,
-            project_extent,
+            initial_extent.bounds_3857,
             rasters,
         )
         if not qgz_path.is_file() or qgz_path.stat().st_size <= 1024:
@@ -2506,6 +2637,18 @@ def build_temporal_results_shapefile_zip(project_id: str, settings: Settings | N
         with zipfile.ZipFile(zip_stream, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
             for group_key in group_keys:
                 archive.writestr(f"{group_key}/", b"")
+            archive.writestr(
+                "README.txt",
+                "\n".join(
+                    [
+                        "Ouvrez le fichier .qgz dans QGIS pour utiliser le projet style.",
+                        "Le projet s'ouvre directement sur l'etendue des resultats exportes.",
+                        "Les dossiers contiennent les composants Shapefile bruts et les rasters de reference.",
+                        "Si QGIS demande de reparer les chemins, conservez la structure des dossiers extraite du ZIP.",
+                        "",
+                    ]
+                ),
+            )
             archive.write(qgz_path, arcname=qgz_path.name)
             for path in sorted(tmp_dir.rglob("*")):
                 if path.is_file() and path != qgz_path:

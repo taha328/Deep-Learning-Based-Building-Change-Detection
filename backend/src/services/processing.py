@@ -75,7 +75,7 @@ from src.domain.wayback import (
     preflight_wayback_tile_availability,
     summarize_wayback_metadata,
 )
-from src.schemas import ArtifactEntry, DiagnosticMetadata, PreviewImages, RunRequest, RunResponse, SummaryStats, TabularMetrics
+from src.schemas import ArtifactEntry, DiagnosticMetadata, PreviewImages, RunRequest, RunResponse, SummaryStats, TabularMetrics, change_threshold_was_explicit
 from src.services.releases import list_releases
 from src.services.validation import (
     PreparedRequest,
@@ -539,7 +539,7 @@ def _detection_run_identity(
     request_hash: str,
     change_threshold: float,
     semantic_threshold: float,
-    threshold_source: str = "backend_settings_env",
+    threshold_source: str = "default",
     request_hash_context: dict[str, object] | None = None,
 ) -> dict[str, object]:
     checkpoint_path: Path | None = None
@@ -1595,9 +1595,10 @@ def run_detection(
         metadata={"valid": True, "estimated_tiles": prepared.tile_count_per_scene * 2},
     )
     runtime = resolve_inference_runtime(settings)
-    change_threshold = float(request.change_threshold if request.change_threshold is not None else runtime.change_threshold)
+    threshold_explicit = change_threshold_was_explicit(request)
+    change_threshold = float(request.change_threshold if threshold_explicit else runtime.change_threshold)
     semantic_threshold = float(runtime.semantic_threshold)
-    threshold_source = "request_override" if request.change_threshold is not None else "backend_settings_env"
+    threshold_source = "request_override" if threshold_explicit else "default"
     old_building_mask_dilation_pixels = max(
         int(
             request.old_building_mask_dilation_pixels
