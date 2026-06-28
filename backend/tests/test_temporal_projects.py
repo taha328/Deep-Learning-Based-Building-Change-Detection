@@ -4,6 +4,7 @@ from datetime import date
 import json
 import logging
 from pathlib import Path
+import shutil
 
 import geopandas as gpd
 import pytest
@@ -497,13 +498,9 @@ def test_publish_completed_tiled_request_uses_temporal_project_artifact_schema(m
     assert cleanup_audit["bytes_deleted"] > 0
 
 
-def test_publish_completed_tiled_request_skips_large_missing_buffer_regeneration(monkeypatch, tmp_path) -> None:
+def test_publish_completed_tiled_request_generates_large_buffers_without_inlining_derived_geometry(monkeypatch, tmp_path) -> None:
     settings = Settings(runtime_cache_dir=tmp_path, temporal_derived_geometry_max_features=1)
     monkeypatch.setattr("src.services.temporal_projects.list_releases", lambda _: _sample_releases(settings))
-    monkeypatch.setattr(
-        "src.services.temporal_projects.build_change_buffer_layers",
-        lambda *args, **kwargs: pytest.fail("large recovery must not regenerate buffers"),
-    )
     monkeypatch.setattr(
         "src.services.temporal_projects.build_temporal_growth_blocks",
         lambda *args, **kwargs: pytest.fail("large recovery must not regenerate growth blocks"),
@@ -524,13 +521,18 @@ def test_publish_completed_tiled_request_skips_large_missing_buffer_regeneration
     request_dir.mkdir(parents=True)
     (request_dir / "prediction_change_mask.tif").write_bytes(b"mask")
     (request_dir / "prediction_change_probability.tif").write_bytes(b"probability")
-    change_geojson = _feature_collection(
+    full_change_geojson = _feature_collection(
         [
             [(-6.9998, 33.0002), (-6.9996, 33.0002), (-6.9996, 33.0004), (-6.9998, 33.0004)],
             [(-6.9994, 33.0006), (-6.9992, 33.0006), (-6.9992, 33.0008), (-6.9994, 33.0008)],
+            [(-6.9990, 33.0010), (-6.9988, 33.0010), (-6.9988, 33.0012), (-6.9990, 33.0012)],
         ]
     )
-    (request_dir / "building_change_polygons.geojson").write_text(json.dumps(change_geojson), encoding="utf-8")
+    capped_response_geojson = {
+        "type": "FeatureCollection",
+        "features": full_change_geojson["features"][:2],
+    }
+    (request_dir / "building_change_polygons.geojson").write_text(json.dumps(full_change_geojson), encoding="utf-8")
     save_cached_response(
         settings,
         request_id,
@@ -548,10 +550,10 @@ def test_publish_completed_tiled_request_skips_large_missing_buffer_regeneration
                 total_building_blocks=0,
                 total_new_building_area_m2=0.0,
                 total_building_block_area_m2=0.0,
-                total_change_polygons=2,
+                total_change_polygons=3,
                 total_change_area_m2=123.45,
             ),
-            change_polygons_geojson=change_geojson,
+            change_polygons_geojson=capped_response_geojson,
         ),
     )
 
@@ -572,9 +574,13 @@ def test_publish_completed_tiled_request_skips_large_missing_buffer_regeneration
 
     milestone_dir = settings.temporal_projects_dir / saved.project_id / "milestones" / "WB_2025_R01"
     assert (milestone_dir / "additions.geojson").is_file()
-    assert not (milestone_dir / "building_change_buffer_10m.geojson").exists()
-    assert result["summary_backed_finalization"] is True
-    assert second_result["artifact_counts"]["additions.geojson"] == 2
+    assert (milestone_dir / "building_change_buffer_10m.geojson").is_file()
+    assert (milestone_dir / "building_change_buffer_15m.geojson").is_file()
+    assert (milestone_dir / "building_change_buffer_20m.geojson").is_file()
+    assert len(json.loads((milestone_dir / "additions.geojson").read_text(encoding="utf-8"))["features"]) == 3
+    assert result["inline_derived_geometry_skipped"] is True
+    assert second_result["artifact_counts"]["additions.geojson"] == 3
+    assert second_result["artifact_counts"]["building_change_buffer_10m.geojson"] == 3
 
     reloaded = get_temporal_project(saved.project_id, settings)
     target = next(item for item in reloaded.milestones if item.release_identifier == "WB_2025_R01")
@@ -582,13 +588,16 @@ def test_publish_completed_tiled_request_skips_large_missing_buffer_regeneration
     assert target.pair_request_hash == request_id
     assert target.populated_request_hash == request_id
     assert target.metrics is not None
-    assert target.metrics.additions_feature_count == 2
-    assert any("summary-backed temporal finalization" in warning for warning in target.warnings)
+    assert target.metrics.additions_feature_count == 3
+    assert target.warnings == []
+    assert target.automated_additions_geojson is None
+    assert target.cumulative_union_geojson is None
 
     compact = load_temporal_project_compact_payload(saved.project_id, settings)
     compact_target = next(item for item in compact["milestones"] if item["release_identifier"] == "WB_2025_R01")
-    assert compact_target["metrics"]["additions_feature_count"] == 2
+    assert compact_target["metrics"]["additions_feature_count"] == 3
     assert compact_target["artifacts"]["additions"]["exists"] is True
+    assert compact_target["artifacts"]["building_change_buffer_10m"]["exists"] is True
 
 
 def test_temporal_project_metric_audit_reads_published_artifacts(monkeypatch, tmp_path) -> None:
@@ -797,6 +806,147 @@ def test_run_temporal_project_only_executes_appended_milestone(monkeypatch, tmp_
     assert executed_pairs == [("WB_2025_R01", "WB_2026_R01")]
     assert second_run.project.milestones[1].pair_request_hash == first_run.project.milestones[1].pair_request_hash
     assert second_run.project.milestones[2].pair_request_hash is not None
+
+
+def test_run_temporal_project_reuses_file_backed_completed_milestone_after_cache_cleanup(monkeypatch, tmp_path) -> None:
+    settings = Settings(runtime_cache_dir=tmp_path)
+    releases = _sample_releases(settings)
+    monkeypatch.setattr("src.services.temporal_projects.list_releases", lambda _: releases)
+    project = save_temporal_project(
+        TemporalProject(
+            project_id="append-file-backed",
+            name="Append File Backed",
+            aoi_geojson=_sample_project().aoi_geojson,
+            milestones=[
+                {"release_identifier": "WB_2024_R01"},
+                {"release_identifier": "WB_2025_R01"},
+            ],
+            created_at="2026-04-20T00:00:00Z",
+            updated_at="2026-04-20T00:00:00Z",
+        ),
+        settings,
+    )
+    automated_layers = {
+        "WB_2025_R01": _feature_collection(
+            [[(-6.9998, 33.0002), (-6.9994, 33.0002), (-6.9994, 33.0006), (-6.9998, 33.0006)]]
+        ),
+        "WB_2026_R01": _feature_collection(
+            [[(-6.9992, 33.0008), (-6.9988, 33.0008), (-6.9988, 33.0012), (-6.9992, 33.0012)]]
+        ),
+    }
+    executed_pairs: list[tuple[str, str]] = []
+
+    def _pair_runner(request):
+        executed_pairs.append((request.t1_release, request.t2_release))
+        response = _bandon_pair_response(
+            settings,
+            request,
+            releases=releases,
+            geojson=automated_layers[request.t2_release],
+        )
+        save_cached_response(settings, response.summary.request_hash, response)
+        return response
+
+    first_run = run_temporal_project(
+        project.project_id,
+        settings=settings,
+        pair_runner=_pair_runner,
+        execution_config=_bandon_config(),
+    )
+    assert first_run.success is True
+    completed_pair_hash = first_run.project.milestones[1].pair_request_hash
+    assert completed_pair_hash is not None
+    assert (
+        settings.temporal_projects_dir
+        / project.project_id
+        / "milestones"
+        / "WB_2025_R01"
+        / "additions.geojson"
+    ).is_file()
+    shutil.rmtree(settings.request_cache_dir / completed_pair_hash)
+
+    saved_project = get_temporal_project(project.project_id, settings)
+    saved_project.milestones.append(TemporalMilestone(release_identifier="WB_2026_R01"))
+    save_temporal_project(saved_project, settings)
+
+    executed_pairs.clear()
+    second_run = run_temporal_project(project.project_id, settings=settings, pair_runner=_pair_runner)
+
+    assert second_run.success is True
+    assert executed_pairs == [("WB_2025_R01", "WB_2026_R01")]
+    assert second_run.project.milestones[1].pair_request_hash == completed_pair_hash
+    assert second_run.project.milestones[1].status == "complete"
+    assert second_run.project.milestones[2].pair_request_hash is not None
+
+
+def test_run_temporal_project_generates_buffers_from_file_backed_additions_after_cache_cleanup(monkeypatch, tmp_path) -> None:
+    settings = Settings(runtime_cache_dir=tmp_path)
+    releases = _sample_releases(settings)
+    monkeypatch.setattr("src.services.temporal_projects.list_releases", lambda _: releases)
+    monkeypatch.setattr("src.services.temporal_projects.TEMPORAL_VECTOR_TILE_METADATA_THRESHOLD_BYTES", 1)
+    project = save_temporal_project(
+        TemporalProject(
+            project_id="file-backed-buffer-repair",
+            name="File Backed Buffer Repair",
+            aoi_geojson=_sample_project().aoi_geojson,
+            milestones=[
+                {"release_identifier": "WB_2024_R01"},
+                {"release_identifier": "WB_2025_R01"},
+            ],
+            created_at="2026-04-20T00:00:00Z",
+            updated_at="2026-04-20T00:00:00Z",
+        ),
+        settings,
+    )
+    executed_pairs: list[tuple[str, str]] = []
+
+    def _pair_runner(request):
+        executed_pairs.append((request.t1_release, request.t2_release))
+        response = _bandon_pair_response(
+            settings,
+            request,
+            releases=releases,
+            geojson=_feature_collection(
+                [[(-6.9998, 33.0002), (-6.9994, 33.0002), (-6.9994, 33.0006), (-6.9998, 33.0006)]]
+            ),
+        )
+        save_cached_response(settings, response.summary.request_hash, response)
+        return response
+
+    first_run = run_temporal_project(
+        project.project_id,
+        settings=settings,
+        pair_runner=_pair_runner,
+        execution_config=_bandon_config(),
+    )
+    completed_pair_hash = first_run.project.milestones[1].pair_request_hash
+    assert completed_pair_hash is not None
+
+    milestone_dir = settings.temporal_projects_dir / project.project_id / "milestones" / "WB_2025_R01"
+    assert (milestone_dir / "additions.geojson").is_file()
+    for filename in (
+        "building_change_buffer_10m.geojson",
+        "building_change_buffer_15m.geojson",
+        "building_change_buffer_20m.geojson",
+    ):
+        (milestone_dir / filename).unlink()
+    shutil.rmtree(settings.request_cache_dir / completed_pair_hash)
+
+    executed_pairs.clear()
+    second_run = run_temporal_project(
+        project.project_id,
+        settings=settings,
+        pair_runner=lambda request: pytest.fail("file-backed refresh must not rerun inference"),
+    )
+
+    assert second_run.success is True
+    assert executed_pairs == []
+    for filename in (
+        "building_change_buffer_10m.geojson",
+        "building_change_buffer_15m.geojson",
+        "building_change_buffer_20m.geojson",
+    ):
+        assert (milestone_dir / filename).is_file()
 
 
 def test_temporal_project_rejects_removed_latest_source() -> None:
@@ -1215,7 +1365,7 @@ def test_temporal_growth_envelope_is_clipped_to_aoi_and_not_smaller_than_blocks(
     assert block_geometry.difference(envelope_geometry).area <= 1e-14
 
 
-def test_temporal_growth_envelope_builds_one_no_hole_concave_polygon_covering_cumulative_union() -> None:
+def test_temporal_growth_envelope_covers_cumulative_union_without_holes() -> None:
     aoi_geojson = _sample_project().aoi_geojson
     assert aoi_geojson is not None
 
@@ -1232,20 +1382,19 @@ def test_temporal_growth_envelope_builds_one_no_hole_concave_polygon_covering_cu
         aoi_geojson=aoi_geojson,
         release_identifier="WB_2026_R01",
         release_date="2026-01-01",
-        envelope_hull_ratio=0.12,
     )
 
     cumulative_geometry = _geometry(cumulative_geojson)
     envelope_geometry = _geometry(envelope_geojson)
 
     assert not envelope_df.empty
-    assert len(envelope_geojson["features"]) == 1
-    assert envelope_geometry.geom_type == "Polygon"
+    assert len(envelope_geojson["features"]) >= 1
+    assert envelope_geometry.geom_type in {"Polygon", "MultiPolygon"}
     assert not _has_holes(envelope_geometry)
     assert cumulative_geometry.difference(envelope_geometry).area <= 1e-14
-    assert envelope_geometry.area > cumulative_geometry.area
+    assert envelope_geometry.area + 1e-14 >= cumulative_geometry.area
     assert envelope_geojson["features"][0]["properties"]["kind"] == "cumulative_growth_envelope"
-    assert envelope_geojson["features"][0]["properties"]["envelope_method"] in {"concave_hull", "convex_hull_fallback"}
+    assert envelope_geojson["features"][0]["properties"]["envelope_method"] in {"source_union", "buffered_union"}
 
 
 def test_reference_imagery_hydration_falls_back_to_png_data_url_from_image_path(tmp_path) -> None:
@@ -1423,15 +1572,10 @@ def test_four_milestone_run_keeps_a_single_saved_temporal_project_entry(monkeypa
 
     assert response.success is True
     final_cumulative_geojson = response.project.milestones[-1].cumulative_union_geojson
-    final_convex_hull_geojson = response.project.milestones[-1].cumulative_convex_hull_geojson
     final_cumulative = _geometry(final_cumulative_geojson)
-    final_convex_hull = _geometry(final_convex_hull_geojson)
-    assert final_convex_hull.geom_type == "Polygon"
-    assert not _has_holes(final_convex_hull)
-    assert final_cumulative.difference(final_convex_hull).area <= 1e-14
+    assert not final_cumulative.is_empty
     milestone_dir = settings.temporal_projects_dir / project.project_id / "milestones" / "WB_2026_R01"
     assert not (milestone_dir / "cumulative_union.geojson").exists()
-    assert not (milestone_dir / "cumulative_convex_hull.geojson").exists()
     summaries = list_temporal_projects(settings)
     assert [summary.project_id for summary in summaries] == ["temporal-hay-hassani"]
     assert summaries[0].display_name == "Temporal mosaic · Hay Hassani"

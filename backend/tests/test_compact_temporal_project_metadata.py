@@ -103,7 +103,6 @@ def _make_project(runtime: Path, *, external_additions: bool = False) -> Path:
                 "effective_footprint_geojson": None,
                 "buffer_layers_geojson": {},
                 "cumulative_union_geojson": None,
-                "cumulative_convex_hull_geojson": None,
                 "cumulative_growth_blocks_geojson": None,
                 "cumulative_growth_envelope_geojson": None,
                 "reference_imagery": None,
@@ -127,7 +126,6 @@ def _make_project(runtime: Path, *, external_additions: bool = False) -> Path:
                 "effective_footprint_geojson": None,
                 "buffer_layers_geojson": {"10m": _feature_collection(2)},
                 "cumulative_union_geojson": _feature_collection(2),
-                "cumulative_convex_hull_geojson": None,
                 "cumulative_growth_blocks_geojson": None,
                 "cumulative_growth_envelope_geojson": None,
                 "reference_imagery": {

@@ -884,10 +884,6 @@ def _feature_collection_from_geometry(geometry: BaseGeometry) -> dict[str, Any]:
     }
 
 
-def _feature_collection_from_convex_hull(geometry: BaseGeometry) -> dict[str, Any]:
-    return _feature_collection_from_geometry(geometry.convex_hull)
-
-
 def _normalize_project_geometry(payload: dict[str, Any], aoi_geometry: BaseGeometry | None = None) -> dict[str, Any]:
     geometry = _geometry_from_geojson(payload)
     if geometry.is_empty:
@@ -955,7 +951,7 @@ def _build_metrics(
     )
 
 
-def _summary_backed_metrics(response: RunResponse, additions_geojson: dict[str, Any]) -> TemporalMilestoneMetrics:
+def _artifact_backed_metrics(response: RunResponse, additions_geojson: dict[str, Any]) -> TemporalMilestoneMetrics:
     summary = response.summary
     feature_count = _feature_count_from_geojson(additions_geojson)
     if summary is None:
@@ -1084,6 +1080,62 @@ def _should_advertise_vector_tiles(feature_count: int | None, size_bytes: int | 
     ) >= TEMPORAL_VECTOR_TILE_METADATA_THRESHOLD_BYTES
 
 
+def _is_large_temporal_payload(payload: dict[str, Any] | None, settings: Settings | None) -> bool:
+    if settings is None or payload is None:
+        return False
+    return _feature_count_from_geojson(payload) > settings.temporal_derived_geometry_max_features
+
+
+def _response_additions_feature_count(response: RunResponse) -> int:
+    additions_geojson = response.new_buildings_geojson or response.change_polygons_geojson or _empty_feature_collection()
+    return _feature_count_from_geojson(additions_geojson)
+
+
+def _milestone_large_result_feature_count(milestone: TemporalMilestone, settings: Settings) -> int:
+    counts = [
+        _feature_count_from_geojson(milestone.additions_geojson),
+        _feature_count_from_geojson(milestone.automated_additions_geojson),
+        _feature_count_from_geojson(milestone.cumulative_union_geojson),
+    ]
+    if milestone.metrics is not None:
+        counts.extend(
+            [
+                milestone.metrics.additions_feature_count,
+                milestone.metrics.effective_feature_count,
+            ]
+        )
+    for artifact in milestone.artifacts:
+        if artifact.key in TEMPORAL_ALLOWED_ARTIFACT_KEYS:
+            counts.append(artifact.feature_count or 0)
+    feature_count = max(counts or [0])
+    return feature_count if feature_count > settings.temporal_derived_geometry_max_features else 0
+
+
+def _strip_large_inline_temporal_result_payloads(project: TemporalProject, settings: Settings) -> int:
+    stripped_count = 0
+    field_names = (
+        "automated_additions_geojson",
+        "automated_candidate_footprint_geojson",
+        "effective_footprint_geojson",
+        "cumulative_union_geojson",
+        "cumulative_growth_blocks_geojson",
+        "cumulative_growth_envelope_geojson",
+    )
+    for milestone in project.milestones:
+        for field_name in field_names:
+            payload = getattr(milestone, field_name, None)
+            if _is_large_temporal_payload(payload, settings):
+                setattr(milestone, field_name, None)
+                stripped_count += 1
+    if stripped_count:
+        logger.info(
+            "TEMPORAL_PROJECT_LARGE_INLINE_PAYLOADS_STRIPPED projectId=%s strippedPayloads=%s",
+            project.project_id,
+            stripped_count,
+        )
+    return stripped_count
+
+
 def _artifact_payload_for_milestone(milestone: TemporalMilestone, field_path: str) -> dict[str, Any] | None:
     if field_path.startswith("buffer_layers_geojson."):
         key = field_path.split(".", 1)[1]
@@ -1188,6 +1240,16 @@ def _externalize_temporal_artifact_payloads_in_payload(
                         empty_baseline_artifacts_removed += 1
                 else:
                     artifacts_by_key[artifact_key] = artifact_entry
+                if size_bytes >= TEMPORAL_VECTOR_TILE_METADATA_THRESHOLD_BYTES:
+                    logger.info(
+                        "TEMPORAL_LARGE_ARTIFACT_EXTERNALIZED projectId=%s releaseIdentifier=%s artifactKey=%s path=%s sizeBytes=%s tilejsonUrl=%s source=payload_metadata",
+                        project_id,
+                        release_identifier,
+                        artifact_key,
+                        artifact_path,
+                        size_bytes,
+                        artifact_entry.get("tilejson_url"),
+                    )
             _clear_artifact_payload_for_milestone_payload(milestone, field_path)
         milestone["artifacts"] = list(artifacts_by_key.values())
     qgis_artifact_count = 0
@@ -1253,6 +1315,16 @@ def _externalize_temporal_artifact_payloads_in_project(
                         empty_baseline_artifacts_removed += 1
                 else:
                     artifacts_by_key[artifact_key] = artifact_entry
+                if size_bytes >= TEMPORAL_VECTOR_TILE_METADATA_THRESHOLD_BYTES:
+                    logger.info(
+                        "TEMPORAL_LARGE_ARTIFACT_EXTERNALIZED projectId=%s releaseIdentifier=%s artifactKey=%s path=%s sizeBytes=%s tilejsonUrl=%s source=project_metadata",
+                        project.project_id,
+                        milestone.release_identifier,
+                        artifact_key,
+                        artifact_path,
+                        size_bytes,
+                        artifact_entry.tilejson_url,
+                    )
             _clear_artifact_payload_for_milestone(milestone, field_path)
         milestone.artifacts = list(artifacts_by_key.values())
     qgis_artifact_count = 0
@@ -2146,6 +2218,7 @@ def _persist_temporal_project_reference_repair(project: TemporalProject, setting
         project=project,
         project_dir=project_dir,
     )
+    _strip_large_inline_temporal_result_payloads(project, settings)
     if externalized_count or empty_baseline_artifacts_removed:
         logger.info(
             "TEMPORAL_PROJECT_METADATA_PAYLOAD_EXTERNALIZED projectId=%s source=reference_repair externalizedArtifacts=%s emptyBaselineArtifactsRemoved=%s",
@@ -3526,6 +3599,19 @@ def _hydrate_temporal_layer_artifacts(project: TemporalProject, settings: Settin
                 milestone.release_identifier,
                 filename,
             )
+            try:
+                candidate_size = candidate.stat().st_size
+            except OSError:
+                candidate_size = None
+            if candidate_size is not None and candidate_size >= TEMPORAL_VECTOR_TILE_METADATA_THRESHOLD_BYTES:
+                logger.info(
+                    "TEMPORAL_ARTIFACT_HYDRATION_SKIPPED projectId=%s releaseIdentifier=%s artifactKey=%s reason=large_file_backed_artifact sizeBytes=%s",
+                    project.project_id,
+                    milestone.release_identifier,
+                    artifact_key,
+                    candidate_size,
+                )
+                continue
             payload = _load_geojson_file(candidate)
             if not isinstance(payload, dict) or payload.get("type") != "FeatureCollection":
                 continue
@@ -3534,6 +3620,39 @@ def _hydrate_temporal_layer_artifacts(project: TemporalProject, settings: Settin
             else:
                 setattr(milestone, field_path, payload)
     return project
+
+
+def _load_file_backed_temporal_artifact(
+    *,
+    project: TemporalProject,
+    project_dir: Path,
+    milestone: TemporalMilestone,
+    artifact_key: str,
+    filename: str,
+) -> dict[str, Any] | None:
+    candidate_paths = [
+        Path(artifact.path)
+        for artifact in milestone.artifacts
+        if artifact.key == artifact_key and artifact.path
+    ]
+    candidate_paths.append(_artifact_path_for_milestone(project_dir, milestone.release_identifier, filename))
+    seen_paths: set[Path] = set()
+    for candidate_path in candidate_paths:
+        if candidate_path in seen_paths:
+            continue
+        seen_paths.add(candidate_path)
+        payload = _load_geojson_file(candidate_path)
+        if isinstance(payload, dict) and payload.get("type") == "FeatureCollection":
+            logger.info(
+                "TEMPORAL_OUTPUT_ARTIFACT_FOUND projectId=%s releaseIdentifier=%s artifactKey=%s source=file_backed_input path=%s featureCount=%s",
+                project.project_id,
+                milestone.release_identifier,
+                artifact_key,
+                candidate_path,
+                _feature_count_from_geojson(payload),
+            )
+            return payload
+    return None
 
 
 def _repair_temporal_metrics_payload(
@@ -3603,6 +3722,7 @@ def _hydrate_milestone_buffer_layers(project: TemporalProject, settings: Setting
             continue
 
         existing_layers: dict[str, dict[str, Any]] = {}
+        existing_file_backed_layer_keys: set[str] = set()
         for key, filename in (
             ("10m", "building_change_buffer_10m.geojson"),
             ("15m", "building_change_buffer_15m.geojson"),
@@ -3617,6 +3737,21 @@ def _hydrate_milestone_buffer_layers(project: TemporalProject, settings: Setting
                     key,
                     artifact_path,
                 )
+                continue
+            try:
+                artifact_size = artifact_path.stat().st_size
+            except OSError:
+                artifact_size = None
+            if artifact_size is not None and artifact_size >= TEMPORAL_VECTOR_TILE_METADATA_THRESHOLD_BYTES:
+                logger.info(
+                    "TEMPORAL_OUTPUT_ARTIFACT_FOUND projectId=%s releaseIdentifier=%s artifactKey=building_change_buffer_%s source=milestone_file_backed path=%s sizeBytes=%s",
+                    project.project_id,
+                    milestone.release_identifier,
+                    key,
+                    artifact_path,
+                    artifact_size,
+                )
+                existing_file_backed_layer_keys.add(key)
                 continue
             try:
                 payload = json.loads(artifact_path.read_text(encoding="utf-8"))
@@ -3642,9 +3777,18 @@ def _hydrate_milestone_buffer_layers(project: TemporalProject, settings: Setting
                 )
         if existing_layers:
             milestone.buffer_layers_geojson = existing_layers
+        if set(existing_layers) | existing_file_backed_layer_keys == {"10m", "15m", "20m"}:
             continue
 
         additions = milestone.additions_geojson
+        if not _has_features(additions):
+            additions = _load_file_backed_temporal_artifact(
+                project=project,
+                project_dir=project_dir,
+                milestone=milestone,
+                artifact_key="additions",
+                filename="additions.geojson",
+            )
         if not _has_features(additions):
             logger.info(
                 "TEMPORAL_OUTPUT_ARTIFACT_MISSING projectId=%s releaseIdentifier=%s artifactKey=building_change_buffer reason=%s",
@@ -3655,25 +3799,16 @@ def _hydrate_milestone_buffer_layers(project: TemporalProject, settings: Setting
             continue
 
         additions_feature_count = _feature_count_from_geojson(additions)
-        max_features = settings.temporal_derived_geometry_max_features
-        if additions_feature_count > max_features:
-            warning = (
-                "Skipped derived buffer regeneration for this milestone because the completed request "
-                f"contains {additions_feature_count} features, above the configured limit of {max_features}."
-            )
-            _append_milestone_warning_once(milestone, warning)
-            logger.warning(
-                "TEMPORAL_OUTPUT_ARTIFACT_MISSING projectId=%s releaseIdentifier=%s artifactKey=building_change_buffer reason=feature_limit_exceeded featureCount=%s maxFeatures=%s",
-                project.project_id,
-                milestone.release_identifier,
-                additions_feature_count,
-                max_features,
-            )
-            continue
 
         previous_index = max(project.milestones.index(milestone) - 1, 0)
         previous_milestone = project.milestones[previous_index] if project.milestones else milestone
         try:
+            logger.info(
+                "TEMPORAL_BUFFER_GENERATION_START projectId=%s releaseIdentifier=%s sourceFeatureCount=%s distances=10m,15m,20m",
+                project.project_id,
+                milestone.release_identifier,
+                additions_feature_count,
+            )
             built_layers = build_change_buffer_layers(
                 additions,
                 distances_m=[10, 15, 20],
@@ -3718,6 +3853,12 @@ def _hydrate_milestone_buffer_layers(project: TemporalProject, settings: Setting
             )
         if generated_layers:
             milestone.buffer_layers_geojson = generated_layers
+            logger.info(
+                "TEMPORAL_BUFFER_GENERATION_DONE projectId=%s releaseIdentifier=%s generatedLayers=%s",
+                project.project_id,
+                milestone.release_identifier,
+                ",".join(sorted(generated_layers.keys())),
+            )
 
     logger.info(
         "TEMPORAL_OUTPUT_LAYER_AVAILABILITY_BUILT projectId=%s milestoneCount=%s",
@@ -3736,13 +3877,16 @@ def _refresh_temporal_derived_geometry_layers(project: TemporalProject, settings
         additions_feature_count = _feature_count_from_geojson(milestone.additions_geojson)
         cumulative_feature_count = _feature_count_from_geojson(milestone.cumulative_union_geojson)
         if max_features is not None and max(additions_feature_count, cumulative_feature_count) > max_features:
-            warning = (
-                "Skipped derived temporal geometry refresh for this milestone because the completed request "
-                f"contains {max(additions_feature_count, cumulative_feature_count)} features, above the configured limit of {max_features}."
+            logger.info(
+                "TEMPORAL_DERIVED_GEOMETRY_REFRESH_SKIPPED projectId=%s releaseIdentifier=%s reason=optional_large_result_refresh_skipped additionsFeatureCount=%s cumulativeFeatureCount=%s maxInlineDerivedFeatures=%s",
+                project.project_id,
+                milestone.release_identifier,
+                additions_feature_count,
+                cumulative_feature_count,
+                max_features,
             )
-            _append_milestone_warning_once(milestone, warning)
-            logger.warning(
-                "TEMPORAL_DERIVED_GEOMETRY_REFRESH_SKIPPED projectId=%s releaseIdentifier=%s reason=feature_limit_exceeded additionsFeatureCount=%s cumulativeFeatureCount=%s maxFeatures=%s",
+            logger.info(
+                "TEMPORAL_OPTIONAL_EXPORT_SKIPPED_LARGE_RESULT projectId=%s releaseIdentifier=%s artifactKey=temporal_derived_geometry reason=inline_growth_layers_too_large additionsFeatureCount=%s cumulativeFeatureCount=%s maxInlineDerivedFeatures=%s",
                 project.project_id,
                 milestone.release_identifier,
                 additions_feature_count,
@@ -3817,6 +3961,7 @@ def _refresh_project_bundle(project: TemporalProject, settings: Settings) -> Tem
     project = _hydrate_temporal_layer_artifacts(project, settings)
     project = _hydrate_milestone_buffer_layers(project, settings)
     project = _refresh_temporal_derived_geometry_layers(project, settings)
+    _strip_large_inline_temporal_result_payloads(project, settings)
     logger.info(
         "TEMPORAL_PROJECT_PUBLICATION_USING_EXISTING_FINALIZER projectId=%s finalizer=_refresh_project_bundle",
         project.project_id,
@@ -3836,6 +3981,25 @@ def _refresh_project_bundle(project: TemporalProject, settings: Settings) -> Tem
             ("building_change_buffer_20m.geojson", "Building-change buffer 20 m", milestone.buffer_layers_geojson.get("20m")),
         ):
             artifact_path = _artifact_path_for_milestone(project_dir, milestone.release_identifier, name)
+            if payload is None:
+                if artifact_path.is_file() and artifact_path.stat().st_size > 0:
+                    logger.info(
+                        "TEMPORAL_PROJECT_PUBLICATION_LAYER_REGISTERED projectId=%s releaseIdentifier=%s filename=%s path=%s source=existing_file_backed sizeBytes=%s",
+                        project.project_id,
+                        milestone.release_identifier,
+                        name,
+                        artifact_path,
+                        artifact_path.stat().st_size,
+                    )
+                    milestone_artifacts.append(
+                        TemporalArtifactEntry(
+                            name=f"{milestone.release_identifier}_{name.replace('.geojson', '')}",
+                            path=str(artifact_path),
+                            media_type="application/geo+json",
+                            description=description,
+                        )
+                    )
+                continue
             written_path = _write_geojson(artifact_path, payload)
             if written_path:
                 feature_count = len(payload.get("features", [])) if isinstance(payload, dict) and isinstance(payload.get("features"), list) else 0
@@ -4598,12 +4762,6 @@ def _load_project(
     initial_project_payload = json.dumps(project.model_dump(mode="json"), sort_keys=True) if write_side_effects else None
     should_compact_project_json = _strip_redundant_reference_imagery_data_urls(project) if write_side_effects else False
     layer_availability_started_at = time.perf_counter()
-    if refresh_derived_layers:
-        for milestone in project.milestones:
-            if milestone.cumulative_convex_hull_geojson is None and milestone.cumulative_union_geojson is not None:
-                milestone.cumulative_convex_hull_geojson = _feature_collection_from_convex_hull(
-                    _geometry_from_geojson(milestone.cumulative_union_geojson)
-                )
     if hydrate_reference_imagery:
         project = _hydrate_reference_imagery(project, settings)
     if hydrate_buffer_layers:
@@ -4617,6 +4775,7 @@ def _load_project(
         round((time.perf_counter() - layer_availability_started_at) * 1000, 2),
     )
     metadata_externalized = False
+    stripped_large_payloads = 0
     if write_side_effects:
         project_dir = _resolve_project_dir(settings, project.project_id, project.project_dir)
         project.project_dir = str(project_dir)
@@ -4624,6 +4783,7 @@ def _load_project(
             project=project,
             project_dir=project_dir,
         )
+        stripped_large_payloads = _strip_large_inline_temporal_result_payloads(project, settings)
         metadata_externalized = bool(externalized_count or empty_baseline_artifacts_removed)
         if metadata_externalized:
             logger.info(
@@ -4635,6 +4795,7 @@ def _load_project(
     final_project_payload = json.dumps(project.model_dump(mode="json"), sort_keys=True) if write_side_effects else None
     if write_side_effects and (
         metadata_externalized
+        or stripped_large_payloads
         or should_compact_project_json
         or stripped_fields
         or final_project_payload != initial_project_payload
@@ -4665,6 +4826,7 @@ def _save_project(project: TemporalProject, settings: Settings) -> TemporalProje
     project = _hydrate_milestone_buffer_layers(project, settings)
     project = _refresh_temporal_derived_geometry_layers(project, settings)
     _strip_redundant_reference_imagery_data_urls(project)
+    _strip_large_inline_temporal_result_payloads(project, settings)
     project.updated_at = _utc_now_iso()
     project_dir = _resolve_project_dir(settings, project.project_id, project.project_dir)
     project.project_dir = str(project_dir)
@@ -5072,13 +5234,30 @@ def _plan_temporal_milestone_runs(
             if expected_request_hash is not None
             else None
         )
+        artifact_backed_reusable = (
+            expected_request_hash is not None
+            and milestone.pair_request_hash == expected_request_hash
+            and _milestone_has_reusable_additions_artifact(
+                project=project,
+                milestone=milestone,
+                settings=settings,
+            )
+        )
         reusable = (
             not validation_response.blocking_errors
             and milestone.status == "complete"
             and expected_request_hash is not None
             and milestone.pair_request_hash == expected_request_hash
-            and cached_response is not None
+            and (cached_response is not None or artifact_backed_reusable)
         )
+        if artifact_backed_reusable and cached_response is None:
+            logger.info(
+                "TEMPORAL_PAIR_REUSE_FILE_BACKED_ARTIFACT projectId=%s releaseIdentifier=%s requestHash=%s populatedRequestHash=%s",
+                project.project_id,
+                milestone.release_identifier,
+                expected_request_hash,
+                milestone.populated_request_hash,
+            )
         plan.append(
             TemporalMilestonePlanEntry(
                 index=index,
@@ -5109,6 +5288,7 @@ def _apply_pair_response_to_milestone(
     populated_request_hash: str | None = None,
     request_workspace_path: str | None = None,
     derive_spatial_layers: bool = True,
+    file_backed_additions: bool = False,
 ) -> None:
     automated_additions_geojson = (
         response.new_buildings_geojson
@@ -5120,7 +5300,6 @@ def _apply_pair_response_to_milestone(
     milestone.pair_request_hash = request_hash or response_request_hash
     milestone.populated_request_hash = populated_request_hash or response_request_hash
     milestone.request_workspace_path = request_workspace_path
-    milestone.automated_additions_geojson = automated_additions_geojson
     milestone.automated_building_blocks_geojson = response.building_blocks_geojson or _empty_feature_collection()
     milestone.buffer_layers_geojson = response.buffer_layers_geojson
     milestone.warnings = [
@@ -5129,25 +5308,26 @@ def _apply_pair_response_to_milestone(
         if isinstance(warning, str)
     ]
     if derive_spatial_layers:
+        milestone.automated_additions_geojson = automated_additions_geojson
         automated_additions_geometry = _geometry_from_geojson(automated_additions_geojson).intersection(aoi_geometry).buffer(0)
         automated_candidate_geometry = unary_union([previous_cumulative, automated_additions_geometry]).intersection(aoi_geometry).buffer(0)
         milestone.automated_candidate_footprint_geojson = _feature_collection_from_geometry(automated_candidate_geometry)
         return
 
-    milestone.automated_candidate_footprint_geojson = automated_additions_geojson
-    milestone.additions_geojson = automated_additions_geojson
-    milestone.effective_footprint_geojson = automated_additions_geojson
-    milestone.cumulative_union_geojson = automated_additions_geojson
-    milestone.cumulative_convex_hull_geojson = _empty_feature_collection()
+    milestone.automated_additions_geojson = None
+    milestone.automated_candidate_footprint_geojson = None
+    milestone.additions_geojson = None if file_backed_additions else automated_additions_geojson
+    milestone.effective_footprint_geojson = None
+    milestone.cumulative_union_geojson = None
     milestone.effective_building_blocks_geojson = response.building_blocks_geojson or _empty_feature_collection()
     milestone.cumulative_growth_blocks_geojson = response.building_blocks_geojson or _empty_feature_collection()
     milestone.cumulative_growth_envelope_geojson = _buffer_layer_geojson(response.buffer_layers_geojson) or _empty_feature_collection()
-    milestone.metrics = _summary_backed_metrics(response, automated_additions_geojson)
+    milestone.metrics = _artifact_backed_metrics(response, automated_additions_geojson)
     milestone.status = "complete"
     milestone.error_message = None
 
 
-def _should_use_summary_backed_temporal_finalization(response: RunResponse, settings: Settings) -> bool:
+def _should_skip_inline_temporal_derived_geometry(response: RunResponse, settings: Settings) -> bool:
     additions_geojson = response.new_buildings_geojson or response.change_polygons_geojson or _empty_feature_collection()
     feature_count = _feature_count_from_geojson(additions_geojson)
     return feature_count > settings.temporal_derived_geometry_max_features
@@ -5177,6 +5357,24 @@ def _published_milestone_feature_counts(project_dir: Path, release_identifier: s
         features = payload.get("features") if isinstance(payload, dict) else None
         counts[filename] = len(features) if isinstance(features, list) else -1
     return counts
+
+
+def _milestone_has_reusable_additions_artifact(
+    *,
+    project: TemporalProject,
+    milestone: TemporalMilestone,
+    settings: Settings,
+) -> bool:
+    if milestone.status != "complete" or milestone.metrics is None or milestone.metrics.additions_feature_count <= 0:
+        return False
+    project_dir = _resolve_project_dir(settings, project.project_id, project.project_dir)
+    candidate_paths = [
+        Path(artifact.path)
+        for artifact in milestone.artifacts
+        if artifact.key == "additions" and artifact.path
+    ]
+    candidate_paths.append(_artifact_path_for_milestone(project_dir, milestone.release_identifier, "additions.geojson"))
+    return any(path.is_file() and path.stat().st_size > 0 for path in candidate_paths)
 
 
 def _ensure_existing_milestone_artifacts_registered(
@@ -5369,7 +5567,42 @@ def publish_completed_tiled_request(
                 if target_index == 0
                 else _geometry_from_geojson(project.milestones[target_index - 1].cumulative_union_geojson)
             )
-            summary_backed_finalization = _should_use_summary_backed_temporal_finalization(response, settings)
+            inline_derived_geometry_skipped = _should_skip_inline_temporal_derived_geometry(response, settings)
+            if inline_derived_geometry_skipped:
+                additions_feature_count = _response_additions_feature_count(response)
+                logger.info(
+                    "TEMPORAL_LARGE_RESULT_POLICY projectId=%s requestId=%s releaseIdentifier=%s featureCount=%s maxInlineDerivedFeatures=%s policy=file_backed_artifacts_continue_without_inline_derived_geometry",
+                    project.project_id,
+                    request_id,
+                    target_release,
+                    additions_feature_count,
+                    settings.temporal_derived_geometry_max_features,
+                )
+            file_backed_additions = False
+            if inline_derived_geometry_skipped:
+                source_additions_path = request_dir / "building_change_polygons.geojson"
+                target_additions_path = _artifact_path_for_milestone(project_dir, target_release, "additions.geojson")
+                if source_additions_path.is_file():
+                    target_additions_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source_additions_path, target_additions_path)
+                    file_backed_additions = True
+                    logger.info(
+                        "TEMPORAL_LARGE_ADDITIONS_PROMOTED projectId=%s requestId=%s releaseIdentifier=%s source=%s target=%s sizeBytes=%s",
+                        project.project_id,
+                        request_id,
+                        target_release,
+                        source_additions_path,
+                        target_additions_path,
+                        target_additions_path.stat().st_size,
+                    )
+                else:
+                    logger.warning(
+                        "TEMPORAL_LARGE_ADDITIONS_PROMOTION_SKIPPED projectId=%s requestId=%s releaseIdentifier=%s reason=missing_request_geojson source=%s",
+                        project.project_id,
+                        request_id,
+                        target_release,
+                        source_additions_path,
+                    )
             _apply_pair_response_to_milestone(
                 project.milestones[target_index],
                 response=response,
@@ -5378,14 +5611,10 @@ def publish_completed_tiled_request(
                 request_hash=request_id,
                 populated_request_hash=response.summary.request_hash if response.summary is not None else request_id,
                 request_workspace_path=str(request_result_dir(settings, response.summary.request_hash if response.summary is not None else request_id)),
-                derive_spatial_layers=not summary_backed_finalization,
+                derive_spatial_layers=not inline_derived_geometry_skipped,
+                file_backed_additions=file_backed_additions,
             )
-            if summary_backed_finalization:
-                _append_milestone_warning_once(
-                    project.milestones[target_index],
-                    "Used summary-backed temporal finalization because derived geometry generation exceeded the configured feature limit.",
-                )
-            else:
+            if not inline_derived_geometry_skipped:
                 project = _recompute_project_outputs_from_index(project, aoi_geometry, target_index, settings=settings)
             project.updated_at = _utc_now_iso()
             logger.info(
@@ -5419,7 +5648,7 @@ def publish_completed_tiled_request(
             "project_summary": str(project_dir / "project_summary.json"),
             "artifact_counts": artifact_counts,
             "export_bundle_path": response.downloadable_zip_path,
-            "summary_backed_finalization": summary_backed_finalization if "summary_backed_finalization" in locals() else False,
+            "inline_derived_geometry_skipped": inline_derived_geometry_skipped if "inline_derived_geometry_skipped" in locals() else False,
         }
         logger.info(
             "TEMPORAL_PROJECT_PUBLICATION_DONE projectId=%s requestId=%s targetRelease=%s artifactCount=%s durationMs=%s",
@@ -5562,7 +5791,6 @@ def _cached_run_project(settings: Settings, request_hash: str) -> TemporalProjec
         effective_building_blocks_geojson=_empty_feature_collection(),
         effective_footprint_geojson=_empty_feature_collection(),
         cumulative_union_geojson=_empty_feature_collection(),
-        cumulative_convex_hull_geojson=_empty_feature_collection(),
         cumulative_growth_blocks_geojson=_empty_feature_collection(),
         cumulative_growth_envelope_geojson=_empty_feature_collection(),
         metrics=TemporalMilestoneMetrics(),
@@ -5583,7 +5811,6 @@ def _cached_run_project(settings: Settings, request_hash: str) -> TemporalProjec
         effective_building_blocks_geojson=building_blocks_geojson,
         effective_footprint_geojson=changes_geojson,
         cumulative_union_geojson=changes_geojson,
-        cumulative_convex_hull_geojson=_feature_collection_from_convex_hull(_geometry_from_geojson(changes_geojson)),
         cumulative_growth_blocks_geojson=building_blocks_geojson,
         cumulative_growth_envelope_geojson=buffer_envelope_geojson,
         reference_imagery=None,
@@ -5793,7 +6020,7 @@ def _timeline_requests(
                 else None
             ),
         )
-        validation_response, _ = validate_request(
+        validation_response, prepared = validate_request(
             validation_request,
             releases=releases,
             settings=settings,
@@ -5820,7 +6047,25 @@ def _timeline_requests(
             f"{pair_source_release_id} -> {milestone.release_identifier}: {message}"
             for message in validation_response.warnings
         )
-        milestone.status = "validated" if not validation_response.blocking_errors else "error"
+        expected_request_hash = prepared.request_hash if prepared is not None else None
+        completed_pair_still_reusable = (
+            not validation_response.blocking_errors
+            and milestone.status == "complete"
+            and expected_request_hash is not None
+            and milestone.pair_request_hash == expected_request_hash
+            and (
+                _load_cached_run_response(settings, expected_request_hash) is not None
+                or _milestone_has_reusable_additions_artifact(
+                    project=project,
+                    milestone=milestone,
+                    settings=settings,
+                )
+            )
+        )
+        if completed_pair_still_reusable:
+            milestone.status = "complete"
+        else:
+            milestone.status = "validated" if not validation_response.blocking_errors else "error"
         if not validation_response.blocking_errors:
             previous_successful_release_id = milestone.release_identifier
         previous_release_id = milestone.release_identifier
@@ -5995,9 +6240,8 @@ def _recompute_project_outputs_from_index(
         if max_features is not None and _feature_count_from_geojson(milestone.automated_additions_geojson) > max_features:
             additions_geojson = milestone.automated_additions_geojson or _empty_feature_collection()
             milestone.additions_geojson = additions_geojson
-            milestone.effective_footprint_geojson = additions_geojson
-            milestone.cumulative_union_geojson = additions_geojson
-            milestone.cumulative_convex_hull_geojson = _empty_feature_collection()
+            milestone.effective_footprint_geojson = None
+            milestone.cumulative_union_geojson = None
             milestone.effective_building_blocks_geojson = milestone.automated_building_blocks_geojson or _empty_feature_collection()
             milestone.cumulative_growth_blocks_geojson = milestone.automated_building_blocks_geojson or _empty_feature_collection()
             milestone.cumulative_growth_envelope_geojson = _buffer_layer_geojson(milestone.buffer_layers_geojson) or _empty_feature_collection()
@@ -6009,9 +6253,12 @@ def _recompute_project_outputs_from_index(
             if milestone.status != "error":
                 milestone.status = "complete"
                 milestone.error_message = None
-            _append_milestone_warning_once(
-                milestone,
-                "Skipped heavy temporal recompute for this milestone because the completed request exceeded the configured feature limit.",
+            logger.info(
+                "TEMPORAL_RECOMPUTE_OPTIONAL_DERIVED_SKIPPED projectId=%s releaseIdentifier=%s reason=large_artifact_backed_result featureCount=%s maxInlineDerivedFeatures=%s",
+                project.project_id,
+                milestone.release_identifier,
+                _feature_count_from_geojson(additions_geojson),
+                max_features,
             )
             previous_cumulative = GeometryCollection()
             continue
@@ -6046,7 +6293,6 @@ def _recompute_project_outputs_from_index(
             milestone.additions_geojson = None
             milestone.effective_footprint_geojson = None
             milestone.cumulative_union_geojson = None
-            milestone.cumulative_convex_hull_geojson = None
             milestone.effective_building_blocks_geojson = None
             milestone.cumulative_growth_blocks_geojson = None
             milestone.cumulative_growth_envelope_geojson = None
@@ -6058,7 +6304,6 @@ def _recompute_project_outputs_from_index(
         milestone.additions_geojson = _feature_collection_from_geometry(additions_geometry)
         milestone.effective_footprint_geojson = _feature_collection_from_geometry(effective_geometry)
         milestone.cumulative_union_geojson = _feature_collection_from_geometry(effective_geometry)
-        milestone.cumulative_convex_hull_geojson = _feature_collection_from_convex_hull(effective_geometry)
 
         if project.aoi_geojson is not None:
             _effective_blocks_df, effective_blocks_geojson = build_temporal_growth_blocks(
@@ -6332,11 +6577,21 @@ def run_temporal_project(
         return TemporalProjectRunResponse(success=True, project=project)
 
     previous_successful_release_identifier = project.milestones[dirty_start - 1].release_identifier if dirty_start > 0 else None
-    previous_cumulative = (
-        GeometryCollection()
-        if dirty_start == 0
-        else _geometry_from_geojson(project.milestones[dirty_start - 1].cumulative_union_geojson)
-    )
+    previous_cumulative = GeometryCollection()
+    if dirty_start > 0:
+        previous_milestone = project.milestones[dirty_start - 1]
+        if not _is_large_temporal_payload(previous_milestone.cumulative_union_geojson, settings):
+            previous_cumulative = _geometry_from_geojson(previous_milestone.cumulative_union_geojson)
+        previous_large_feature_count = _milestone_large_result_feature_count(previous_milestone, settings)
+        if previous_large_feature_count:
+            logger.info(
+                "TEMPORAL_PAIR_CONTINUE_AFTER_LARGE_RESULT projectId=%s previousRelease=%s nextRelease=%s featureCount=%s maxInlineDerivedFeatures=%s policy=use_file_backed_previous_outputs",
+                project.project_id,
+                previous_milestone.release_identifier,
+                project.milestones[dirty_start].release_identifier,
+                previous_large_feature_count,
+                settings.temporal_derived_geometry_max_features,
+            )
 
     releases = list_releases(settings)
     for index in range(dirty_start, len(project.milestones)):
@@ -6378,7 +6633,17 @@ def run_temporal_project(
             project.updated_at = _utc_now_iso()
             continue
 
-        summary_backed_finalization = _should_use_summary_backed_temporal_finalization(response, settings)
+        inline_derived_geometry_skipped = _should_skip_inline_temporal_derived_geometry(response, settings)
+        if inline_derived_geometry_skipped:
+            additions_feature_count = _response_additions_feature_count(response)
+            logger.info(
+                "TEMPORAL_LARGE_RESULT_POLICY projectId=%s releaseIdentifier=%s requestHash=%s featureCount=%s maxInlineDerivedFeatures=%s policy=file_backed_artifacts_continue_without_inline_derived_geometry",
+                project.project_id,
+                milestone.release_identifier,
+                prepared.request_hash,
+                additions_feature_count,
+                settings.temporal_derived_geometry_max_features,
+            )
         _apply_pair_response_to_milestone(
             milestone,
             response=response,
@@ -6389,14 +6654,9 @@ def run_temporal_project(
             request_workspace_path=str(request_result_dir(settings, response.summary.request_hash))
             if response.summary is not None
             else None,
-            derive_spatial_layers=not summary_backed_finalization,
+            derive_spatial_layers=not inline_derived_geometry_skipped,
         )
-        if summary_backed_finalization:
-            _append_milestone_warning_once(
-                milestone,
-                "Used summary-backed temporal finalization because derived geometry generation exceeded the configured feature limit.",
-            )
-        else:
+        if not inline_derived_geometry_skipped:
             project = _recompute_project_outputs_from_index(project, aoi_geometry, index, index, settings=settings)
         logger.info(
             "TEMPORAL_SUMMARY_SOURCE projectId=%s milestone=%s sourceRunId=%s changeThreshold=%s "
@@ -6418,15 +6678,20 @@ def run_temporal_project(
             milestone=persisted_milestone,
             settings=settings,
         )
-        if summary_backed_finalization and index < len(project.milestones) - 1:
-            message = (
-                "Temporal project partially finalized a large completed pair using summary-backed outputs; "
-                "remaining pairs were not run because cumulative derived geometry was intentionally bounded."
+        previous_cumulative = (
+            GeometryCollection()
+            if inline_derived_geometry_skipped or _is_large_temporal_payload(persisted_milestone.cumulative_union_geojson, settings)
+            else _geometry_from_geojson(persisted_milestone.cumulative_union_geojson)
+        )
+        if inline_derived_geometry_skipped and index + 1 < len(project.milestones):
+            logger.info(
+                "TEMPORAL_PAIR_CONTINUE_AFTER_LARGE_RESULT projectId=%s previousRelease=%s nextRelease=%s featureCount=%s maxInlineDerivedFeatures=%s policy=use_file_backed_previous_outputs",
+                project.project_id,
+                persisted_milestone.release_identifier,
+                project.milestones[index + 1].release_identifier,
+                _response_additions_feature_count(response),
+                settings.temporal_derived_geometry_max_features,
             )
-            project.warnings.append(message)
-            _write_temporal_project_timing_safely(timing, project)
-            return TemporalProjectRunResponse(success=False, error_message=message, project=project)
-        previous_cumulative = GeometryCollection() if summary_backed_finalization else _geometry_from_geojson(persisted_milestone.cumulative_union_geojson)
         previous_successful_release_identifier = persisted_milestone.release_identifier
 
     project.updated_at = _utc_now_iso()

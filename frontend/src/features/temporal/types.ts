@@ -44,7 +44,6 @@ export interface TemporalAddedOverlayPresentation {
   automatedCandidate: FeatureCollection;
   automatedBuildingBlocks: FeatureCollection;
   effectiveBuildingBlocks: FeatureCollection;
-  cumulativeConvexHull: FeatureCollection;
   cumulativeUnion: FeatureCollection;
   cumulativeGrowthBlocks: FeatureCollection;
   cumulativeGrowthEnvelope: FeatureCollection;
@@ -81,7 +80,6 @@ export interface TemporalMapPresentation {
   cumulativeBuffer15m: FeatureCollection;
   cumulativeBuffer20m: FeatureCollection;
   cumulativeUnion: FeatureCollection;
-  cumulativeConvexHull: FeatureCollection;
   cumulativeGrowthBlocks: FeatureCollection;
   cumulativeGrowthEnvelope: FeatureCollection;
   manualOverride: FeatureCollection;

@@ -22,7 +22,6 @@ const deprecated = [
   "effective_footprint",
   "cumulative_union",
   "cumulative_growth_blocks",
-  "cumulative_convex_hull",
   "cumulative_growth_envelope",
 ];
 
@@ -40,7 +39,6 @@ test("deprecated temporal artifacts are absent from lazy fetch and visible layer
   }
   assert.doesNotMatch(visibleRegistry, /kind: "automated"/);
   assert.doesNotMatch(visibleRegistry, /kind: "effectiveBuildingBlocks"/);
-  assert.doesNotMatch(visibleRegistry, /kind: "convexHull"/);
   assert.doesNotMatch(visibleRegistry, /kind: "cumulative"/);
   assert.doesNotMatch(visibleRegistry, /kind: "cumulativeGrowthBlocks"/);
   assert.doesNotMatch(visibleRegistry, /kind: "cumulativeGrowthEnvelope"/);

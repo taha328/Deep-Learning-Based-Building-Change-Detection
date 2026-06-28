@@ -243,6 +243,25 @@ def _feature_collection_from_geojsonl(path: Path, *, max_features: int = 25_000)
     return {"type": "FeatureCollection", "features": features}, total, capped
 
 
+def _write_feature_collection_from_geojsonl(source_path: Path, target_path: Path) -> tuple[Path, int]:
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    count = 0
+    with source_path.open("r", encoding="utf-8") as source, target_path.open("w", encoding="utf-8") as target:
+        target.write('{"type":"FeatureCollection","features":[')
+        first = True
+        for line in source:
+            line = line.strip()
+            if not line:
+                continue
+            if not first:
+                target.write(",")
+            target.write(line)
+            first = False
+            count += 1
+        target.write("]}\n")
+    return target_path, count
+
+
 def _write_tiled_summary_csv(path: Path, rows: list[dict[str, Any]]) -> Path:
     pd.DataFrame(rows).to_csv(path, index=False)
     return path
@@ -2007,7 +2026,18 @@ def run_detection(
                 run_warnings.append(
                     f"Tiled response GeoJSON was capped at {max_response_features} features; full output is available as GeoJSONL artifact."
                 )
-            change_polygons_path = write_geojson(result_dir / "building_change_polygons.geojson", change_polygons_geojson)
+            change_polygons_path, full_geojson_feature_count = _write_feature_collection_from_geojsonl(
+                tiled_result.geojsonl_path,
+                result_dir / "building_change_polygons.geojson",
+            )
+            if full_geojson_feature_count != total_feature_count:
+                LOGGER.warning(
+                    "TILED_FULL_GEOJSON_COUNT_MISMATCH runId=%s responseTotal=%s fullGeojsonFeatures=%s path=%s",
+                    tiled_result.run_id,
+                    total_feature_count,
+                    full_geojson_feature_count,
+                    change_polygons_path,
+                )
             summary_csv = _write_tiled_summary_csv(
                 result_dir / "wayback_pair_summary.csv",
                 pair_summary_df.to_dict(orient="records"),
@@ -2035,7 +2065,7 @@ def run_detection(
                     name="building_change_polygons_geojson",
                     path=str(change_polygons_path),
                     media_type="application/geo+json",
-                    description="Building-change polygons for browser display",
+                    description="Full tiled building-change polygons",
                 ),
                 ArtifactEntry(
                     name="tiled_inference_metadata_json",

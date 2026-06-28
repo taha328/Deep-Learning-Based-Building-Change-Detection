@@ -90,12 +90,6 @@ TEMPORAL_LAYER_ARTIFACTS: dict[str, tuple[str, str, str, str]] = {
         "application/geo+json",
     ),
     "cumulative_union": ("cumulative_union_geojson", "cumulative_union.geojson", "Cumulative union up to this milestone", "application/geo+json"),
-    "cumulative_convex_hull": (
-        "cumulative_convex_hull_geojson",
-        "cumulative_convex_hull.geojson",
-        "Convex hull of cumulative union up to this milestone",
-        "application/geo+json",
-    ),
     "cumulative_growth_blocks": (
         "cumulative_growth_blocks_geojson",
         "cumulative_growth_blocks.geojson",

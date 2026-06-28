@@ -77,6 +77,14 @@ test("primary project non-baseline colors are distinct", () => {
 });
 
 test("temporal layer contracts explicitly separate selected and cumulative buffers", () => {
+  assert.deepEqual(TEMPORAL_LAYER_CONTRACTS.allNewBuildings, {
+    artifactKey: "additions",
+    mode: "cumulative",
+  });
+  assert.deepEqual(TEMPORAL_LAYER_CONTRACTS.selectedAdditions, {
+    artifactKey: "additions",
+    mode: "selected",
+  });
   assert.deepEqual(TEMPORAL_LAYER_CONTRACTS.buffer10m, {
     artifactKey: "building_change_buffer_10m",
     mode: "selected",
@@ -93,6 +101,13 @@ test("temporal layer contracts explicitly separate selected and cumulative buffe
     artifactKey: "cumulative_building_change_buffer_15m",
     mode: "cumulative",
   });
+});
+
+test("temporal layer contracts do not expose deprecated hull artifacts", () => {
+  for (const [layerKey, contract] of Object.entries(TEMPORAL_LAYER_CONTRACTS)) {
+    assert.match(layerKey, /^(?!.*hull)/i);
+    assert.match(contract.artifactKey, /^(?!.*hull)/i);
+  }
 });
 
 test("colors are not cycled", () => {

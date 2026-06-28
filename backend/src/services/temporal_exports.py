@@ -271,7 +271,6 @@ def _clip_project_to_export_geometry(project: TemporalProject, mask: BaseGeometr
         "effective_building_blocks_geojson",
         "effective_footprint_geojson",
         "cumulative_union_geojson",
-        "cumulative_convex_hull_geojson",
         "cumulative_growth_blocks_geojson",
         "cumulative_growth_envelope_geojson",
     )

@@ -308,7 +308,6 @@ export const temporalMilestoneSchema = z.object({
   effective_footprint_geojson: z.record(z.any()).nullable().optional(),
   buffer_layers_geojson: z.record(z.record(z.any())).default({}),
   cumulative_union_geojson: z.record(z.any()).nullable().optional(),
-  cumulative_convex_hull_geojson: z.record(z.any()).nullable().optional(),
   cumulative_growth_blocks_geojson: z.record(z.any()).nullable().optional(),
   cumulative_growth_envelope_geojson: z.record(z.any()).nullable().optional(),
   reference_imagery: temporalReferenceImagerySchema.nullable().optional(),

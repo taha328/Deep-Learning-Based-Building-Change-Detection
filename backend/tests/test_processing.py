@@ -12,7 +12,13 @@ from src.domain.mosaic import AlignmentResult, MosaicResult
 from src.domain.wayback import MetadataSummary, TileAvailabilitySummary, WaybackRelease
 from src.execution_profiles import resolve_inference_runtime
 from src.schemas import PreviewImages, RunRequest, TabularMetrics
-from src.services.processing import _build_failure_diagnostics, _detection_run_identity, run_detection
+from src.services.processing import (
+    _build_failure_diagnostics,
+    _detection_run_identity,
+    _feature_collection_from_geojsonl,
+    _write_feature_collection_from_geojsonl,
+    run_detection,
+)
 from src.services.validation import PreparedRequest
 from src.utils.profiling import StageTimings
 
@@ -47,6 +53,36 @@ def _scene_result(path, valid_mask_path, identifier: str, release_date: date) ->
         geotiff_path=path,
         valid_mask_path=valid_mask_path,
     )
+
+
+def test_tiled_geojsonl_writer_preserves_full_feature_count_when_response_is_capped(tmp_path) -> None:
+    source = tmp_path / "prediction_change_polygons.geojsonl"
+    source.write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "type": "Feature",
+                    "properties": {"id": index},
+                    "geometry": {
+                        "type": "Point",
+                        "coordinates": [float(index), float(index)],
+                    },
+                }
+            )
+            for index in range(3)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    capped_payload, total_count, capped = _feature_collection_from_geojsonl(source, max_features=1)
+    target, full_count = _write_feature_collection_from_geojsonl(source, tmp_path / "building_change_polygons.geojson")
+
+    assert total_count == 3
+    assert capped is True
+    assert len(capped_payload["features"]) == 1
+    assert full_count == 3
+    assert len(json.loads(target.read_text(encoding="utf-8"))["features"]) == 3
 
 
 def test_detection_run_identity_records_selected_bandon_checkpoint(tmp_path) -> None:

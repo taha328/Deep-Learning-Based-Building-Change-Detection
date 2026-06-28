@@ -48,8 +48,6 @@ REQUEST_TO_PROJECT_ARTIFACT_FILENAMES: dict[str, tuple[str, ...]] = {
     "building_change_buffer_15m": ("building_change_buffer_15m.geojson",),
     "building_change_buffer_20m": ("building_change_buffer_20m.geojson",),
     "cumulative_union": ("cumulative_union.geojson",),
-    "cumulative_convex_hull": ("cumulative_convex_hull.geojson",),
-    "cumulative_concave_hull": ("cumulative_concave_hull.geojson",),
     "addition_candidate_diagnostics": ("addition_candidate_diagnostics.geojson",),
     "automated_additions": ("automated_additions.geojson",),
     "automated_building_blocks": ("automated_building_blocks.geojson",),

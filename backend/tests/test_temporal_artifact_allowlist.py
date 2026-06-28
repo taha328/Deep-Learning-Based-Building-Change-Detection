@@ -31,7 +31,6 @@ DEPRECATED_KEYS = {
     "effective_footprint",
     "cumulative_union",
     "cumulative_growth_blocks",
-    "cumulative_convex_hull",
     "cumulative_growth_envelope",
 }
 
@@ -78,7 +77,6 @@ def _project(project_id: str, artifacts: list[TemporalArtifactEntry] | None = No
                 effective_footprint_geojson=_feature_collection(),
                 cumulative_union_geojson=_feature_collection(),
                 cumulative_growth_blocks_geojson=_feature_collection(),
-                cumulative_convex_hull_geojson=_feature_collection(),
                 cumulative_growth_envelope_geojson=_feature_collection(),
                 artifacts=artifacts or [],
             )

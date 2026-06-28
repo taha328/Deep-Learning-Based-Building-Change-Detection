@@ -44,7 +44,6 @@ GEOMETRY_LAYER_KINDS = {
     "effective_building_blocks",
     "effective_footprint",
     "cumulative_union",
-    "cumulative_convex_hull",
     "cumulative_growth_blocks",
     "cumulative_growth_envelope",
     "buffer_10m",
@@ -294,7 +293,6 @@ def _milestone_geojson_layers(milestone: TemporalMilestone) -> list[tuple[str, d
         ("effective_building_blocks", milestone.effective_building_blocks_geojson),
         ("effective_footprint", milestone.effective_footprint_geojson),
         ("cumulative_union", milestone.cumulative_union_geojson),
-        ("cumulative_convex_hull", milestone.cumulative_convex_hull_geojson),
         ("cumulative_growth_blocks", milestone.cumulative_growth_blocks_geojson),
         ("cumulative_growth_envelope", milestone.cumulative_growth_envelope_geojson),
     ]

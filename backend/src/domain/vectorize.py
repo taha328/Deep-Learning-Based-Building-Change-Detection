@@ -14,11 +14,6 @@ from shapely.geometry import GeometryCollection, LineString, MultiPolygon, Polyg
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import nearest_points, split, unary_union
 
-try:
-    from shapely import concave_hull
-except ImportError:  # pragma: no cover - fallback for older GEOS/Shapely stacks.
-    concave_hull = None
-
 from src.utils.geometry import centroid_lonlat, geodesic_area_m2, parse_aoi_geometry, reproject_geometry, utm_epsg_from_lonlat
 
 
@@ -409,68 +404,6 @@ def _simplify_polygonal_geometry(geometry: BaseGeometry, *, tolerance_m: float) 
     return simplified
 
 
-def _tighten_growth_envelope_geometry(
-    geometry: BaseGeometry,
-    *,
-    bridge_m: float,
-    ratio: float,
-    simplify_tolerance_m: float,
-    fill_holes_max_area_m2: float,
-) -> BaseGeometry:
-    if geometry.is_empty:
-        return geometry
-
-    source_geometry = geometry.buffer(float(bridge_m))
-    if source_geometry.is_empty:
-        source_geometry = geometry
-
-    tightened = source_geometry
-    if concave_hull is not None:
-        try:
-            tightened = concave_hull(source_geometry, ratio=float(ratio), allow_holes=False)
-        except Exception:
-            tightened = source_geometry
-
-    if tightened.is_empty:
-        tightened = source_geometry
-
-    if bridge_m > 0:
-        constraint = geometry.buffer(float(bridge_m) * 1.5)
-        if not constraint.is_empty:
-            tightened = tightened.intersection(constraint).buffer(0)
-
-    if tightened.is_empty:
-        tightened = geometry
-
-    tightened = _fill_small_holes(tightened, max_area_m2=fill_holes_max_area_m2)
-    tightened = _simplify_polygonal_geometry(tightened, tolerance_m=simplify_tolerance_m)
-    if tightened.is_empty:
-        return geometry
-    if tightened.geom_type not in {"Polygon", "MultiPolygon"}:
-        tightened = tightened.buffer(0)
-    if tightened.is_empty:
-        return geometry
-    return tightened
-
-
-def _growth_envelope_ratio_candidates(initial_ratio: float) -> list[float]:
-    candidates = [
-        float(initial_ratio),
-        0.18,
-        0.28,
-        0.42,
-        0.60,
-        0.80,
-        1.0,
-    ]
-    normalized: list[float] = []
-    for candidate in candidates:
-        candidate = max(0.0, min(1.0, candidate))
-        if candidate not in normalized:
-            normalized.append(candidate)
-    return normalized
-
-
 def _finalize_growth_envelope_candidate(
     candidate_geometry: BaseGeometry,
     *,
@@ -524,46 +457,38 @@ def _finalize_growth_envelope_candidate(
     return envelope
 
 
-def _build_single_concave_growth_envelope(
+def _build_growth_envelope_geometry(
     source_geometry: BaseGeometry,
     *,
     aoi_geometry: BaseGeometry,
     bridge_m: float,
-    hull_ratio: float,
     simplify_tolerance_m: float,
-) -> tuple[BaseGeometry, float, str]:
+    fill_holes_max_area_m2: float | None,
+) -> tuple[BaseGeometry, str]:
     if source_geometry.is_empty:
-        return GeometryCollection(), float(hull_ratio), "empty"
+        return GeometryCollection(), "empty"
 
     coverage_tolerance_m2 = max(0.05, source_geometry.area * 1e-9)
-    hull_source = source_geometry.buffer(float(bridge_m)).buffer(0) if bridge_m > 0 else source_geometry
-    if hull_source.is_empty:
-        hull_source = source_geometry
-
-    if concave_hull is not None:
-        for ratio in _growth_envelope_ratio_candidates(hull_ratio):
-            try:
-                candidate = concave_hull(hull_source, ratio=ratio, allow_holes=False)
-            except Exception:
-                continue
-            envelope = _finalize_growth_envelope_candidate(
-                candidate,
-                source_geometry=source_geometry,
-                aoi_geometry=aoi_geometry,
-                simplify_tolerance_m=simplify_tolerance_m,
-                coverage_tolerance_m2=coverage_tolerance_m2,
-            )
-            if not envelope.is_empty:
-                return envelope, ratio, "concave_hull"
-
-    fallback = _finalize_growth_envelope_candidate(
-        source_geometry.convex_hull,
+    candidate = source_geometry.buffer(float(bridge_m)).buffer(0) if bridge_m > 0 else source_geometry.buffer(0)
+    if candidate.is_empty:
+        candidate = source_geometry.buffer(0)
+    candidate = _fill_small_holes(candidate, max_area_m2=fill_holes_max_area_m2)
+    envelope = _finalize_growth_envelope_candidate(
+        candidate,
         source_geometry=source_geometry,
         aoi_geometry=aoi_geometry,
         simplify_tolerance_m=simplify_tolerance_m,
         coverage_tolerance_m2=coverage_tolerance_m2,
     )
-    return fallback, 1.0, "convex_hull_fallback"
+    if envelope.is_empty and bridge_m > 0:
+        envelope = _finalize_growth_envelope_candidate(
+            source_geometry.buffer(0),
+            source_geometry=source_geometry,
+            aoi_geometry=aoi_geometry,
+            simplify_tolerance_m=simplify_tolerance_m,
+            coverage_tolerance_m2=coverage_tolerance_m2,
+        )
+    return envelope, "buffered_union" if bridge_m > 0 else "source_union"
 
 
 def _feature_collection_from_metric_geometries(
@@ -693,7 +618,6 @@ def build_temporal_growth_envelope(
     temporal_block_gap_m: float = 20.0,
     envelope_component_gap_m: float | None = None,
     envelope_bridge_m: float | None = None,
-    envelope_hull_ratio: float | None = None,
     envelope_simplify_tolerance_m: float | None = None,
     envelope_fill_holes_max_area_m2: float | None = None,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
@@ -721,7 +645,6 @@ def build_temporal_growth_envelope(
         if envelope_bridge_m is not None
         else 0.0
     )
-    hull_ratio = float(envelope_hull_ratio) if envelope_hull_ratio is not None else 0.12
     simplify_tolerance_m = (
         float(envelope_simplify_tolerance_m)
         if envelope_simplify_tolerance_m is not None
@@ -729,13 +652,15 @@ def build_temporal_growth_envelope(
     )
     fill_holes_max_area_m2 = float(envelope_fill_holes_max_area_m2) if envelope_fill_holes_max_area_m2 is not None else None
 
-    envelope, effective_hull_ratio, envelope_method = _build_single_concave_growth_envelope(
+    envelope, envelope_method = _build_growth_envelope_geometry(
         cumulative_union,
         aoi_geometry=aoi_metric,
         bridge_m=bridge_m,
-        hull_ratio=hull_ratio,
         simplify_tolerance_m=simplify_tolerance_m,
+        fill_holes_max_area_m2=fill_holes_max_area_m2,
     )
+    if not envelope.is_empty:
+        envelope = envelope.union(cumulative_union).buffer(0.01).intersection(aoi_metric).buffer(0)
     if envelope.is_empty:
         return pd.DataFrame(), empty_feature_collection()
 
@@ -758,8 +683,6 @@ def build_temporal_growth_envelope(
         "cluster_gap_m": float(temporal_block_gap_m),
         "envelope_component_gap_m": float(component_gap_m),
         "envelope_bridge_m": float(bridge_m),
-        "envelope_hull_ratio": float(effective_hull_ratio),
-        "requested_envelope_hull_ratio": float(hull_ratio),
         "envelope_method": envelope_method,
         "envelope_simplify_tolerance_m": float(simplify_tolerance_m),
         "envelope_fill_holes_max_area_m2": fill_holes_max_area_m2,

@@ -166,7 +166,6 @@ def test_temporal_export_bundle_uses_qgz_and_one_gpkg_without_csv_geojson_or_rea
                 additions_geojson=_feature_collection(),
                 buffer_layers_geojson={"10m": _feature_collection(), "15m": _feature_collection(), "20m": _feature_collection()},
                 cumulative_union_geojson=_feature_collection(),
-                cumulative_convex_hull_geojson=_feature_collection(),
                 cumulative_growth_envelope_geojson=_feature_collection(),
                 metrics=TemporalMilestoneMetrics(added_area_m2=10.0, additions_feature_count=1, added_block_count=1),
                 reference_imagery=TemporalReferenceImagery(cog_path=str(tif_2024)),
@@ -179,7 +178,6 @@ def test_temporal_export_bundle_uses_qgz_and_one_gpkg_without_csv_geojson_or_rea
                 additions_geojson=_feature_collection(),
                 buffer_layers_geojson={"10m": _feature_collection(), "15m": _feature_collection(), "20m": _feature_collection()},
                 cumulative_union_geojson=_feature_collection(),
-                cumulative_convex_hull_geojson=_feature_collection(),
                 cumulative_growth_envelope_geojson=_feature_collection(),
                 metrics=TemporalMilestoneMetrics(added_area_m2=8.0, additions_feature_count=1, added_block_count=1),
                 reference_imagery=TemporalReferenceImagery(cog_path=str(tif_2026)),
@@ -242,7 +240,6 @@ def test_temporal_export_bundle_uses_qgz_and_one_gpkg_without_csv_geojson_or_rea
         assert "ajouts_2023_02" in layer_names
         assert "tampon_changement_batiment_10m_2023_02" in layer_names
         assert "union_cumulative_2023_02" not in layer_names
-        assert "polygone_convexe_2023_02" not in layer_names
         assert "ajouts_2025_02" in layer_names
 
         manifest = json.loads(archive.read(manifest_member).decode("utf-8"))

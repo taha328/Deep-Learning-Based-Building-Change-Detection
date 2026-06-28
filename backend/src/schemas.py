@@ -395,7 +395,6 @@ class TemporalMilestone(BaseModel):
     effective_footprint_geojson: dict[str, Any] | None = None
     buffer_layers_geojson: dict[str, dict[str, Any]] = Field(default_factory=dict)
     cumulative_union_geojson: dict[str, Any] | None = None
-    cumulative_convex_hull_geojson: dict[str, Any] | None = None
     cumulative_growth_blocks_geojson: dict[str, Any] | None = None
     cumulative_growth_envelope_geojson: dict[str, Any] | None = None
     reference_imagery: TemporalReferenceImagery | None = None
@@ -421,17 +420,24 @@ class TemporalProject(BaseModel):
 
 
 def validate_stored_temporal_project(value: Any) -> TemporalProject:
-    """Load persisted projects written before latest-source removal."""
+    """Load persisted projects written before latest-source and hull removal."""
     if isinstance(value, dict):
         value = dict(value)
         value.pop("latest_source", None)
         milestones = value.get("milestones")
         if isinstance(milestones, list):
-            value["milestones"] = [
-                milestone
-                for milestone in milestones
-                if not isinstance(milestone, dict) or milestone.get("release_identifier") != "mapbox.satellite"
-            ]
+            normalized_milestones: list[Any] = []
+            for milestone in milestones:
+                if not isinstance(milestone, dict):
+                    normalized_milestones.append(milestone)
+                    continue
+                if milestone.get("release_identifier") == "mapbox.satellite":
+                    continue
+                normalized = dict(milestone)
+                normalized.pop("cumulative_convex_hull_geojson", None)
+                normalized.pop("cumulative_concave_hull_geojson", None)
+                normalized_milestones.append(normalized)
+            value["milestones"] = normalized_milestones
     return TemporalProject.model_validate(value)
 
 

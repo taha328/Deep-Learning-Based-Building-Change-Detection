@@ -390,7 +390,6 @@ function buildTemporalMilestone(release: ReleaseMetadata): TemporalMilestone {
     effective_footprint_geojson: null,
     buffer_layers_geojson: {},
     cumulative_union_geojson: null,
-    cumulative_convex_hull_geojson: null,
     cumulative_growth_blocks_geojson: null,
     cumulative_growth_envelope_geojson: null,
     reference_imagery: null,

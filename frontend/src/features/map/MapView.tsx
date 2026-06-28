@@ -100,7 +100,6 @@ type LayerToggleKey =
   | "temporalAutomated"
   | "temporalAutomatedBuildingBlocks"
   | "temporalEffectiveBuildingBlocks"
-  | "temporalConvexHull"
   | "temporalCumulative"
   | "temporalCumulativeGrowthBlocks"
   | "temporalCumulativeGrowthEnvelope"
@@ -126,7 +125,6 @@ type TemporalVectorSources = {
   temporalAutomated: FeatureCollection;
   temporalAutomatedBuildingBlocks: FeatureCollection;
   temporalEffectiveBuildingBlocks: FeatureCollection;
-  temporalConvexHull: FeatureCollection;
   temporalCumulative: FeatureCollection;
   temporalCumulativeGrowthBlocks: FeatureCollection;
   temporalCumulativeGrowthEnvelope: FeatureCollection;
@@ -197,7 +195,6 @@ type TemporalAddedLayerKind =
   | "automated"
   | "automatedBuildingBlocks"
   | "effectiveBuildingBlocks"
-  | "convexHull"
   | "cumulative"
   | "cumulativeGrowthBlocks"
   | "cumulativeGrowthEnvelope"
@@ -462,7 +459,7 @@ function isDerivedTemporalGeometry(properties: GeoJsonProperties | null | undefi
   if (properties.manualReplacement === true || properties.manual_override === true || properties.manualOverride === true) {
     return true;
   }
-  if (properties.cumulative === true || properties.convex === true || properties.concave === true) {
+  if (properties.cumulative === true) {
     return true;
   }
   if (properties.group === true || properties.grouped === true || properties.group_id != null || properties.block_id != null) {
@@ -473,15 +470,11 @@ function isDerivedTemporalGeometry(properties: GeoJsonProperties | null | undefi
     kind.includes("block") ||
     kind.includes("footprint") ||
     kind.includes("union") ||
-    kind.includes("convex") ||
-    kind.includes("concave") ||
     kind.includes("envelope") ||
     kind.includes("manual") ||
     kind.includes("override") ||
     type.includes("buffer") ||
     type.includes("union") ||
-    type.includes("convex") ||
-    type.includes("concave") ||
     type.includes("manual") ||
     changeType.includes("buffer") ||
     changeTypeCamel.includes("buffer")
@@ -867,8 +860,6 @@ function temporalAddedArtifactKey(kind: TemporalAddedLayerKind): string {
       return "automated_building_blocks";
     case "effectiveBuildingBlocks":
       return "additions";
-    case "convexHull":
-      return "additions";
     case "cumulative":
       return "additions";
     case "cumulativeGrowthBlocks":
@@ -896,8 +887,6 @@ function temporalPlanningKeyForKind(kind: TemporalAddedLayerKind): TemporalLayer
       return "temporalCumulativeBuffer15m";
     case "cumulativeBuffer20m":
       return "temporalCumulativeBuffer20m";
-    case "convexHull":
-      return "convexHull";
     case "cumulative":
       return "cumulativeUnion";
     case "manualOverride":
@@ -2858,7 +2847,6 @@ function moveReferenceOverlaysAboveTemporalImagery(map: MapLibreMap, activeRefer
     "temporal-automated-fill",
     "temporal-automated-building-blocks-fill",
     "temporal-effective-building-blocks-fill",
-    "temporal-convex-hull-fill",
     "temporal-cumulative-fill",
     "temporal-cumulative-growth-blocks-fill",
     "temporal-cumulative-growth-envelope-fill",
@@ -3259,7 +3247,6 @@ function ensureOperationalLayers(map: MapLibreMap) {
   ensureGeoJsonSource(map, "temporal-automated");
   ensureGeoJsonSource(map, "temporal-automated-building-blocks");
   ensureGeoJsonSource(map, "temporal-effective-building-blocks");
-  ensureGeoJsonSource(map, "temporal-convex-hull");
   ensureGeoJsonSource(map, "temporal-cumulative");
   ensureGeoJsonSource(map, "temporal-cumulative-growth-blocks");
   ensureGeoJsonSource(map, "temporal-cumulative-growth-envelope");
@@ -3334,11 +3321,6 @@ function ensureOperationalLayers(map: MapLibreMap) {
   ensureFillLayer(map, "temporal-effective-building-blocks-fill", "temporal-effective-building-blocks", {
     "fill-color": "#eab308",
     "fill-opacity": 0.9,
-  });
-  ensureFillLayer(map, "temporal-convex-hull-fill", "temporal-convex-hull", {
-    "fill-color": "#f59e0b",
-    "fill-opacity": 0.45,
-    "fill-outline-color": "#b45309",
   });
   ensureFillLayer(map, "temporal-cumulative-fill", "temporal-cumulative", {
     "fill-color": "#dc2626",
@@ -3521,7 +3503,6 @@ function syncMapPresentation(
   setLayerVisibility(map, "temporal-automated-fill", false);
   setLayerVisibility(map, "temporal-automated-building-blocks-fill", false);
   setLayerVisibility(map, "temporal-effective-building-blocks-fill", false);
-  setLayerVisibility(map, "temporal-convex-hull-fill", false);
   setLayerVisibility(map, "temporal-cumulative-fill", false);
   setLayerVisibility(map, "temporal-cumulative-growth-blocks-fill", false);
   setLayerVisibility(map, "temporal-cumulative-growth-envelope-fill", false);
@@ -3553,7 +3534,6 @@ function applyLayerVisibilityState(map: MapLibreMap, layerState: LayerToggleStat
   setLayerVisibility(map, "temporal-automated-fill", false);
   setLayerVisibility(map, "temporal-automated-building-blocks-fill", false);
   setLayerVisibility(map, "temporal-effective-building-blocks-fill", false);
-  setLayerVisibility(map, "temporal-convex-hull-fill", false);
   setLayerVisibility(map, "temporal-cumulative-fill", false);
   setLayerVisibility(map, "temporal-cumulative-growth-blocks-fill", false);
   setLayerVisibility(map, "temporal-cumulative-growth-envelope-fill", false);
@@ -3581,7 +3561,6 @@ function defaultLayerState(workflowMode: WorkflowMode, hasPairResult: boolean): 
     temporalAutomated: false,
     temporalAutomatedBuildingBlocks: false,
     temporalEffectiveBuildingBlocks: false,
-    temporalConvexHull: false,
     temporalCumulative: false,
     temporalCumulativeGrowthBlocks: false,
     temporalCumulativeGrowthEnvelope: false,
@@ -3611,7 +3590,6 @@ function defaultLayerState(workflowMode: WorkflowMode, hasPairResult: boolean): 
     "temporalAutomated",
     "temporalAutomatedBuildingBlocks",
     "temporalEffectiveBuildingBlocks",
-    "temporalConvexHull",
     "temporalCumulative",
     "temporalCumulativeGrowthBlocks",
     "temporalCumulativeGrowthEnvelope",
@@ -3873,7 +3851,6 @@ export function MapView({
       temporalAutomated: ensureFeatureCollection(temporalPresentation?.automatedCandidate),
       temporalAutomatedBuildingBlocks: ensureFeatureCollection(temporalPresentation?.automatedBuildingBlocks),
       temporalEffectiveBuildingBlocks: ensureFeatureCollection(temporalPresentation?.effectiveBuildingBlocks),
-      temporalConvexHull: ensureFeatureCollection(temporalPresentation?.cumulativeConvexHull),
       temporalCumulative: ensureFeatureCollection(temporalPresentation?.cumulativeUnion),
       temporalCumulativeGrowthBlocks: ensureFeatureCollection(temporalPresentation?.cumulativeGrowthBlocks),
       temporalCumulativeGrowthEnvelope: ensureFeatureCollection(temporalPresentation?.cumulativeGrowthEnvelope),
@@ -4201,7 +4178,6 @@ export function MapView({
     temporalVectors.temporalAutomated.features.length > 0 ||
     temporalVectors.temporalAutomatedBuildingBlocks.features.length > 0 ||
     temporalVectors.temporalEffectiveBuildingBlocks.features.length > 0 ||
-    temporalVectors.temporalConvexHull.features.length > 0 ||
     temporalVectors.temporalCumulative.features.length > 0 ||
     temporalVectors.temporalCumulativeGrowthBlocks.features.length > 0 ||
     temporalVectors.temporalCumulativeGrowthEnvelope.features.length > 0 ||
@@ -6505,7 +6481,6 @@ export function MapView({
     temporalPresentation?.selectedReleaseIdentifier,
     visibleAdditionsLegendEntries.length,
     temporalVectors.temporalAdditions.features.length,
-    temporalVectors.temporalConvexHull.features.length,
     temporalVectors.temporalCumulative.features.length,
     temporalVectors.temporalCumulativeBuffer10m.features.length,
     temporalVectors.temporalCumulativeBuffer15m.features.length,

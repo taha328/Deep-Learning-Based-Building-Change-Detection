@@ -90,9 +90,7 @@ export type TemporalLayerPlanningKey =
   | "temporalCumulativeBuffer10m"
   | "temporalCumulativeBuffer15m"
   | "temporalCumulativeBuffer20m"
-  | "convexHull"
   | "cumulativeUnion"
-  | "concavePolygon"
   | "manualOverride";
 
 export const TEMPORAL_LAYER_CONTRACTS: Record<TemporalLayerPlanningKey, TemporalLayerContract> = {
@@ -104,9 +102,7 @@ export const TEMPORAL_LAYER_CONTRACTS: Record<TemporalLayerPlanningKey, Temporal
   temporalCumulativeBuffer10m: { artifactKey: "cumulative_building_change_buffer_10m", mode: "cumulative" },
   temporalCumulativeBuffer15m: { artifactKey: "cumulative_building_change_buffer_15m", mode: "cumulative" },
   temporalCumulativeBuffer20m: { artifactKey: "cumulative_building_change_buffer_20m", mode: "cumulative" },
-  convexHull: { artifactKey: "additions", mode: "selected" },
   cumulativeUnion: { artifactKey: "additions", mode: "selected" },
-  concavePolygon: { artifactKey: "additions", mode: "selected" },
   manualOverride: { artifactKey: "additions", mode: "selected" },
 };
 
