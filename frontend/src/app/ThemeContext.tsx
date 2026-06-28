@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useEffect, useState, useCallback } from "react";
 
-type Theme = "light" | "dark";
+import { resolveInitialTheme, type Theme } from "./theme";
+export type { Theme } from "./theme";
 
 interface ThemeContextType {
   theme: Theme;
@@ -12,18 +13,9 @@ const ThemeContext = createContext<ThemeContextType | undefined>(undefined);
 
 const THEME_STORAGE_KEY = "app-theme";
 
-function getSystemTheme(): Theme {
-  if (typeof window === "undefined") return "dark";
-  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-}
-
 function getInitialTheme(): Theme {
-  if (typeof window === "undefined") return "dark";
-  const stored = localStorage.getItem(THEME_STORAGE_KEY);
-  if (stored === "light" || stored === "dark") {
-    return stored;
-  }
-  return getSystemTheme();
+  if (typeof window === "undefined") return "light";
+  return resolveInitialTheme(localStorage.getItem(THEME_STORAGE_KEY));
 }
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {

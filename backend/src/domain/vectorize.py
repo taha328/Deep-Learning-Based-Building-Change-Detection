@@ -324,14 +324,22 @@ def _closed_block_geometry(geometries: list[BaseGeometry], *, max_gap_m: float) 
     return unary_union(polygonal_parts).buffer(0)
 
 
-def _fill_small_holes(geometry: BaseGeometry, *, max_area_m2: float) -> BaseGeometry:
+def _fill_small_holes(geometry: BaseGeometry, *, max_area_m2: float | None) -> BaseGeometry:
+    if max_area_m2 is None:
+        return geometry
+    try:
+        max_area_threshold = float(max_area_m2)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("max_area_m2 must be numeric when provided.") from exc
+    if max_area_threshold < 0:
+        return geometry
     if geometry.is_empty:
         return geometry
     if isinstance(geometry, Polygon):
         retained_interiors = []
         for ring in geometry.interiors:
             hole = Polygon(ring)
-            if hole.area >= float(max_area_m2):
+            if hole.area >= max_area_threshold:
                 retained_interiors.append(ring)
         return Polygon(geometry.exterior, retained_interiors).buffer(0)
     if isinstance(geometry, MultiPolygon):

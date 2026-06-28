@@ -2687,7 +2687,31 @@ def _export_cache_metadata(
 
 
 def _write_export_cache_metadata(path: Path, metadata: dict[str, Any]) -> None:
-    _atomic_write_bytes(_export_metadata_path(path), json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    try:
+        stat = path.stat()
+    except OSError:
+        output = {
+            "path": str(path),
+            "exists": False,
+        }
+    else:
+        output = {
+            "path": str(path),
+            "exists": True,
+            "size_bytes": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+            "created_at": metadata.get("updated_at"),
+        }
+    payload = {**metadata, "output": output}
+    _atomic_write_bytes(_export_metadata_path(path), json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    logger.info(
+        "EXPORT_CACHE_MANIFEST_UPDATED projectId=%s format=%s path=%s cacheKey=%s outputBytes=%s",
+        payload.get("project_id"),
+        payload.get("format"),
+        _export_metadata_path(path),
+        payload.get("cache_key"),
+        output.get("size_bytes"),
+    )
 
 
 def _read_export_cache_metadata(path: Path) -> dict[str, Any] | None:
@@ -2698,7 +2722,140 @@ def _read_export_cache_metadata(path: Path) -> dict[str, Any] | None:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     except Exception:
         return None
-    return metadata if isinstance(metadata, dict) else None
+    if not isinstance(metadata, dict):
+        return None
+    logger.info(
+        "EXPORT_CACHE_MANIFEST_LOADED projectId=%s format=%s path=%s cacheKey=%s",
+        metadata.get("project_id"),
+        metadata.get("format"),
+        metadata_path,
+        metadata.get("cache_key"),
+    )
+    return metadata
+
+
+def _export_cache_file_invalid(project_id: str, export_format: str, path: Path, reason: str) -> None:
+    logger.info(
+        "EXPORT_CACHE_FILE_INVALID projectId=%s format=%s path=%s reason=%s",
+        project_id,
+        export_format,
+        path,
+        reason,
+    )
+
+
+def _metadata_fingerprint_matches(fingerprint: dict[str, Any], *, require_existing_path: bool) -> bool:
+    exists = fingerprint.get("exists")
+    if exists is False:
+        return not require_existing_path
+    path_value = fingerprint.get("path")
+    if not isinstance(path_value, str) or not path_value:
+        return False
+    path = Path(path_value)
+    try:
+        stat = path.stat()
+    except OSError:
+        return False
+    if fingerprint.get("size_bytes") is not None and int(fingerprint["size_bytes"]) != stat.st_size:
+        return False
+    if fingerprint.get("mtime_ns") is not None and int(fingerprint["mtime_ns"]) != stat.st_mtime_ns:
+        return False
+    return True
+
+
+def _artifact_fingerprints_match(fingerprints: Any) -> bool:
+    if not isinstance(fingerprints, list):
+        return False
+    for fingerprint in fingerprints:
+        if not isinstance(fingerprint, dict):
+            return False
+        if not _metadata_fingerprint_matches(fingerprint, require_existing_path=False):
+            return False
+    return True
+
+
+def _is_project_aoi_export_scope(perimeter: dict[str, Any] | None) -> bool:
+    if perimeter is None:
+        return True
+    return perimeter.get("mode") == "project_aoi" and perimeter.get("geometry") is None and perimeter.get("source") is None
+
+
+def _cached_export_path(settings: Settings, project_id: str, export_format: str) -> Path:
+    return settings.temporal_projects_dir / project_id / "exports" / TEMPORAL_RESULTS_EXPORT_FILENAMES[export_format]
+
+
+def _fast_cached_temporal_results_export_file(
+    project_id: str,
+    export_format: str,
+    settings: Settings,
+    perimeter: dict[str, Any] | None,
+) -> Path | None:
+    logger.info(
+        "EXPORT_FAST_CACHE_CHECK_START projectId=%s format=%s scopeType=%s",
+        project_id,
+        export_format,
+        "project_aoi" if _is_project_aoi_export_scope(perimeter) else "custom_geometry",
+    )
+    if not _is_project_aoi_export_scope(perimeter):
+        logger.info(
+            "EXPORT_FAST_CACHE_MISS projectId=%s format=%s reason=custom_geometry_requires_project_load",
+            project_id,
+            export_format,
+        )
+        return None
+
+    cache_path = _cached_export_path(settings, project_id, export_format)
+    if cache_path.name.endswith(".partial"):
+        _export_cache_file_invalid(project_id, export_format, cache_path, "partial_file")
+        return None
+    try:
+        cache_stat = cache_path.stat()
+    except OSError:
+        logger.info(
+            "EXPORT_FAST_CACHE_MISS projectId=%s format=%s reason=missing_file path=%s",
+            project_id,
+            export_format,
+            cache_path,
+        )
+        return None
+    if cache_stat.st_size <= 0:
+        _export_cache_file_invalid(project_id, export_format, cache_path, "empty_file")
+        return None
+    if export_format == "topojson" and not _topojson_cache_version_is_valid(cache_path):
+        _export_cache_file_invalid(project_id, export_format, cache_path, "topojson_cache_version")
+        return None
+    if export_format == "shapefile" and not _shapefile_cache_version_is_valid(cache_path):
+        _export_cache_file_invalid(project_id, export_format, cache_path, "shapefile_cache_version")
+        return None
+
+    metadata = _read_export_cache_metadata(cache_path)
+    if metadata is None:
+        logger.info("EXPORT_FAST_CACHE_MISS projectId=%s format=%s reason=missing_metadata", project_id, export_format)
+        return None
+    if metadata.get("cache_version") != EXPORT_CACHE_VERSION or metadata.get("format") != export_format:
+        logger.info("EXPORT_FAST_CACHE_MISS projectId=%s format=%s reason=metadata_version_or_format", project_id, export_format)
+        return None
+    scope = metadata.get("scope")
+    if not isinstance(scope, dict) or scope.get("scope_type") != "project_aoi":
+        logger.info("EXPORT_FAST_CACHE_MISS projectId=%s format=%s reason=metadata_scope", project_id, export_format)
+        return None
+    project_fingerprint = metadata.get("project_fingerprint")
+    if not isinstance(project_fingerprint, dict) or not _metadata_fingerprint_matches(project_fingerprint, require_existing_path=True):
+        logger.info("EXPORT_FAST_CACHE_MISS projectId=%s format=%s reason=project_fingerprint_changed", project_id, export_format)
+        return None
+    if not _artifact_fingerprints_match(metadata.get("artifact_fingerprints")):
+        logger.info("EXPORT_FAST_CACHE_MISS projectId=%s format=%s reason=artifact_fingerprint_changed", project_id, export_format)
+        return None
+
+    logger.info(
+        "EXPORT_FAST_CACHE_HIT projectId=%s format=%s scopeType=project_aoi path=%s cacheKey=%s bytes=%s",
+        project_id,
+        export_format,
+        cache_path,
+        metadata.get("cache_key"),
+        cache_stat.st_size,
+    )
+    return cache_path
 
 
 def _export_cache_is_valid(
@@ -2759,6 +2916,17 @@ def build_temporal_results_export_file(
         raise ValueError(f"Unsupported temporal results export format: {export_format}")
 
     started_at = datetime.now(UTC)
+    fast_cache_path = _fast_cached_temporal_results_export_file(project_id, normalized_format, resolved_settings, perimeter)
+    if fast_cache_path is not None:
+        duration_ms = round((datetime.now(UTC) - started_at).total_seconds() * 1000, 2)
+        logger.info(
+            "EXPORT_DOWNLOAD_TOTAL_MS projectId=%s format=%s scopeType=project_aoi source=fast_cache durationMs=%s",
+            project_id,
+            normalized_format,
+            duration_ms,
+        )
+        return fast_cache_path
+
     project = _load_project(project_id, resolved_settings)
     export_context = resolve_export_perimeter(project, perimeter)
     context_token = _EXPORT_CONTEXT.set(export_context)
@@ -2794,6 +2962,14 @@ def build_temporal_results_export_file(
             cache_metadata["scope"]["scope_type"],
             cache_path,
             cache_metadata["cache_key"],
+        )
+        duration_ms = round((datetime.now(UTC) - started_at).total_seconds() * 1000, 2)
+        logger.info(
+            "EXPORT_DOWNLOAD_TOTAL_MS projectId=%s format=%s scopeType=%s source=validated_cache durationMs=%s",
+            project_id,
+            normalized_format,
+            cache_metadata["scope"]["scope_type"],
+            duration_ms,
         )
         _EXPORT_CONTEXT.reset(context_token)
         return cache_path
@@ -2844,6 +3020,13 @@ def build_temporal_results_export_file(
         project_id,
         normalized_format,
         cache_path.stat().st_size,
+        duration_ms,
+    )
+    logger.info(
+        "EXPORT_DOWNLOAD_TOTAL_MS projectId=%s format=%s scopeType=%s source=generated durationMs=%s",
+        project_id,
+        normalized_format,
+        cache_metadata["scope"]["scope_type"],
         duration_ms,
     )
     return cache_path

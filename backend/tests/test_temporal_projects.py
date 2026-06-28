@@ -16,9 +16,11 @@ from src.config import Settings
 from src.domain.cache import save_cached_response
 from src.execution_profiles import PipelineExecutionConfig, resolve_backend
 from src.schemas import PreviewImages, RunRequest, RunResponse, SummaryStats, TemporalMilestone, TemporalOverrideRequest, TemporalProject, TemporalProjectRunRequest
+from src.domain import vectorize as vectorize_module
 from src.domain.vectorize import build_temporal_growth_blocks, build_temporal_growth_envelope
 from src.services.releases import list_releases
 from src.services import request_cleanup as request_cleanup_service
+from src.services import temporal_projects as temporal_projects_service
 from src.services.temporal_projects import (
     _reference_imagery_from_pair_response,
     audit_temporal_project_metadata_bloat,
@@ -98,6 +100,18 @@ def test_temporal_run_request_validates_change_threshold_range() -> None:
         TemporalProjectRunRequest(change_threshold=0.0)
     with pytest.raises(ValidationError):
         TemporalProjectRunRequest(change_threshold=1.0)
+
+
+def test_fill_small_holes_none_disables_optional_hole_processing() -> None:
+    geometry = Polygon(
+        [(0, 0), (4, 0), (4, 4), (0, 4)],
+        holes=[[(1, 1), (2, 1), (2, 2), (1, 2)]],
+    )
+
+    assert vectorize_module._fill_small_holes(geometry, max_area_m2=None).equals_exact(geometry, tolerance=0.0)
+    assert vectorize_module._fill_small_holes(geometry, max_area_m2=-1).equals_exact(geometry, tolerance=0.0)
+    with pytest.raises(ValueError, match="max_area_m2 must be numeric"):
+        vectorize_module._fill_small_holes(geometry, max_area_m2="not-a-number")
 
 
 def _bandon_config() -> PipelineExecutionConfig:
@@ -249,6 +263,11 @@ def test_run_temporal_project_validates_before_pair_runner(monkeypatch, tmp_path
 def test_run_temporal_project_builds_monotonic_cumulative_union(monkeypatch, tmp_path) -> None:
     settings = Settings(runtime_cache_dir=tmp_path)
     monkeypatch.setattr("src.services.temporal_projects.list_releases", lambda _: _sample_releases(settings))
+    monkeypatch.setattr(
+        "src.domain.vectorize.build_temporal_growth_envelope",
+        lambda *args, **kwargs: pytest.fail("default finalization must not require growth envelope"),
+    )
+    assert not hasattr(temporal_projects_service, "build_temporal_growth_envelope")
     project = save_temporal_project(_sample_project("monotonic-growth"), settings)
 
     automated_layers = {
@@ -290,12 +309,8 @@ def test_run_temporal_project_builds_monotonic_cumulative_union(monkeypatch, tmp
     cumulative_2025_geojson = response.project.milestones[1].cumulative_union_geojson
     cumulative_2026_geojson = response.project.milestones[2].cumulative_union_geojson
     assert _geometry(cumulative_2025_geojson).within(_geometry(cumulative_2026_geojson))
-    final_cumulative = _geometry(cumulative_2026_geojson)
-    final_envelope_geojson = response.project.milestones[2].cumulative_growth_envelope_geojson
-    assert len(final_envelope_geojson["features"]) == 1
-    final_envelope = _geometry(final_envelope_geojson)
-    assert not _has_holes(final_envelope)
-    assert final_cumulative.difference(final_envelope).area <= 1e-14
+    assert response.project.milestones[2].cumulative_growth_envelope_geojson is None
+    assert response.project.milestones[2].metrics.growth_envelope_area_m2 == 0.0
     milestone_dir = settings.temporal_projects_dir / project.project_id / "milestones" / "WB_2026_R01"
     assert not (milestone_dir / "cumulative_union.geojson").exists()
     assert not (milestone_dir / "cumulative_growth_envelope.geojson").exists()
@@ -506,9 +521,10 @@ def test_publish_completed_tiled_request_generates_large_buffers_without_inlinin
         lambda *args, **kwargs: pytest.fail("large recovery must not regenerate growth blocks"),
     )
     monkeypatch.setattr(
-        "src.services.temporal_projects.build_temporal_growth_envelope",
+        "src.domain.vectorize.build_temporal_growth_envelope",
         lambda *args, **kwargs: pytest.fail("large recovery must not regenerate growth envelope"),
     )
+    assert not hasattr(temporal_projects_service, "build_temporal_growth_envelope")
     project = _sample_project("publish-large-tiled")
     project.milestones = [
         TemporalMilestone(release_identifier="WB_2024_R01"),
@@ -589,15 +605,18 @@ def test_publish_completed_tiled_request_generates_large_buffers_without_inlinin
     assert target.populated_request_hash == request_id
     assert target.metrics is not None
     assert target.metrics.additions_feature_count == 3
+    assert target.metrics.growth_envelope_area_m2 == 0.0
     assert target.warnings == []
     assert target.automated_additions_geojson is None
     assert target.cumulative_union_geojson is None
+    assert target.cumulative_growth_envelope_geojson is None
 
     compact = load_temporal_project_compact_payload(saved.project_id, settings)
     compact_target = next(item for item in compact["milestones"] if item["release_identifier"] == "WB_2025_R01")
     assert compact_target["metrics"]["additions_feature_count"] == 3
     assert compact_target["artifacts"]["additions"]["exists"] is True
     assert compact_target["artifacts"]["building_change_buffer_10m"]["exists"] is True
+    assert "cumulative_growth_envelope" not in compact_target["artifacts"]
 
 
 def test_temporal_project_metric_audit_reads_published_artifacts(monkeypatch, tmp_path) -> None:

@@ -47,7 +47,6 @@ from src.domain.vectorize import (
     VectorizationContext,
     build_change_buffer_layers,
     build_temporal_growth_blocks,
-    build_temporal_growth_envelope,
 )
 from src.execution_profiles import PipelineExecutionConfig, resolve_backend, resolve_configured_inference_execution_config
 from src.schemas import (
@@ -951,6 +950,15 @@ def _build_metrics(
     )
 
 
+def _disable_temporal_growth_envelope(project_id: str, release_identifier: str | None, *, reason: str = "product_removed") -> None:
+    logger.info(
+        "TEMPORAL_GROWTH_ENVELOPE_DISABLED projectId=%s releaseIdentifier=%s reason=%s",
+        project_id,
+        release_identifier,
+        reason,
+    )
+
+
 def _artifact_backed_metrics(response: RunResponse, additions_geojson: dict[str, Any]) -> TemporalMilestoneMetrics:
     summary = response.summary
     feature_count = _feature_count_from_geojson(additions_geojson)
@@ -983,7 +991,7 @@ def _artifact_backed_metrics(response: RunResponse, additions_geojson: dict[str,
         cumulative_block_count=block_count,
         added_block_area_m2=round(block_area_m2, 2),
         cumulative_block_area_m2=round(block_area_m2, 2),
-        growth_envelope_area_m2=round(area_m2, 2),
+        growth_envelope_area_m2=0.0,
     )
 
 
@@ -3586,7 +3594,6 @@ def _milestone_has_derived_geometry_layers(milestone: TemporalMilestone) -> bool
     return (
         milestone.effective_building_blocks_geojson is not None
         and milestone.cumulative_growth_blocks_geojson is not None
-        and milestone.cumulative_growth_envelope_geojson is not None
         and milestone.metrics is not None
     )
 
@@ -3909,6 +3916,10 @@ def _refresh_temporal_derived_geometry_layers(project: TemporalProject, settings
                     additions_feature_count=additions_feature_count,
                     effective_feature_count=cumulative_feature_count or additions_feature_count,
                 )
+            else:
+                milestone.metrics.growth_envelope_area_m2 = 0.0
+            milestone.cumulative_growth_envelope_geojson = None
+            _disable_temporal_growth_envelope(project.project_id, milestone.release_identifier)
             continue
 
         release_date = milestone.release_date
@@ -3928,12 +3939,8 @@ def _refresh_temporal_derived_geometry_layers(project: TemporalProject, settings
                 release_date=release_date,
                 kind="cumulative_growth_block",
             )
-            _, milestone.cumulative_growth_envelope_geojson = build_temporal_growth_envelope(
-                milestone.cumulative_union_geojson,
-                aoi_geojson=project.aoi_geojson,
-                release_identifier=milestone.release_identifier,
-                release_date=release_date,
-            )
+            milestone.cumulative_growth_envelope_geojson = None
+            _disable_temporal_growth_envelope(project.project_id, milestone.release_identifier)
         additions_geometry = _geometry_from_geojson(milestone.additions_geojson)
         effective_geometry = _geometry_from_geojson(milestone.cumulative_union_geojson)
         if not additions_geometry.is_empty or not effective_geometry.is_empty:
@@ -3944,7 +3951,7 @@ def _refresh_temporal_derived_geometry_layers(project: TemporalProject, settings
                 building_level_available=milestone.manual_override_geojson is None,
                 effective_building_blocks_geojson=milestone.effective_building_blocks_geojson,
                 cumulative_growth_blocks_geojson=milestone.cumulative_growth_blocks_geojson,
-                cumulative_growth_envelope_geojson=milestone.cumulative_growth_envelope_geojson,
+                cumulative_growth_envelope_geojson=None,
             )
             if previous_metrics is not None and milestone.additions_geojson is None:
                 refreshed_metrics.added_area_m2 = previous_metrics.added_area_m2
@@ -3956,7 +3963,7 @@ def _refresh_temporal_derived_geometry_layers(project: TemporalProject, settings
                 refreshed_metrics.effective_feature_count = previous_metrics.effective_feature_count
                 refreshed_metrics.cumulative_block_count = previous_metrics.cumulative_block_count
                 refreshed_metrics.cumulative_block_area_m2 = previous_metrics.cumulative_block_area_m2
-                refreshed_metrics.growth_envelope_area_m2 = previous_metrics.growth_envelope_area_m2
+                refreshed_metrics.growth_envelope_area_m2 = 0.0
             milestone.metrics = refreshed_metrics
     return project
 
@@ -5332,7 +5339,7 @@ def _apply_pair_response_to_milestone(
     milestone.cumulative_union_geojson = None
     milestone.effective_building_blocks_geojson = response.building_blocks_geojson or _empty_feature_collection()
     milestone.cumulative_growth_blocks_geojson = response.building_blocks_geojson or _empty_feature_collection()
-    milestone.cumulative_growth_envelope_geojson = _buffer_layer_geojson(response.buffer_layers_geojson) or _empty_feature_collection()
+    milestone.cumulative_growth_envelope_geojson = None
     milestone.metrics = _artifact_backed_metrics(response, automated_additions_geojson)
     milestone.status = "complete"
     milestone.error_message = None
@@ -5625,6 +5632,8 @@ def publish_completed_tiled_request(
                 derive_spatial_layers=not inline_derived_geometry_skipped,
                 file_backed_additions=file_backed_additions,
             )
+            if inline_derived_geometry_skipped:
+                _disable_temporal_growth_envelope(project.project_id, target_release)
             if not inline_derived_geometry_skipped:
                 project = _recompute_project_outputs_from_index(project, aoi_geometry, target_index, settings=settings)
             project.updated_at = _utc_now_iso()
@@ -5749,7 +5758,6 @@ def _cached_run_project(settings: Settings, request_hash: str) -> TemporalProjec
 
     changes_geojson = response.change_polygons_geojson or response.new_buildings_geojson or _empty_feature_collection()
     building_blocks_geojson = response.building_blocks_geojson or _empty_feature_collection()
-    buffer_envelope_geojson = _buffer_layer_geojson(response.buffer_layers_geojson) or _empty_feature_collection()
     request_updated_at = datetime.fromtimestamp(result_dir.joinpath("run_response.json").stat().st_mtime, UTC).isoformat()
     if response.summary.result_semantics == "new_buildings":
         total_area_m2 = response.summary.total_new_building_area_m2
@@ -5783,7 +5791,7 @@ def _cached_run_project(settings: Settings, request_hash: str) -> TemporalProjec
         cumulative_block_count=int(block_count or 0),
         added_block_area_m2=round(float(block_area_m2 or 0.0), 2),
         cumulative_block_area_m2=round(float(block_area_m2 or 0.0), 2),
-        growth_envelope_area_m2=round(float(total_area_m2 or 0.0), 2),
+        growth_envelope_area_m2=0.0,
     )
 
     baseline = TemporalMilestone(
@@ -5803,7 +5811,7 @@ def _cached_run_project(settings: Settings, request_hash: str) -> TemporalProjec
         effective_footprint_geojson=_empty_feature_collection(),
         cumulative_union_geojson=_empty_feature_collection(),
         cumulative_growth_blocks_geojson=_empty_feature_collection(),
-        cumulative_growth_envelope_geojson=_empty_feature_collection(),
+        cumulative_growth_envelope_geojson=None,
         metrics=TemporalMilestoneMetrics(),
     )
     target = TemporalMilestone(
@@ -5823,7 +5831,7 @@ def _cached_run_project(settings: Settings, request_hash: str) -> TemporalProjec
         effective_footprint_geojson=changes_geojson,
         cumulative_union_geojson=changes_geojson,
         cumulative_growth_blocks_geojson=building_blocks_geojson,
-        cumulative_growth_envelope_geojson=buffer_envelope_geojson,
+        cumulative_growth_envelope_geojson=None,
         reference_imagery=None,
         metrics=target_metrics,
         artifacts=[
@@ -6255,12 +6263,14 @@ def _recompute_project_outputs_from_index(
             milestone.cumulative_union_geojson = None
             milestone.effective_building_blocks_geojson = milestone.automated_building_blocks_geojson or _empty_feature_collection()
             milestone.cumulative_growth_blocks_geojson = milestone.automated_building_blocks_geojson or _empty_feature_collection()
-            milestone.cumulative_growth_envelope_geojson = _buffer_layer_geojson(milestone.buffer_layers_geojson) or _empty_feature_collection()
+            milestone.cumulative_growth_envelope_geojson = None
             if milestone.metrics is None:
                 milestone.metrics = TemporalMilestoneMetrics(
                     additions_feature_count=_feature_count_from_geojson(additions_geojson),
                     effective_feature_count=_feature_count_from_geojson(additions_geojson),
                 )
+            else:
+                milestone.metrics.growth_envelope_area_m2 = 0.0
             if milestone.status != "error":
                 milestone.status = "complete"
                 milestone.error_message = None
@@ -6271,6 +6281,7 @@ def _recompute_project_outputs_from_index(
                 _feature_count_from_geojson(additions_geojson),
                 max_features,
             )
+            _disable_temporal_growth_envelope(project.project_id, milestone.release_identifier)
             previous_cumulative = GeometryCollection()
             continue
 
@@ -6331,19 +6342,14 @@ def _recompute_project_outputs_from_index(
                 release_date=release_date,
                 kind="cumulative_growth_block",
             )
-            _, cumulative_growth_envelope_geojson = build_temporal_growth_envelope(
-                milestone.cumulative_union_geojson,
-                aoi_geojson=project.aoi_geojson,
-                release_identifier=milestone.release_identifier,
-                release_date=release_date,
-            )
             milestone.effective_building_blocks_geojson = effective_blocks_geojson
             milestone.cumulative_growth_blocks_geojson = cumulative_blocks_geojson
-            milestone.cumulative_growth_envelope_geojson = cumulative_growth_envelope_geojson
+            milestone.cumulative_growth_envelope_geojson = None
         else:
             milestone.effective_building_blocks_geojson = _empty_feature_collection()
             milestone.cumulative_growth_blocks_geojson = _empty_feature_collection()
-            milestone.cumulative_growth_envelope_geojson = _empty_feature_collection()
+            milestone.cumulative_growth_envelope_geojson = None
+        _disable_temporal_growth_envelope(project.project_id, milestone.release_identifier)
 
         milestone.metrics = _build_metrics(
             additions_geometry,
@@ -6351,7 +6357,7 @@ def _recompute_project_outputs_from_index(
             building_level_available=manual_geometry.is_empty,
             effective_building_blocks_geojson=milestone.effective_building_blocks_geojson,
             cumulative_growth_blocks_geojson=milestone.cumulative_growth_blocks_geojson,
-            cumulative_growth_envelope_geojson=milestone.cumulative_growth_envelope_geojson,
+            cumulative_growth_envelope_geojson=None,
         )
         if milestone.status != "error":
             milestone.status = "complete"

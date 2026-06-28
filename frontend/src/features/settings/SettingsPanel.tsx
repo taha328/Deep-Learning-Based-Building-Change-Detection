@@ -909,7 +909,7 @@ export function SettingsPanel({
               </p>
             </div>
             {createProjectError ? (
-              <div className="rounded border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive-foreground">
+              <div className="rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-950 dark:border-red-500/40 dark:bg-red-950/30 dark:text-red-100">
                 {createProjectError}
               </div>
             ) : null}
@@ -1006,13 +1006,13 @@ export function SettingsPanel({
               </div>
 
               {projectsQuery.error ? (
-                <div className="rounded border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive-foreground">
+                <div className="rounded border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-950 dark:border-red-500/40 dark:bg-red-950/30 dark:text-red-100">
                   {formatErrorMessage(projectsQuery.error, t("common.unexpected_error"))}
                 </div>
               ) : null}
 
               {loadProjectMutation.error ? (
-                <div className="rounded border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive-foreground">
+                <div className="rounded border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-950 dark:border-red-500/40 dark:bg-red-950/30 dark:text-red-100">
                   {formatErrorMessage(loadProjectMutation.error, t("common.unexpected_error"))}
                 </div>
               ) : null}
@@ -1067,7 +1067,7 @@ export function SettingsPanel({
                 ) : null}
 
                 {releasesError ? (
-                  <div className="rounded border border-destructive/30 bg-destructive/10 px-4 py-4 text-sm text-destructive-foreground">
+                  <div className="rounded border border-red-300 bg-red-50 px-4 py-4 text-sm text-red-950 dark:border-red-500/40 dark:bg-red-950/30 dark:text-red-100">
                     {releasesError}
                   </div>
                 ) : null}
@@ -1368,7 +1368,7 @@ export function SettingsPanel({
               ) : null}
 
               {result && !result.success ? (
-                <div className="rounded border border-destructive/30 bg-destructive/10 px-4 py-4 text-sm leading-6 text-destructive-foreground">
+                <div className="rounded border border-red-300 bg-red-50 px-4 py-4 text-sm leading-6 text-red-950 dark:border-red-500/40 dark:bg-red-950/30 dark:text-red-100">
                   {result.error_message ?? t("settings.backend_unsuccessful_response")}
                 </div>
               ) : null}

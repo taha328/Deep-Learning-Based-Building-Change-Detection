@@ -151,13 +151,13 @@ export function WorkflowParametersPanel({
         {backendAvailabilityLoading ? <p className="text-sm text-muted-foreground">{t("status.checking_backend")}</p> : null}
 
         {backendAvailabilityError ? (
-          <div className="rounded border border-destructive/30 bg-destructive/10 px-3 py-3 text-sm text-destructive-foreground">
+          <div className="rounded border border-red-300 bg-red-50 px-3 py-3 text-sm text-red-950 dark:border-red-500/40 dark:bg-red-950/30 dark:text-red-100">
             Backend probe failed: {backendAvailabilityError}
           </div>
         ) : null}
 
         {selectedBackendBlocked ? (
-          <div className="rounded border border-destructive/30 bg-destructive/10 px-3 py-3 text-sm text-destructive-foreground">
+          <div className="rounded border border-red-300 bg-red-50 px-3 py-3 text-sm text-red-950 dark:border-red-500/40 dark:bg-red-950/30 dark:text-red-100">
             {selectedBackendReason}
           </div>
         ) : null}

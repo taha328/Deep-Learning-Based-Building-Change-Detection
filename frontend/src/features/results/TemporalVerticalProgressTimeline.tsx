@@ -65,7 +65,9 @@ function StageRow({
             >
               {stage.label}
             </p>
-            <p className="mt-0.5 text-xs leading-5 text-muted-foreground">{stage.description}</p>
+            {stage.description ? (
+              <p className="mt-0.5 text-xs leading-5 text-muted-foreground">{stage.description}</p>
+            ) : null}
           </div>
           <p
             className={cn(
@@ -94,13 +96,13 @@ function StageRow({
                 <p className="mt-1 text-muted-foreground">{pairLabel}</p>
               </div>
               <p className="text-right text-muted-foreground">
-                {globalPercent !== null ? `Analyse globale ${Math.round(globalPercent)} %` : "Analyse globale en cours"}
+                Analyse globale en cours
               </p>
             </div>
             {globalPercent !== null ? <Progress value={globalPercent} className="h-1.5 bg-secondary" indicatorClassName="bg-primary" /> : null}
             <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
               <span>Analyse de la période</span>
-              <span>{pairPercent !== null ? `${Math.round(pairPercent)} %` : "En cours"}</span>
+              <span>En cours</span>
             </div>
             {pairPercent !== null ? <Progress value={pairPercent} className="h-1.5 bg-secondary" indicatorClassName="bg-primary" /> : null}
           </div>
@@ -123,7 +125,7 @@ export function TemporalVerticalProgressTimeline({ progress }: { progress: RunPr
             <p className="mt-1 text-xs leading-5 text-muted-foreground">{timeline.summaryDetail}</p>
           </div>
           <p className="shrink-0 text-right text-xs text-muted-foreground">
-            {timeline.globalPercent !== null ? `${Math.round(timeline.globalPercent)} % analyse` : timeline.pairStepLabel}
+            {timeline.pairStepLabel}
           </p>
         </div>
       </div>
@@ -147,13 +149,15 @@ export function TemporalVerticalProgressTimeline({ progress }: { progress: RunPr
         className={cn(
           "rounded-md border px-3 py-3",
           timeline.ready && "border-green-600/30 bg-green-600/10",
-          timeline.failed && "border-destructive/30 bg-destructive/10",
+          timeline.failed && "border-red-300 bg-red-50 dark:border-red-500/40 dark:bg-red-950/30",
           !timeline.ready && !timeline.failed && "border-border bg-card",
         )}
       >
-        <p className={cn("text-sm font-medium", timeline.failed ? "text-destructive" : "text-foreground")}>{timeline.readinessLabel}</p>
+        <p className={cn("text-sm font-medium", timeline.failed ? "text-red-950 dark:text-red-100" : "text-foreground")}>{timeline.readinessLabel}</p>
         <p className="mt-1 text-xs leading-5 text-muted-foreground">{timeline.readinessDetail}</p>
-        {!timeline.ready && !timeline.failed ? <p className="mt-2 text-xs text-muted-foreground">{timeline.currentStageNote}</p> : null}
+        {!timeline.ready && !timeline.failed && timeline.currentStageNote ? (
+          <p className="mt-2 text-xs text-muted-foreground">{timeline.currentStageNote}</p>
+        ) : null}
       </div>
     </section>
   );

@@ -25,6 +25,7 @@ def create_fastapi_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=["Content-Disposition", "Content-Length", "Content-Type"],
     )
 
     app.include_router(health.router, prefix="/api", tags=["health"])

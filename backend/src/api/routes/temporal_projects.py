@@ -69,6 +69,83 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
+_EXPORT_EXPOSE_HEADERS = "Content-Disposition, Content-Length, Content-Type"
+
+
+def _results_export_filename(project_id: str, normalized_format: str) -> str:
+    filename = TEMPORAL_RESULTS_EXPORT_FILENAMES[normalized_format]
+    if normalized_format == "shapefile":
+        return f"resultats_{project_id}_{filename}"
+    return f"resultats_{project_id}.{normalized_format}"
+
+
+def _results_export_file_response(project_id: str, normalized_format: str, path: Path) -> FileResponse:
+    if path.name.endswith(".partial"):
+        logger.info(
+            "EXPORT_CACHE_FILE_INVALID projectId=%s format=%s path=%s reason=partial_file_response_blocked",
+            project_id,
+            normalized_format,
+            path,
+        )
+        raise_api_error(status.HTTP_500_INTERNAL_SERVER_ERROR, "export_file_invalid", "Export file is incomplete.")
+    try:
+        stat_result = path.stat()
+    except OSError as exc:
+        logger.info(
+            "EXPORT_CACHE_FILE_INVALID projectId=%s format=%s path=%s reason=missing_or_unreadable_file",
+            project_id,
+            normalized_format,
+            path,
+        )
+        raise_api_error(status.HTTP_500_INTERNAL_SERVER_ERROR, "export_file_invalid", f"Export file is not readable: {exc}")
+    if stat_result.st_size <= 0:
+        logger.info(
+            "EXPORT_CACHE_FILE_INVALID projectId=%s format=%s path=%s reason=empty_file",
+            project_id,
+            normalized_format,
+            path,
+        )
+        raise_api_error(status.HTTP_500_INTERNAL_SERVER_ERROR, "export_file_invalid", "Export file is empty.")
+
+    headers = {
+        "Access-Control-Expose-Headers": _EXPORT_EXPOSE_HEADERS,
+        "Content-Length": str(stat_result.st_size),
+        "X-Content-Type-Options": "nosniff",
+    }
+    filename = _results_export_filename(project_id, normalized_format)
+    logger.info(
+        "EXPORT_FILE_RESPONSE_READY projectId=%s format=%s path=%s bytes=%s filename=%s",
+        project_id,
+        normalized_format,
+        path,
+        stat_result.st_size,
+        filename,
+    )
+    response = FileResponse(
+        path,
+        media_type=TEMPORAL_RESULTS_EXPORT_MEDIA_TYPES[normalized_format],
+        filename=filename,
+        headers=headers,
+    )
+    logger.info(
+        "EXPORT_FILE_RESPONSE_HEADERS projectId=%s format=%s contentType=%s contentDisposition=%s contentLength=%s exposedHeaders=%s",
+        project_id,
+        normalized_format,
+        response.headers.get("content-type"),
+        response.headers.get("content-disposition"),
+        response.headers.get("content-length"),
+        response.headers.get("access-control-expose-headers"),
+    )
+    logger.info(
+        "EXPORT_FILE_RESPONSE_SENT projectId=%s format=%s path=%s bytes=%s",
+        project_id,
+        normalized_format,
+        path,
+        stat_result.st_size,
+    )
+    return response
+
+
 class TemporalProjectOverrideBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -267,12 +344,7 @@ def _export_project_results(project_id: str, export_format: str, settings) -> Fi
         raise_api_error(status.HTTP_400_BAD_REQUEST, "unsupported_export_format", str(exc))
     except Exception as exc:  # noqa: BLE001
         raise_api_error(status.HTTP_500_INTERNAL_SERVER_ERROR, "export_failed", f"{type(exc).__name__}: {exc}")
-    filename = TEMPORAL_RESULTS_EXPORT_FILENAMES[normalized_format]
-    return FileResponse(
-        path,
-        media_type=TEMPORAL_RESULTS_EXPORT_MEDIA_TYPES[normalized_format],
-        filename=f"resultats_{project_id}_{filename}" if normalized_format == "shapefile" else f"resultats_{project_id}.{normalized_format}",
-    )
+    return _results_export_file_response(project_id, normalized_format, path)
 
 
 @router.head("/{project_id}/exports/results.{export_format}")
@@ -318,12 +390,7 @@ def export_project_results_for_perimeter(
         raise_api_error(status.HTTP_400_BAD_REQUEST, "invalid_export_perimeter", str(exc))
     except Exception as exc:  # noqa: BLE001
         raise_api_error(status.HTTP_500_INTERNAL_SERVER_ERROR, "export_failed", f"{type(exc).__name__}: {exc}")
-    filename = TEMPORAL_RESULTS_EXPORT_FILENAMES[body.format]
-    return FileResponse(
-        path,
-        media_type=TEMPORAL_RESULTS_EXPORT_MEDIA_TYPES[body.format],
-        filename=f"resultats_{project_id}_{filename}" if body.format == "shapefile" else f"resultats_{project_id}.{body.format}",
-    )
+    return _results_export_file_response(project_id, body.format, path)
 
 
 @router.post("/{project_id}/milestones/{release_identifier}/override")

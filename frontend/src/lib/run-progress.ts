@@ -70,7 +70,7 @@ export type TemporalTimelineStageState = "complete" | "current" | "pending" | "f
 export interface TemporalTimelineStageDefinition {
   id: TemporalTimelineStageId;
   label: string;
-  description: string;
+  description?: string;
 }
 
 export interface TemporalTimelineStage extends TemporalTimelineStageDefinition {
@@ -115,27 +115,22 @@ export const TEMPORAL_VERTICAL_TIMELINE_STAGES: TemporalTimelineStageDefinition[
   {
     id: "queued",
     label: "En attente",
-    description: "Le projet est dans la file d'exécution.",
   },
   {
     id: "metadata",
     label: "Préparation du projet",
-    description: "Chargement des jalons, paramètres et zone d'étude.",
   },
   {
     id: "tile_availability",
     label: "Vérification des tuiles",
-    description: "Contrôle de la disponibilité des images Wayback.",
   },
   {
     id: "download",
     label: "Téléchargement des images",
-    description: "Préparation des mosaïques de référence.",
   },
   {
     id: "alignment",
     label: "Alignement",
-    description: "Préparation des images comparables entre jalons.",
   },
   {
     id: "inference",
@@ -145,37 +140,30 @@ export const TEMPORAL_VERTICAL_TIMELINE_STAGES: TemporalTimelineStageDefinition[
   {
     id: "postprocessing",
     label: "Post-traitement",
-    description: "Nettoyage, filtrage et consolidation des résultats.",
   },
   {
     id: "vectorization",
     label: "Vectorisation",
-    description: "Conversion des résultats en couches spatiales.",
   },
   {
     id: "publication",
     label: "Publication des couches",
-    description: "Écriture des couches et artefacts du projet.",
   },
   {
     id: "exports",
     label: "Génération des exports",
-    description: "Préparation des fichiers QGIS, GeoPackage et rapports disponibles.",
   },
   {
     id: "metadata_write",
     label: "Écriture des métadonnées",
-    description: "Mise à jour du manifeste, du résumé projet et de la base.",
   },
   {
     id: "cleanup",
     label: "Nettoyage",
-    description: "Compression ou suppression sécurisée des fichiers temporaires lourds.",
   },
   {
     id: "done",
     label: "Terminé",
-    description: "Les résultats sont prêts à être consultés.",
   },
 ];
 
@@ -398,44 +386,22 @@ function activeTemporalStageFromProgress(progress: RunProgressState): TemporalTi
 
 function temporalStageNote(stageId: TemporalTimelineStageId, progress: RunProgressState, analysisComplete: boolean): string {
   if (isCompletedProgress(progress)) {
-    return "Résultats prêts.";
+    return "";
   }
   if (progress.phase === "error") {
     return "Une erreur est survenue pendant le traitement.";
   }
   if (isCancelledProgress(progress)) {
-    return "Traitement annulé ou annulation demandée.";
+    return "";
   }
   if (analysisComplete && stageId !== "done") {
-    return "Analyse terminée — finalisation en cours.";
+    return "";
   }
   switch (stageId) {
-    case "queued":
-      return "En attente d'un worker disponible.";
-    case "metadata":
-      return "Préparation du projet temporel.";
-    case "tile_availability":
-      return "Vérification des images Wayback nécessaires.";
-    case "download":
-      return "Téléchargement ou réutilisation des images de référence.";
-    case "alignment":
-      return "Alignement des images avant analyse.";
     case "inference":
-      return "Analyse des changements en cours.";
-    case "postprocessing":
-      return "Post-traitement des détections.";
-    case "vectorization":
-      return "Conversion des résultats en couches spatiales.";
-    case "publication":
-      return "Publication des couches spatiales...";
-    case "exports":
-      return "Génération des exports...";
-    case "metadata_write":
-      return "Écriture des métadonnées du projet...";
-    case "cleanup":
-      return "Nettoyage des fichiers temporaires...";
-    case "done":
-      return "Résultats prêts.";
+      return "Analyse de la période";
+    default:
+      return "";
   }
 }
 

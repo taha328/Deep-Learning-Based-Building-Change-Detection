@@ -948,6 +948,8 @@ def test_temporal_results_export_route_headers_and_unsupported_format(tmp_path: 
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("application/geo+json")
         assert "resultats_temporal-export-formats-test.geojson" in response.headers["content-disposition"]
+        assert "Content-Disposition" in response.headers["access-control-expose-headers"]
+        assert int(response.headers["content-length"]) == len(response.content)
 
         tsv = client.get("/api/temporal-projects/temporal-export-formats-test/exports/results.tsv")
         assert tsv.status_code == 200
@@ -956,6 +958,17 @@ def test_temporal_results_export_route_headers_and_unsupported_format(tmp_path: 
         shapefile = client.get("/api/temporal-projects/temporal-export-formats-test/exports/results_shapefile.zip")
         assert shapefile.status_code == 200
         assert shapefile.headers["content-type"].startswith("application/zip")
+        assert "attachment" in shapefile.headers["content-disposition"]
+        assert int(shapefile.headers["content-length"]) == len(shapefile.content)
+        shapefile_metadata = json.loads(
+            (
+                settings.temporal_projects_dir
+                / "temporal-export-formats-test"
+                / "exports"
+                / "results_shapefile.zip.metadata.json"
+            ).read_text(encoding="utf-8")
+        )
+        assert shapefile_metadata["output"]["size_bytes"] == len(shapefile.content)
 
         xlsx = client.get("/api/temporal-projects/temporal-export-formats-test/exports/results.xlsx")
         assert xlsx.status_code == 200
@@ -1015,3 +1028,27 @@ def test_temporal_results_export_route_headers_and_unsupported_format(tmp_path: 
         assert outside.json()["detail"]["code"] == "invalid_export_perimeter"
     finally:
         app.dependency_overrides.clear()
+
+
+def test_temporal_results_cached_export_fast_path_skips_project_hydration(monkeypatch, tmp_path: Path, caplog) -> None:
+    caplog.set_level(logging.INFO, logger="src.services.temporal_exports")
+    settings = _save_project(tmp_path)
+    first_path = build_temporal_results_export_file(
+        "temporal-export-formats-test",
+        "shapefile",
+        settings=settings,
+    )
+
+    monkeypatch.setattr(
+        "src.services.temporal_exports._load_project",
+        lambda *args, **kwargs: pytest.fail("valid cached project-AOI export should not hydrate project"),
+    )
+    second_path = build_temporal_results_export_file(
+        "temporal-export-formats-test",
+        "shapefile",
+        settings=settings,
+    )
+
+    assert second_path == first_path
+    assert "EXPORT_FAST_CACHE_HIT" in caplog.text
+    assert "EXPORT_DOWNLOAD_TOTAL_MS" in caplog.text

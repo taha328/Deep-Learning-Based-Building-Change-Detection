@@ -300,3 +300,13 @@ test("temporal vertical timeline exposes French stage labels", () => {
     ],
   );
 });
+
+test("temporal vertical timeline omits descriptions for non-inference stages", () => {
+  for (const stage of TEMPORAL_VERTICAL_TIMELINE_STAGES) {
+    if (stage.id === "inference") {
+      assert.equal(stage.description, "Détection des changements bâtimentaires.");
+    } else {
+      assert.equal(stage.description, undefined);
+    }
+  }
+});

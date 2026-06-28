@@ -683,7 +683,7 @@ function preferredMilestoneId(project: TemporalProject | null | undefined): stri
 function milestoneBadgeTone(status: TemporalMilestone["status"]): string {
   if (status === "complete") return "border-primary/30 bg-primary/10 text-foreground";
   if (status === "validated") return "border-accent/30 bg-accent/10 text-foreground";
-  if (status === "error") return "border-destructive/30 bg-destructive/10 text-destructive-foreground";
+  if (status === "error") return "border-red-300 bg-red-50 text-red-950 dark:border-red-500/40 dark:bg-red-950/30 dark:text-red-100";
   return "bg-surface text-foreground border-sidebar-border";
 }
 
@@ -1909,7 +1909,7 @@ export function TemporalMosaicPanel({
               </p>
             </div>
             {createProjectError ? (
-              <div className="rounded border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive-foreground">
+              <div className="rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-950 dark:border-red-500/40 dark:bg-red-950/30 dark:text-red-100">
                 {createProjectError}
               </div>
             ) : null}
@@ -2102,7 +2102,7 @@ export function TemporalMosaicPanel({
                         {t("temporal.loading_projects")}
                       </div>
                     ) : releasesError ? (
-                      <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive-foreground">
+                      <div className="rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-950 dark:border-red-500/40 dark:bg-red-950/30 dark:text-red-100">
                         {releasesError}
                       </div>
                     ) : groupedAvailableReleases.size ? (
@@ -2270,13 +2270,13 @@ export function TemporalMosaicPanel({
                           </div>
                         </div>
                         {resultsExportError ? (
-                          <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive-foreground">
+                          <div className="rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-950 dark:border-red-500/40 dark:bg-red-950/30 dark:text-red-100">
                             {resultsExportError}
                           </div>
                         ) : null}
 
                         {selectedMilestone.error_message ? (
-                          <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-3 text-sm text-destructive-foreground">
+                          <div className="rounded-lg border border-red-300 bg-red-50 px-3 py-3 text-sm text-red-950 dark:border-red-500/40 dark:bg-red-950/30 dark:text-red-100">
                             {selectedMilestone.error_message}
                           </div>
                         ) : null}
@@ -2418,7 +2418,7 @@ export function TemporalMosaicPanel({
 
         {(projectsQuery.error || loadProjectMutation.error || saveProjectMutation.error || runProjectMutation.error || importOverrideMutation.error || importReferenceLayerMutation.error || updateReferenceLayerMutation.error || deleteReferenceLayerMutation.error) ? (
           <div className="p-5 pt-0">
-            <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive-foreground">
+            <div className="rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-950 dark:border-red-500/40 dark:bg-red-950/30 dark:text-red-100">
               <div className="flex items-start gap-2">
                 <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
                 <div>
@@ -2514,7 +2514,11 @@ export function TemporalMosaicPanel({
             {resultsExportPerimeterMode === "drawn" && !exportDrawnGeometry ? <p className="text-sm text-muted-foreground">Aucune zone dessinée.</p> : null}
             {resultsExportPerimeterMode === "imported" && !exportImportedGeometry ? <p className="text-sm text-muted-foreground">Aucune zone importée.</p> : null}
             {resultsExportPerimeterMode !== "project_aoi" && exportGeometry ? <p className="text-sm text-green-600">Zone d’export valide.</p> : null}
-            {resultsExportError ? <p className="text-sm text-destructive">{resultsExportError}</p> : null}
+            {resultsExportError ? (
+              <div role="alert" className="rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-950 dark:border-red-500/40 dark:bg-red-950/30 dark:text-red-100">
+                {resultsExportError}
+              </div>
+            ) : null}
           </div>
           <DialogFooter>
             <Button
