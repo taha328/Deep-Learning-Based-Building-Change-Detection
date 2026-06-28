@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 from io import BytesIO
 from pathlib import Path
@@ -479,6 +480,114 @@ def test_temporal_results_export_reuses_valid_cache(tmp_path: Path) -> None:
     second = build_temporal_results_export_file("temporal-export-formats-test", "geojson", settings=settings)
     assert second == first
     assert second.stat().st_mtime_ns == first_mtime
+
+
+def test_temporal_results_exports_resolve_file_backed_artifacts_for_all_formats_and_custom_scope(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("src.services.temporal_projects.TEMPORAL_VECTOR_TILE_METADATA_THRESHOLD_BYTES", 1)
+    settings = _settings(tmp_path)
+    project = TemporalProject(
+        project_id="temporal-file-backed-export",
+        name="File Backed Export",
+        aoi_geojson=_feature_collection_from_bounds((-7.001, 32.999, -6.998, 33.002))["features"][0]["geometry"],
+        milestones=[
+            TemporalMilestone(
+                release_identifier="WB_2018_R01",
+                release_date="2018-01-15",
+                status="complete",
+                metrics=TemporalMilestoneMetrics(total_area_m2=1000.0),
+            ),
+            TemporalMilestone(
+                release_identifier="WB_2020_R01",
+                release_date="2020-01-15",
+                status="complete",
+                additions_geojson=None,
+                buffer_layers_geojson={},
+                metrics=TemporalMilestoneMetrics(added_area_m2=100.0, total_area_m2=1100.0, additions_feature_count=1),
+            ),
+            TemporalMilestone(
+                release_identifier="WB_2022_R01",
+                release_date="2022-01-15",
+                status="complete",
+                additions_geojson=None,
+                buffer_layers_geojson={},
+                metrics=TemporalMilestoneMetrics(added_area_m2=100.0, total_area_m2=1200.0, additions_feature_count=1),
+            ),
+        ],
+        created_at="2026-05-19T00:00:00Z",
+        updated_at="2026-05-19T00:00:00Z",
+    )
+    _save_project_payload(settings, project)
+
+    artifact_payloads = {
+        "WB_2020_R01": _feature_collection_from_bounds((-7.0000, 33.0000, -6.9998, 33.0002)),
+        "WB_2022_R01": _feature_collection_from_bounds((-6.9996, 33.0000, -6.9994, 33.0002)),
+    }
+    buffer_payloads = {
+        "WB_2020_R01": _feature_collection_from_bounds((-7.00000, 33.00000, -6.99970, 33.00030)),
+        "WB_2022_R01": _feature_collection_from_bounds((-6.99960, 33.00000, -6.99930, 33.00030)),
+    }
+    for release, additions in artifact_payloads.items():
+        milestone_dir = settings.temporal_projects_dir / project.project_id / "milestones" / release
+        milestone_dir.mkdir(parents=True, exist_ok=True)
+        (milestone_dir / "additions.geojson").write_text(json.dumps(additions), encoding="utf-8")
+        for distance in ("10m", "15m", "20m"):
+            (milestone_dir / f"building_change_buffer_{distance}.geojson").write_text(
+                json.dumps(buffer_payloads[release]),
+                encoding="utf-8",
+            )
+
+    caplog.set_level(logging.INFO)
+    paths = {
+        export_format: build_temporal_results_export_file(project.project_id, export_format, settings=settings)
+        for export_format in ("xlsx", "kml", "geojson", "topojson", "json", "tsv")
+    }
+    assert all(path.is_file() and path.stat().st_size > 0 for path in paths.values())
+    assert len(json.loads(paths["geojson"].read_text())["features"]) == 8
+    assert json.loads(paths["json"].read_text())["milestones"][1]["layer_feature_counts"] == {
+        "additions": 1,
+        "buffer_10m": 1,
+        "buffer_15m": 1,
+        "buffer_20m": 1,
+    }
+    assert len(paths["tsv"].read_text().splitlines()) == 9
+
+    shapefile_path = build_temporal_results_export_file(project.project_id, "shapefile", settings=settings)
+    log_text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "EXPORT_FILE_BACKED_LAYER_SELECTED" in log_text
+    assert "EXPORT_LAYER_MISSING" not in log_text
+    with zipfile.ZipFile(shapefile_path) as archive:
+        names = archive.namelist()
+        assert "batiments_ajoutes_par_date/batiments_ajoutes_2022_Q1.shp" in names
+        assert "batiments_ajoutes_par_date/batiments_ajoutes_2020_Q1.shp" in names
+        assert "buffer_10m/buffer_10m_2022_Q1.shp" in names
+        assert "buffer_10m/buffer_10m_2020_Q1.shp" in names
+
+    perimeter = {
+        "mode": "custom_geometry",
+        "source": "imported",
+        "geometry": {
+            "type": "Polygon",
+            "coordinates": [[
+                [-7.0002, 32.9999],
+                [-6.9997, 32.9999],
+                [-6.9997, 33.0004],
+                [-7.0002, 33.0004],
+                [-7.0002, 32.9999],
+            ]],
+        },
+    }
+    first_custom = build_temporal_results_export_file(project.project_id, "geojson", settings=settings, perimeter=perimeter)
+    first_custom_mtime = first_custom.stat().st_mtime_ns
+    second_custom = build_temporal_results_export_file(project.project_id, "geojson", settings=settings, perimeter=perimeter)
+    assert second_custom == first_custom
+    assert second_custom.stat().st_mtime_ns == first_custom_mtime
+    custom_payload = json.loads(second_custom.read_text())
+    assert custom_payload["export_metadata"]["perimeter_source"] == "imported"
+    assert custom_payload["features"]
 
 
 def test_temporal_results_shapefile_invalidates_legacy_cache_without_version_metadata(tmp_path: Path) -> None:

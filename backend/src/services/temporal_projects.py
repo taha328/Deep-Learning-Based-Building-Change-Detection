@@ -3099,6 +3099,17 @@ def resolve_temporal_project_artifact_path(
             path,
             size_bytes,
         )
+    elif access_mode.startswith("export"):
+        logger.info(
+            "EXPORT_ARTIFACT_RESOLVED projectId=%s releaseIdentifier=%s artifactKey=%s path=%s bytes=%s mediaType=%s accessMode=%s",
+            project_id,
+            release_identifier,
+            artifact_key,
+            path,
+            size_bytes,
+            media_type,
+            access_mode,
+        )
     elif access_mode == "qgis_gpkg_source":
         logger.info(
             "QGIS_GPKG_SOURCE_RESOLVED projectId=%s releaseIdentifier=%s artifactKey=%s path=%s bytes=%s",
