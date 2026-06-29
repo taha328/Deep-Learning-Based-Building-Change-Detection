@@ -1,0 +1,35 @@
+{
+  "buttons": [
+    "Aperçu",
+    "Zone d'intérêt",
+    "Archives",
+    "Progression",
+    "Téléchargements",
+    "FR",
+    "Basculer vers le mode clair",
+    "Compte",
+    "Réduire le panneau",
+    "Avant 2026 Q2\n0 m²",
+    "2026 Q2\n19,120 m²",
+    "Télécharger les résultats",
+    "Importer le remplacement",
+    "Ajouter une couche de référence",
+    "Agrandir",
+    "Réduire",
+    "Adapter à la zone",
+    "Afficher les statistiques"
+  ],
+  "canvasCount": 1,
+  "hasCompletedMilestone": true,
+  "hasExportControl": true,
+  "hasMapboxAttribution": true,
+  "hasProjectName": false,
+  "svgCount": 17,
+  "textMarkers": [
+    "Télécharger les résultats",
+    "Mapbox"
+  ],
+  "yellowInlineStyleCandidates": [],
+  "consoleMapboxErrors": [],
+  "screenshotPath": "/Users/tahaelouali/Developer/Building_change_app/artifacts/fixes/full_release_env_rebuild_a_to_z_validation/frontend_bouskoura_results_over_basemap.png"
+}

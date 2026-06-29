@@ -1,0 +1,14 @@
+{
+  "bodyTextSample": "FR\nBuilding Change\nAperçu\nAperçu\nSélectionnez un projet enregistré ou démarrez une nouvelle chronologie.\nNouveau\nPROJETS ENREGISTRÉS\nSélectionner un projet\nRelease A2Z Bouskoura non-empty export validation\nRelease A2Z Docker CPU validation\n0.4\ntest\nDocker CPU real validation\nNOM DU PROJET\n© Mapbox © OpenStreetMap contributors\n© Mapbox © OpenStreetMap contributors | MapLibre",
+  "canvasCount": 0,
+  "canvasRects": [],
+  "mapboxglControls": 0,
+  "resourceCount": 0,
+  "resourceSample": [],
+  "runtime": null,
+  "title": "Building Change Detection",
+  "tokenLength": 0,
+  "tokenPrefix": null,
+  "consoleMapboxErrors": [],
+  "screenshotPath": "/Users/tahaelouali/Developer/Building_change_app/artifacts/fixes/full_release_env_rebuild_a_to_z_validation/frontend_mapbox_basemap_default.png"
+}

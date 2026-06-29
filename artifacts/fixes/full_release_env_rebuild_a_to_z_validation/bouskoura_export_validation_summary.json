@@ -1,0 +1,149 @@
+{
+  "custom_geometry": {
+    "coordinates": [
+      [
+        [
+          -7.5358,
+          33.3662
+        ],
+        [
+          -7.5331,
+          33.3662
+        ],
+        [
+          -7.5331,
+          33.3689
+        ],
+        [
+          -7.5358,
+          33.3689
+        ],
+        [
+          -7.5358,
+          33.3662
+        ]
+      ]
+    ],
+    "type": "Polygon"
+  },
+  "project_id": "release-a2z-bouskoura-20260629",
+  "records": [
+    {
+      "content_disposition": "attachment; filename=\"resultats_release-a2z-bouskoura-20260629.geojson\"",
+      "content_type": "application/geo+json",
+      "duration_ms": 317.8,
+      "feature_count": 100,
+      "geojson_type": "FeatureCollection",
+      "geometry_types": [
+        "Polygon"
+      ],
+      "name": "bouskoura_whole_results.geojson",
+      "sha256": "27c5895cb0e1361dc9da2be7fb8a35c618312e22146850ceb11e0466f0c09040",
+      "size_bytes": 967817
+    },
+    {
+      "content_disposition": "attachment; filename=\"resultats_release-a2z-bouskoura-20260629_results_shapefile.zip\"",
+      "content_type": "application/zip",
+      "duration_ms": 508.77,
+      "has_dbf": true,
+      "has_qgz": true,
+      "has_shp": true,
+      "name": "bouskoura_whole_results.zip",
+      "sha256": "1bf8e2100a091727d5887ee899afe057e4890e83ef0b24d4f38e1b1c0e17b190",
+      "size_bytes": 4295931,
+      "zip_entry_count": 57,
+      "zip_suffixes": [
+        ".cpg",
+        ".dbf",
+        ".prj",
+        ".qgz",
+        ".qix",
+        ".shp",
+        ".shx",
+        ".tif",
+        ".txt"
+      ]
+    },
+    {
+      "duration_ms": 853.19,
+      "name": "bouskoura_project_export_bundle_response.json",
+      "response": {
+        "filename": "Release_A2Z_Bouskoura_non-empty_export_validation_2025-03_2026-05_export_QGIS.zip",
+        "label": "Export QGIS",
+        "path": "/data/runtime_cache/temporal_projects/release-a2z-bouskoura-20260629/Release_A2Z_Bouskoura_non-empty_export_validation_2025-03_2026-05_export_QGIS.zip"
+      }
+    },
+    {
+      "content_disposition": "attachment; filename=\"resultats_release-a2z-bouskoura-20260629.geojson\"",
+      "content_type": "application/geo+json",
+      "duration_ms": 363.97,
+      "feature_count": 100,
+      "geojson_type": "FeatureCollection",
+      "geometry_types": [
+        "Polygon"
+      ],
+      "name": "bouskoura_custom_first_results.geojson",
+      "sha256": "eab9e64e498ee9d19a910e6554b0d8d3dd0802dba523781022fd549b56629818",
+      "size_bytes": 786648
+    },
+    {
+      "content_disposition": "attachment; filename=\"resultats_release-a2z-bouskoura-20260629_results_shapefile.zip\"",
+      "content_type": "application/zip",
+      "duration_ms": 570.78,
+      "has_dbf": true,
+      "has_qgz": true,
+      "has_shp": true,
+      "name": "bouskoura_custom_first_results.zip",
+      "sha256": "92e1e465ae6500eca657813ddea5f50f09e151ba7d96c579e3409920c86b9699",
+      "size_bytes": 1956476,
+      "zip_entry_count": 64,
+      "zip_suffixes": [
+        ".cpg",
+        ".dbf",
+        ".prj",
+        ".qgz",
+        ".qix",
+        ".shp",
+        ".shx",
+        ".tif",
+        ".txt"
+      ]
+    },
+    {
+      "content_disposition": "attachment; filename=\"resultats_release-a2z-bouskoura-20260629.geojson\"",
+      "content_type": "application/geo+json",
+      "duration_ms": 9.95,
+      "feature_count": 100,
+      "geojson_type": "FeatureCollection",
+      "geometry_types": [
+        "Polygon"
+      ],
+      "name": "bouskoura_custom_repeat_results.geojson",
+      "sha256": "eab9e64e498ee9d19a910e6554b0d8d3dd0802dba523781022fd549b56629818",
+      "size_bytes": 786648
+    },
+    {
+      "content_disposition": "attachment; filename=\"resultats_release-a2z-bouskoura-20260629_results_shapefile.zip\"",
+      "content_type": "application/zip",
+      "duration_ms": 14.96,
+      "has_dbf": true,
+      "has_qgz": true,
+      "has_shp": true,
+      "name": "bouskoura_custom_repeat_results.zip",
+      "sha256": "92e1e465ae6500eca657813ddea5f50f09e151ba7d96c579e3409920c86b9699",
+      "size_bytes": 1956476,
+      "zip_entry_count": 64,
+      "zip_suffixes": [
+        ".cpg",
+        ".dbf",
+        ".prj",
+        ".qgz",
+        ".qix",
+        ".shp",
+        ".shx",
+        ".tif",
+        ".txt"
+      ]
+    }
+  ]
+}
