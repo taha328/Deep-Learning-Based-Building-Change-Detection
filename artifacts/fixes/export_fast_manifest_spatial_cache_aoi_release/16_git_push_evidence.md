@@ -1,10 +1,11 @@
 # Git Push Evidence
 
-Release code was committed and pushed to `main`.
+Release code was committed, tagged, and pushed. A follow-up documentation commit then added these release validation evidence files to `main`.
 
-- Commit: `1ff1e64310675b6aa8875d23a55050e6b913eae0`
+- Release code commit: `1ff1e64310675b6aa8875d23a55050e6b913eae0`
+- Evidence follow-up commit: `478f65abd08239d6991f18aa7b9ff38327336b1e`
 - Remote branch: `github-source/main`
-- Remote branch SHA: `1ff1e64310675b6aa8875d23a55050e6b913eae0`
+- Remote branch includes the release code commit and the evidence follow-up commit.
 - Annotated tag: `v0.1.4`
 - Tag object SHA: `51a7500d6f8cf49918d5793c0a35c0d375849781`
 - Peeled tag commit: `1ff1e64310675b6aa8875d23a55050e6b913eae0`
