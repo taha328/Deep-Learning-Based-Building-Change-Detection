@@ -29,7 +29,7 @@ Open:
 
 The release package includes the application services and authorized model artifact. CPU Docker is the supported packaged runtime. CUDA is optional and is not production-certified.
 
-### Windows PowerShell - Advanced Native Install Without Docker
+### Windows PowerShell - Native Install Without Docker
 
 Native Windows mode is intended for development, debugging, and machines where Docker Desktop is not available. Open PowerShell as Administrator, then run:
 
