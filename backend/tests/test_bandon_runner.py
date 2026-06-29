@@ -474,3 +474,19 @@ def test_resolve_launcher_prefers_env_python_over_conda(tmp_path, monkeypatch) -
     assert launcher_name == "env_python"
     assert launcher_prefix == [str(env_python)]
     assert python_executable == str(env_python)
+
+
+def test_resolve_launcher_accepts_windows_venv_python(tmp_path, monkeypatch) -> None:
+    settings = _settings(tmp_path)
+    unix_python = settings.bandon_env_prefix / "bin" / "python"
+    unix_python.unlink()
+    env_python = settings.bandon_env_prefix / "Scripts" / "python.exe"
+    env_python.parent.mkdir(parents=True, exist_ok=True)
+    env_python.write_text("# native Windows venv python placeholder\n", encoding="utf-8")
+    monkeypatch.setattr("src.domain.bandon_runner.shutil.which", lambda command: None)
+
+    launcher_name, launcher_prefix, python_executable = _resolve_launcher(settings.bandon_env_prefix)
+
+    assert launcher_name == "env_python"
+    assert launcher_prefix == [str(env_python)]
+    assert python_executable == str(env_python)

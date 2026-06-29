@@ -4,9 +4,9 @@ This pipeline detects and measures building changes across historical Esri Wayba
 
 ## Install
 
-You can install the packaged GitHub release rather than clone and manually configure the repository:
+The packaged Docker release is the recommended install path. It avoids native GIS, PostgreSQL/PostGIS, Redis, Python, and Node.js setup on your host machine.
 
-### Windows PowerShell
+### Windows PowerShell - Recommended Docker Install
 
 ```powershell
 irm https://raw.githubusercontent.com/taha328/Deep-Learning-Based-Building-Change-Detection/main/install.ps1 | iex
@@ -14,7 +14,7 @@ irm https://raw.githubusercontent.com/taha328/Deep-Learning-Based-Building-Chang
 
 Requires Windows 10/11 64-bit, internet access, and Docker Desktop installed and running with Docker Compose.
 
-### macOS / Linux
+### macOS / Linux - Recommended Docker Install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/taha328/Deep-Learning-Based-Building-Change-Detection/main/install.sh | bash
@@ -29,12 +29,33 @@ Open:
 
 The release package includes the application services and authorized model artifact. CPU Docker is the supported packaged runtime. CUDA is optional and is not production-certified.
 
+### Windows PowerShell - Advanced Native Install Without Docker
+
+Native Windows mode is intended for development, debugging, and machines where Docker Desktop is not available. Open PowerShell as Administrator, then run:
+
+```powershell
+git clone https://github.com/taha328/Deep-Learning-Based-Building-Change-Detection.git
+cd Deep-Learning-Based-Building-Change-Detection
+powershell -ExecutionPolicy Bypass -File scripts\setup-windows-native.ps1
+```
+
+After setup:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\health-windows-native.ps1
+powershell -ExecutionPolicy Bypass -File scripts\start-windows-native.ps1
+powershell -ExecutionPolicy Bypass -File scripts\stop-windows-native.ps1
+```
+
+This path installs and verifies Git, Python 3.11, Node.js, PostgreSQL 16, PostGIS, Memurai, backend dependencies, frontend dependencies, migrations, and the BANDON model directly on Windows. See [docs/windows-native-setup.md](docs/windows-native-setup.md) for flags, troubleshooting, and service details.
+
 ## Requirements
 
-- Docker Engine or Docker Desktop with Docker Compose
-- `linux/amd64` or `linux/arm64`
+- Docker Engine or Docker Desktop with Docker Compose for the recommended packaged runtime
+- `linux/amd64` or `linux/arm64` for Docker images
 - At least 16 GB RAM; 24 GB or more is recommended for CPU inference
 - Sufficient disk space for imagery caches, project artifacts, and exports
+- Native Windows mode requires an elevated PowerShell session and installs host services; see [docs/windows-native-setup.md](docs/windows-native-setup.md)
 
 ## Pipeline Steps
 

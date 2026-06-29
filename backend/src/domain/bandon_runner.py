@@ -116,9 +116,14 @@ def _resolve_runtime_paths(settings: Settings) -> dict[str, Path]:
 
 
 def _resolve_launcher(env_prefix: Path) -> tuple[str, list[str], str]:
-    env_python = env_prefix / "bin" / "python"
-    if env_python.exists():
-        return ("env_python", [str(env_python)], str(env_python))
+    env_python_candidates = (
+        env_prefix / "bin" / "python",
+        env_prefix / "Scripts" / "python.exe",
+        env_prefix / "Scripts" / "python",
+    )
+    for env_python in env_python_candidates:
+        if env_python.exists():
+            return ("env_python", [str(env_python)], str(env_python))
 
     conda_executable = shutil.which("conda")
     if conda_executable:
@@ -130,7 +135,7 @@ def _resolve_launcher(env_prefix: Path) -> tuple[str, list[str], str]:
 
     raise RuntimeError(
         f"Unable to locate a BANDON launcher for env prefix {env_prefix}. "
-        "Neither `conda` on PATH nor env/bin/python is available."
+        "Neither `conda` on PATH nor env/bin/python or env/Scripts/python.exe is available."
     )
 
 
