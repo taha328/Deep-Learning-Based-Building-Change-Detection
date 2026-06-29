@@ -29,6 +29,45 @@ SECRET_PATTERN = re.compile(
 )
 MAPBOX_TOKEN_PATTERN = re.compile(r"^MAPBOX_API_KEY=(.*)$", re.MULTILINE)
 SMOKE_TEST_PATHS = ("scripts/smoke-test.sh", "scripts/windows/smoke-test.ps1")
+PUBLIC_MAPBOX_TOKEN = "pk.eyJ1IjoidGFoYWVsIiwiYSI6ImNtbnl6dHdqcjA3Z3EycXNmZHQyM3FkZWQifQ.IDf_zeGoMaPHcrsLOD5q7A"
+REQUIRED_ENV_VALUES = {
+    "BACKEND_IMAGE": "ghcr.io/taha328/building-change-backend:cpu-v0.1.5",
+    "FRONTEND_IMAGE": "ghcr.io/taha328/building-change-frontend:v0.1.5",
+    "MAPBOX_API_KEY": PUBLIC_MAPBOX_TOKEN,
+    "MAPBOX_ACCESS_TOKEN": PUBLIC_MAPBOX_TOKEN,
+    "MODEL_DEVICE": "auto",
+    "APP_INFERENCE_BACKEND": "bandon_mps",
+    "APP_CHANGE_THRESHOLD": "0.50",
+    "APP_SEMANTIC_THRESHOLD": "0.50",
+    "APP_MAPBOX_MAX_TILES_PER_REQUEST": "1024",
+    "MAPBOX_CURRENT_IMAGERY_MAX_TILES": "1024",
+    "APP_WAYBACK_DEFAULT_ZOOM": "18",
+    "APP_TILE_ZOOM": "18",
+    "APP_WAYBACK_HTTP_CONNECT_TIMEOUT_SECONDS": "60",
+    "APP_WAYBACK_HTTP_READ_TIMEOUT_SECONDS": "120",
+    "APP_WAYBACK_HTTP_MAX_RETRIES": "8",
+    "APP_WAYBACK_HTTP_BACKOFF_BASE_SECONDS": "1.0",
+    "APP_WAYBACK_TILE_MAX_CONCURRENCY": "12",
+    "APP_WAYBACK_MAX_MISSING_TILE_RATIO": "0.05",
+    "APP_POST_COMPLETION_REQUEST_CLEANUP_ENABLED": "true",
+    "APP_POST_COMPLETION_REQUEST_CLEANUP_MODE": "compact_heavy",
+    "APP_POST_COMPLETION_REQUEST_CLEANUP_GRACE_SECONDS": "300",
+    "APP_POST_COMPLETION_REQUEST_CLEANUP_KEEP_PROVENANCE": "true",
+    "APP_POST_COMPLETION_REQUEST_CLEANUP_DELETE_EXPORT_BUNDLE": "true",
+}
+FORBIDDEN_ENV_KEYS = {
+    "APP_S2LOOKING_CHECKPOINT_PATH",
+}
+REQUIRED_COMPOSE_ENV_KEYS = tuple(
+    key
+    for key in REQUIRED_ENV_VALUES
+    if key
+    not in {
+        "BACKEND_IMAGE",
+        "FRONTEND_IMAGE",
+        "MAPBOX_API_KEY",
+    }
+) + ("MAPBOX_API_KEY",)
 
 
 def normalized_names(names: list[str]) -> set[str]:
@@ -39,6 +78,24 @@ def normalized_names(names: list[str]) -> set[str]:
         if len(path.parts) > 1:
             normalized.add(str(PurePosixPath(*path.parts[1:])))
     return normalized
+
+
+def find_one(file_names: list[str], suffix: str) -> str:
+    matches = [name for name in file_names if name == suffix or name.endswith(f"/{suffix}")]
+    if len(matches) != 1:
+        raise SystemExit(f"Release file must occur exactly once: {suffix} ({len(matches)})")
+    return matches[0]
+
+
+def parse_env(payload: str) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+    for raw_line in payload.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        parsed[key.strip()] = value.strip().strip('"').strip("'")
+    return parsed
 
 
 def main() -> int:
@@ -97,6 +154,27 @@ def main() -> int:
         checkpoint_info = archive.getinfo(checkpoint_names[0])
         if checkpoint_info.file_size == 0:
             raise SystemExit("Packaged checkpoint is empty.")
+
+        env_name = find_one(file_names, ".env")
+        env_payload = archive.read(env_name).decode("utf-8", errors="ignore")
+        env_values = parse_env(env_payload)
+        for key, expected in REQUIRED_ENV_VALUES.items():
+            actual = env_values.get(key)
+            if actual != expected:
+                raise SystemExit(f"Release .env has {key}={actual!r}; expected {expected!r}")
+        forbidden_present = sorted(key for key in FORBIDDEN_ENV_KEYS if key in env_values)
+        if forbidden_present:
+            raise SystemExit(f"Forbidden local-only release .env keys found: {forbidden_present}")
+        for key in ("MAPBOX_API_KEY", "MAPBOX_ACCESS_TOKEN"):
+            token = env_values[key]
+            if not token.startswith("pk."):
+                raise SystemExit(f"{key} must be a public Mapbox token beginning with pk.")
+
+        compose_name = find_one(file_names, "docker-compose.yml")
+        compose_payload = archive.read(compose_name).decode("utf-8", errors="ignore")
+        for key in REQUIRED_COMPOSE_ENV_KEYS:
+            if key not in compose_payload:
+                raise SystemExit(f"docker-compose.yml does not pass required release env key: {key}")
 
         for smoke_test_path in SMOKE_TEST_PATHS:
             matches = [

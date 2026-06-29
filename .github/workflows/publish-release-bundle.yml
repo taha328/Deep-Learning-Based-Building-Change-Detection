@@ -35,16 +35,7 @@ jobs:
           echo "CHECKPOINT_PATH=$checkpoint" >> "$GITHUB_ENV"
 
       - name: Build and verify release bundle
-        env:
-          MAPBOX_API_KEY: ${{ secrets.MAPBOX_API_KEY }}
         run: |
-          case "$MAPBOX_API_KEY" in
-            pk.*) ;;
-            *)
-              echo "MAPBOX_API_KEY repository secret must contain a public Mapbox token beginning with pk." >&2
-              exit 1
-              ;;
-          esac
           bash -n install.sh scripts/package-release.sh
           ./scripts/package-release.sh
 
