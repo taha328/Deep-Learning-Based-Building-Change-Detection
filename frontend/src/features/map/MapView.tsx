@@ -829,19 +829,19 @@ const TEMPORAL_ADDED_LAYER_DEFINITIONS: TemporalAddedLayerDefinition[] = [
     kind: "cumulativeBuffer10m",
     toggleKey: "temporalCumulativeBuffer10m",
     paint: { "fill-color": BUILDING_CHANGE_BUFFER_FILL_COLORS["10m"], "fill-opacity": TEMPORAL_BUFFER_FILL_OPACITY },
-    data: (overlay) => ensureFeatureCollection(overlay.cumulativeBuffer10m),
+    data: (overlay) => ensureFeatureCollection(overlay.buffer10m),
   },
   {
     kind: "cumulativeBuffer15m",
     toggleKey: "temporalCumulativeBuffer15m",
     paint: { "fill-color": BUILDING_CHANGE_BUFFER_FILL_COLORS["15m"], "fill-opacity": TEMPORAL_BUFFER_FILL_OPACITY },
-    data: (overlay) => ensureFeatureCollection(overlay.cumulativeBuffer15m),
+    data: (overlay) => ensureFeatureCollection(overlay.buffer15m),
   },
   {
     kind: "cumulativeBuffer20m",
     toggleKey: "temporalCumulativeBuffer20m",
     paint: { "fill-color": BUILDING_CHANGE_BUFFER_FILL_COLORS["20m"], "fill-opacity": TEMPORAL_BUFFER_FILL_OPACITY },
-    data: (overlay) => ensureFeatureCollection(overlay.cumulativeBuffer20m),
+    data: (overlay) => ensureFeatureCollection(overlay.buffer20m),
   },
   {
     kind: "automatedBuildingBlocks",
@@ -871,11 +871,11 @@ function temporalAddedArtifactKey(kind: TemporalAddedLayerKind): string {
     case "buffer20m":
       return "building_change_buffer_20m";
     case "cumulativeBuffer10m":
-      return "cumulative_building_change_buffer_10m";
+      return "building_change_buffer_10m";
     case "cumulativeBuffer15m":
-      return "cumulative_building_change_buffer_15m";
+      return "building_change_buffer_15m";
     case "cumulativeBuffer20m":
-      return "cumulative_building_change_buffer_20m";
+      return "building_change_buffer_20m";
     case "automated":
       return "additions";
     case "automatedBuildingBlocks":
@@ -6524,24 +6524,21 @@ export function MapView({
               label: temporalLayerLabels.cumulativeBuffer10m,
               enabled:
                 selectedTemporalMilestoneReady &&
-                (temporalVectors.temporalCumulativeBuffer10m.features.length > 0 ||
-                  activeTemporalArtifactAvailable("building_change_buffer_10m")),
+                availableTemporalOutputReleaseIdentifiersByKind.cumulativeBuffer10m.length > 0,
             },
             {
               key: "temporalCumulativeBuffer15m",
               label: temporalLayerLabels.cumulativeBuffer15m,
               enabled:
                 selectedTemporalMilestoneReady &&
-                (temporalVectors.temporalCumulativeBuffer15m.features.length > 0 ||
-                  activeTemporalArtifactAvailable("building_change_buffer_15m")),
+                availableTemporalOutputReleaseIdentifiersByKind.cumulativeBuffer15m.length > 0,
             },
             {
               key: "temporalCumulativeBuffer20m",
               label: temporalLayerLabels.cumulativeBuffer20m,
               enabled:
                 selectedTemporalMilestoneReady &&
-                (temporalVectors.temporalCumulativeBuffer20m.features.length > 0 ||
-                  activeTemporalArtifactAvailable("building_change_buffer_20m")),
+                availableTemporalOutputReleaseIdentifiersByKind.cumulativeBuffer20m.length > 0,
             },
           ] satisfies LayerEntry[])
       : ([] satisfies LayerEntry[]);

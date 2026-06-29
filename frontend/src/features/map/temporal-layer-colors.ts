@@ -99,9 +99,9 @@ export const TEMPORAL_LAYER_CONTRACTS: Record<TemporalLayerPlanningKey, Temporal
   buffer10m: { artifactKey: "building_change_buffer_10m", mode: "selected" },
   buffer15m: { artifactKey: "building_change_buffer_15m", mode: "selected" },
   buffer20m: { artifactKey: "building_change_buffer_20m", mode: "selected" },
-  temporalCumulativeBuffer10m: { artifactKey: "cumulative_building_change_buffer_10m", mode: "cumulative" },
-  temporalCumulativeBuffer15m: { artifactKey: "cumulative_building_change_buffer_15m", mode: "cumulative" },
-  temporalCumulativeBuffer20m: { artifactKey: "cumulative_building_change_buffer_20m", mode: "cumulative" },
+  temporalCumulativeBuffer10m: { artifactKey: "building_change_buffer_10m", mode: "cumulative" },
+  temporalCumulativeBuffer15m: { artifactKey: "building_change_buffer_15m", mode: "cumulative" },
+  temporalCumulativeBuffer20m: { artifactKey: "building_change_buffer_20m", mode: "cumulative" },
   cumulativeUnion: { artifactKey: "additions", mode: "selected" },
   manualOverride: { artifactKey: "additions", mode: "selected" },
 };
