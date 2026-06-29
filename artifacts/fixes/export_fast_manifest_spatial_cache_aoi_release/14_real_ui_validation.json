@@ -1,0 +1,43 @@
+{
+  "url": "http://127.0.0.1:5173/",
+  "api": "http://127.0.0.1:8000",
+  "alertTexts": [],
+  "results": [
+    {
+      "state": "hidden_after_layer_toggles",
+      "beforeToggle": {
+        "aoi-fill": "none",
+        "aoi-line": "none",
+        "export-perimeter-fill": "none",
+        "export-perimeter-line": "none"
+      },
+      "afterToggle": {
+        "aoi-fill": "none",
+        "aoi-line": "none",
+        "export-perimeter-fill": "none",
+        "export-perimeter-line": "none"
+      },
+      "screenshot": "/Users/tahaelouali/Developer/Building_change_app/artifacts/fixes/export_fast_manifest_spatial_cache_aoi_release/screenshots/aoi_hidden_after_layer_toggles_clean.png"
+    },
+    {
+      "state": "custom_zone_preview",
+      "visibility": {
+        "aoi-fill": "visible",
+        "aoi-line": "visible",
+        "export-perimeter-fill": "visible",
+        "export-perimeter-line": "visible"
+      },
+      "screenshot": "/Users/tahaelouali/Developer/Building_change_app/artifacts/fixes/export_fast_manifest_spatial_cache_aoi_release/screenshots/aoi_custom_zone_preview_visible_clean.png"
+    },
+    {
+      "state": "hidden_after_clear",
+      "visibility": {
+        "aoi-fill": "none",
+        "aoi-line": "none",
+        "export-perimeter-fill": "none",
+        "export-perimeter-line": "none"
+      },
+      "screenshot": "/Users/tahaelouali/Developer/Building_change_app/artifacts/fixes/export_fast_manifest_spatial_cache_aoi_release/screenshots/aoi_hidden_after_custom_clear_clean.png"
+    }
+  ]
+}

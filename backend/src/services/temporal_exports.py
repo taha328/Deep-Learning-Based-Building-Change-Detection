@@ -26,6 +26,7 @@ from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 from shapely.geometry import GeometryCollection, MultiPolygon, Polygon, box, mapping, shape
 from shapely.geometry.base import BaseGeometry
+from shapely.geometry.polygon import orient
 from shapely.ops import unary_union
 
 from src.config import Settings, get_settings
@@ -128,6 +129,8 @@ TOPOJSON_REMOVED_PROPERTY_KEYS = {
 }
 TOPOJSON_ID_PATTERN = re.compile(r"^[0-9]{4}-[a-z0-9-]+-[0-9]{6}$")
 EXPORT_CACHE_VERSION = "temporal-results-file-backed-v2"
+EXPORT_ARTIFACT_MANIFEST_VERSION = "temporal-results-export-artifact-manifest-v1"
+EXPORT_GEOMETRY_HASH_PRECISION = 7
 EXPORT_FORMAT_VERSIONS = {
     "xlsx": "xlsx-v2",
     "kml": "kml-v2",
@@ -222,18 +225,38 @@ def _export_now() -> datetime:
 
 
 def _load_project(project_id: str, settings: Settings) -> TemporalProject:
+    context = _EXPORT_CONTEXT.get()
+    cached_project = context.get("loaded_project") if isinstance(context, dict) else None
+    if isinstance(cached_project, TemporalProject) and cached_project.project_id == project_id:
+        project = cached_project.model_copy(deep=True)
+        scope_type = context.get("scope_type") or ("custom_geometry" if context.get("geometry") is not None else "project_aoi")
+        logger.info(
+            "EXPORT_FULL_PROJECT_LOAD_SKIPPED projectId=%s scopeType=%s reason=reuse_loaded_project",
+            project_id,
+            scope_type,
+        )
+        if scope_type == "custom_geometry":
+            logger.info(
+                "EXPORT_SCOPE_APPLIED projectId=%s scopeType=custom_geometry source=%s wasClippedToProjectAoi=%s",
+                project.project_id,
+                context.get("source"),
+                context.get("was_clipped_to_project_aoi"),
+            )
+            return _clip_project_to_export_geometry(project, context["geometry"])
+        logger.info("EXPORT_SCOPE_APPLIED projectId=%s scopeType=project_aoi", project.project_id)
+        return project
+
     project = get_temporal_project(project_id, settings)
     project = _hydrate_temporal_layer_artifacts(project, settings)
     project = _hydrate_milestone_buffer_layers(project, settings)
     project = _hydrate_export_file_backed_result_artifacts(project, settings)
     project = _ensure_temporal_derived_geometry_layers(project)
-    context = _EXPORT_CONTEXT.get()
-    if context:
+    if context and (context.get("scope_type") == "custom_geometry" or context.get("geometry") is not None):
         logger.info(
             "EXPORT_SCOPE_APPLIED projectId=%s scopeType=custom_geometry source=%s wasClippedToProjectAoi=%s",
             project.project_id,
-            context["source"],
-            context["was_clipped_to_project_aoi"],
+            context.get("source"),
+            context.get("was_clipped_to_project_aoi"),
         )
         return _clip_project_to_export_geometry(project, context["geometry"])
     logger.info("EXPORT_SCOPE_APPLIED projectId=%s scopeType=project_aoi", project.project_id)
@@ -247,6 +270,48 @@ def _polygonal_geometry(value: BaseGeometry) -> BaseGeometry:
         polygons = [part for part in value.geoms if part.geom_type in {"Polygon", "MultiPolygon"}]
         return unary_union(polygons).buffer(0) if polygons else GeometryCollection()
     return GeometryCollection()
+
+
+def _oriented_polygonal_geometry(geometry: BaseGeometry) -> BaseGeometry:
+    geometry = _polygonal_geometry(geometry)
+    if isinstance(geometry, Polygon):
+        return orient(geometry, sign=1.0)
+    if isinstance(geometry, MultiPolygon):
+        return MultiPolygon([orient(part, sign=1.0) for part in geometry.geoms if not part.is_empty])
+    return geometry
+
+
+def _canonicalize_geojson_coordinates(value: Any) -> Any:
+    if isinstance(value, (int, float)):
+        rounded = round(float(value), EXPORT_GEOMETRY_HASH_PRECISION)
+        return 0.0 if rounded == -0.0 else rounded
+    if isinstance(value, (list, tuple)):
+        return [_canonicalize_geojson_coordinates(item) for item in value]
+    return value
+
+
+def _canonical_export_geometry_payload(geometry_payload: dict[str, Any]) -> dict[str, Any]:
+    geometry = _oriented_polygonal_geometry(shape(geometry_payload))
+    if geometry.is_empty:
+        raise ValueError("Export perimeter geometry is empty.")
+    payload = mapping(geometry)
+    return {
+        "type": payload.get("type"),
+        "coordinates": _canonicalize_geojson_coordinates(payload.get("coordinates")),
+    }
+
+
+def _stable_custom_geometry_hash(perimeter: dict[str, Any] | None) -> str | None:
+    if _is_project_aoi_export_scope(perimeter):
+        return None
+    geometry_payload = perimeter.get("geometry") if isinstance(perimeter, dict) else None
+    if not isinstance(geometry_payload, dict):
+        return None
+    canonical = {
+        "crs": "EPSG:4326",
+        "geometry": _canonical_export_geometry_payload(geometry_payload),
+    }
+    return hashlib.sha256(json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
 def resolve_export_perimeter(project: TemporalProject, perimeter: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -266,9 +331,11 @@ def resolve_export_perimeter(project: TemporalProject, perimeter: dict[str, Any]
     if clipped.is_empty:
         raise ValueError("La zone sélectionnée est hors de l’AOI du projet.")
     return {
+        "scope_type": "custom_geometry",
         "mode": "custom_geometry",
         "source": perimeter.get("source"),
         "geometry": clipped,
+        "geometry_hash": _stable_custom_geometry_hash(perimeter),
         "was_clipped_to_project_aoi": not clipped.equals(requested),
     }
 
@@ -277,19 +344,36 @@ def _clip_feature_collection(payload: dict[str, Any] | None, mask: BaseGeometry)
     if not isinstance(payload, dict):
         return payload
     clipped_features: list[dict[str, Any]] = []
+    input_count = 0
+    bbox_skipped = 0
+    mask_bounds = mask.bounds
     for feature in _features(payload):
+        input_count += 1
         geometry_payload = feature.get("geometry") if isinstance(feature, dict) else None
         if not isinstance(geometry_payload, dict):
             continue
         try:
-            geometry = _polygonal_geometry(shape(geometry_payload).intersection(mask))
+            source_geometry = _polygonal_geometry(shape(geometry_payload))
         except Exception:
             continue
+        if source_geometry.is_empty:
+            continue
+        minx, miny, maxx, maxy = source_geometry.bounds
+        if maxx < mask_bounds[0] or minx > mask_bounds[2] or maxy < mask_bounds[1] or miny > mask_bounds[3]:
+            bbox_skipped += 1
+            continue
+        geometry = _polygonal_geometry(source_geometry.intersection(mask))
         if geometry.is_empty:
             continue
         clipped = dict(feature)
         clipped["geometry"] = mapping(geometry)
         clipped_features.append(clipped)
+    logger.info(
+        "EXPORT_SPATIAL_PREFILTER_DONE inputFeatures=%s outputFeatures=%s bboxSkipped=%s",
+        input_count,
+        len(clipped_features),
+        bbox_skipped,
+    )
     return {**payload, "features": clipped_features}
 
 
@@ -321,12 +405,12 @@ def _clip_project_to_export_geometry(project: TemporalProject, mask: BaseGeometr
 
 def _export_metadata() -> dict[str, Any]:
     context = _EXPORT_CONTEXT.get()
-    if not context:
+    if not context or context.get("scope_type") == "project_aoi":
         return {"perimeter_mode": "project_aoi"}
     return {
         "perimeter_mode": "custom_geometry",
-        "perimeter_source": context["source"],
-        "was_clipped_to_project_aoi": context["was_clipped_to_project_aoi"],
+        "perimeter_source": context.get("source"),
+        "was_clipped_to_project_aoi": context.get("was_clipped_to_project_aoi"),
         "perimeter_geometry": mapping(context["geometry"]),
     }
 
@@ -1750,7 +1834,7 @@ def _temporal_shapefile_export_layers(project: TemporalProject) -> list[Temporal
                 )
             )
     context = _EXPORT_CONTEXT.get()
-    if context:
+    if context and context.get("scope_type") == "custom_geometry":
         layers.append(
             TemporalShapefileLayer(
                 group_key="zone_export",
@@ -1802,9 +1886,51 @@ def _qgis_layer_style(project: TemporalProject, layer: TemporalShapefileLayer) -
     return _hex_rgba(color, alpha), _hex_rgba(color, 245), "0.35"
 
 
+def _create_shapefile_spatial_index(shp_path: Path) -> bool:
+    try:
+        from osgeo import ogr
+    except Exception as exc:
+        logger.info(
+            "EXPORT_SHAPEFILE_SPATIAL_INDEX_SKIPPED path=%s reason=osgeo_unavailable error=%s",
+            shp_path,
+            exc.__class__.__name__,
+        )
+        return False
+    datasource = ogr.Open(str(shp_path), update=1)
+    if datasource is None:
+        logger.info("EXPORT_SHAPEFILE_SPATIAL_INDEX_SKIPPED path=%s reason=open_failed", shp_path)
+        return False
+    try:
+        layer = datasource.GetLayer(0)
+        layer_name = layer.GetName() if layer is not None else shp_path.stem
+        datasource.ExecuteSQL(f"CREATE SPATIAL INDEX ON {layer_name}")
+    except Exception as exc:
+        logger.info(
+            "EXPORT_SHAPEFILE_SPATIAL_INDEX_SKIPPED path=%s reason=create_failed error=%s",
+            shp_path,
+            exc.__class__.__name__,
+        )
+        return False
+    finally:
+        datasource = None
+    created = shp_path.with_suffix(".qix").is_file()
+    if created:
+        logger.info("EXPORT_SHAPEFILE_SPATIAL_INDEX_CREATED path=%s index=%s", shp_path, shp_path.with_suffix(".qix"))
+    else:
+        logger.info("EXPORT_SHAPEFILE_SPATIAL_INDEX_SKIPPED path=%s reason=index_not_created", shp_path)
+    return created
+
+
 def _write_temporal_shapefile(layer: TemporalShapefileLayer, output_dir: Path) -> Path | None:
     records: list[dict[str, Any]] = []
     geometries: list[BaseGeometry] = []
+    logger.info(
+        "EXPORT_SHAPEFILE_STREAM_WRITE_START group=%s release=%s artifact_key=%s inputFeatures=%s",
+        layer.group_key,
+        layer.release_identifier,
+        layer.artifact_key,
+        len(_features(layer.feature_collection)),
+    )
     for feature in _features(layer.feature_collection):
         geometry_payload = feature.get("geometry") if isinstance(feature, dict) else None
         if not isinstance(geometry_payload, dict):
@@ -1834,6 +1960,13 @@ def _write_temporal_shapefile(layer: TemporalShapefileLayer, output_dir: Path) -
     cpg_path = shp_path.with_suffix(".cpg")
     if not cpg_path.exists():
         cpg_path.write_text("UTF-8", encoding="ascii")
+    _create_shapefile_spatial_index(shp_path)
+    logger.info(
+        "EXPORT_SHAPEFILE_LAYER_WRITE_DONE path=%s feature_count=%s bytes=%s",
+        shp_path,
+        len(records),
+        shp_path.stat().st_size,
+    )
     return shp_path
 
 
@@ -2132,6 +2265,7 @@ def _copy_qgis_reference_rasters(
 
     project_dir = settings.temporal_projects_dir / project.project_id
     context = _EXPORT_CONTEXT.get()
+    custom_context = context if context and context.get("scope_type") == "custom_geometry" else None
     rasters: list[TemporalQgisRaster] = []
     for milestone in [item for item in project.milestones if item.status == "complete"]:
         source = _reference_raster_source(project_dir, milestone)
@@ -2144,7 +2278,7 @@ def _copy_qgis_reference_rasters(
             )
             continue
         relative_path = Path("rasters") / _filesystem_safe_label(milestone.release_identifier) / (
-            "reference_imagery_export_zone.tif" if context else "reference_imagery_cog.tif"
+            "reference_imagery_export_zone.tif" if custom_context else "reference_imagery_cog.tif"
         )
         target = export_root / relative_path
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -2152,13 +2286,13 @@ def _copy_qgis_reference_rasters(
             if source_dataset.crs is None:
                 raise ValueError(f"Reference raster has no CRS: {source}")
             source_bounds = tuple(float(value) for value in source_dataset.bounds)
-            if context:
+            if custom_context:
                 logger.info(
                     "EXPORT_RESULTS_QGIS_RASTER_CLIP_START projectId=%s release=%s",
                     project.project_id,
                     milestone.release_identifier,
                 )
-                raster_geometry = transform_geom(QGIS_VECTOR_CRS, source_dataset.crs, mapping(context["geometry"]))
+                raster_geometry = transform_geom(QGIS_VECTOR_CRS, source_dataset.crs, mapping(custom_context["geometry"]))
                 clipped, clipped_transform = rasterio_mask(source_dataset, [raster_geometry], crop=True)
                 profile = source_dataset.profile.copy()
                 profile.update(
@@ -2653,6 +2787,13 @@ def build_temporal_results_shapefile_zip(project_id: str, settings: Settings | N
             for path in sorted(tmp_dir.rglob("*")):
                 if path.is_file() and path != qgz_path:
                     archive.write(path, arcname=str(path.relative_to(tmp_dir)))
+        logger.info(
+            "EXPORT_SHAPEFILE_ZIP_VALIDATE_DONE projectId=%s layerCount=%s rasterCount=%s qgzBytes=%s",
+            project_id,
+            len(written_layers),
+            len(rasters),
+            qgz_path.stat().st_size,
+        )
     payload = zip_stream.getvalue()
     logger.info(
         "EXPORT_ZIP_WRITTEN projectId=%s path=results_shapefile.zip bytes=%s durationMs=%s",
@@ -2722,14 +2863,205 @@ def _export_metadata_path(path: Path) -> Path:
     return path.with_name(f"{path.name}.metadata.json")
 
 
+def _export_artifact_manifest_path(settings: Settings, project_id: str) -> Path:
+    return settings.temporal_projects_dir / project_id / "exports" / "export_artifact_manifest.json"
+
+
+def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f"{path.name}.partial")
+    try:
+        tmp_path.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+        tmp_path.replace(path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+
+
+def _feature_collection_bounds(payload: dict[str, Any] | None) -> list[float] | None:
+    bounds: list[Bounds] = []
+    for feature in _features(payload):
+        geometry_payload = feature.get("geometry") if isinstance(feature, dict) else None
+        if not isinstance(geometry_payload, dict):
+            continue
+        try:
+            geometry = _polygonal_geometry(shape(geometry_payload))
+        except Exception:
+            continue
+        if geometry.is_empty:
+            continue
+        bounds.append(tuple(float(value) for value in geometry.bounds))
+    if not bounds:
+        return None
+    union = _union_bounds(bounds)
+    return [union[0], union[1], union[2], union[3]]
+
+
+def _feature_collection_geometry_types(payload: dict[str, Any] | None) -> list[str]:
+    geometry_types: set[str] = set()
+    for feature in _features(payload):
+        geometry_payload = feature.get("geometry") if isinstance(feature, dict) else None
+        if isinstance(geometry_payload, dict) and isinstance(geometry_payload.get("type"), str):
+            geometry_types.add(geometry_payload["type"])
+    return sorted(geometry_types)
+
+
+def _artifact_manifest_entry(
+    *,
+    project: TemporalProject,
+    milestone: TemporalMilestone,
+    layer_type: str,
+    artifact_key: str,
+    settings: Settings,
+) -> dict[str, Any]:
+    artifact = next((item for item in milestone.artifacts if item.key == artifact_key), None)
+    payload = _existing_result_layer_payload(milestone, layer_type)
+    try:
+        path, media_type = resolve_temporal_project_artifact_path(
+            project_id=project.project_id,
+            release_identifier=milestone.release_identifier,
+            artifact_key=artifact_key,
+            settings=settings,
+            access_mode="export_artifact_manifest",
+        )
+    except FileNotFoundError:
+        return {
+            "release_identifier": milestone.release_identifier,
+            "layer_type": layer_type,
+            "artifact_key": artifact_key,
+            "exists": False,
+            "feature_count": len(_features(payload)),
+            "bbox": _feature_collection_bounds(payload),
+            "geometry_types": _feature_collection_geometry_types(payload),
+        }
+    stat = path.stat()
+    bbox = artifact.bbox if artifact is not None and artifact.bbox is not None else _feature_collection_bounds(payload)
+    feature_count = artifact.feature_count if artifact is not None and artifact.feature_count is not None else len(_features(payload))
+    return {
+        "release_identifier": milestone.release_identifier,
+        "layer_type": layer_type,
+        "artifact_key": artifact_key,
+        "exists": True,
+        "path": str(path),
+        "media_type": media_type,
+        "feature_count": feature_count,
+        "bbox": bbox,
+        "geometry_types": _feature_collection_geometry_types(payload),
+        "size_bytes": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+        "sha256": artifact.sha256 if artifact is not None else None,
+        "source_mtime_ns": artifact.source_mtime_ns if artifact is not None else None,
+    }
+
+
+def _build_or_refresh_export_artifact_manifest(project: TemporalProject, settings: Settings) -> dict[str, Any]:
+    manifest_path = _export_artifact_manifest_path(settings, project.project_id)
+    entries: list[dict[str, Any]] = []
+    for milestone in project.milestones:
+        if milestone.status != "complete":
+            continue
+        for layer_type, (artifact_key, _field_name, _distance_key) in EXPORT_RESULT_ARTIFACT_KEYS.items():
+            entries.append(
+                _artifact_manifest_entry(
+                    project=project,
+                    milestone=milestone,
+                    layer_type=layer_type,
+                    artifact_key=artifact_key,
+                    settings=settings,
+                )
+            )
+    entries_fingerprint = hashlib.sha256(json.dumps(entries, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    manifest = {
+        "version": EXPORT_ARTIFACT_MANIFEST_VERSION,
+        "project_id": project.project_id,
+        "entries": entries,
+        "entry_count": len(entries),
+        "manifest_fingerprint": entries_fingerprint,
+        "updated_at": _export_now().isoformat().replace("+00:00", "Z"),
+    }
+    _atomic_write_json(manifest_path, manifest)
+    logger.info(
+        "EXPORT_LIGHTWEIGHT_MANIFEST_UPDATED projectId=%s path=%s entries=%s fingerprint=%s",
+        project.project_id,
+        manifest_path,
+        len(entries),
+        entries_fingerprint,
+    )
+    return manifest
+
+
+def _load_export_artifact_manifest(settings: Settings, project_id: str) -> dict[str, Any] | None:
+    manifest_path = _export_artifact_manifest_path(settings, project_id)
+    logger.info("EXPORT_LIGHTWEIGHT_MANIFEST_LOAD_START projectId=%s path=%s", project_id, manifest_path)
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        logger.info("EXPORT_LIGHTWEIGHT_MANIFEST_LOAD_MISS projectId=%s reason=missing_manifest", project_id)
+        return None
+    except Exception as exc:
+        logger.info(
+            "EXPORT_LIGHTWEIGHT_MANIFEST_LOAD_MISS projectId=%s reason=invalid_manifest error=%s",
+            project_id,
+            exc.__class__.__name__,
+        )
+        return None
+    if not isinstance(manifest, dict) or manifest.get("version") != EXPORT_ARTIFACT_MANIFEST_VERSION:
+        logger.info("EXPORT_LIGHTWEIGHT_MANIFEST_LOAD_MISS projectId=%s reason=version", project_id)
+        return None
+    entries = manifest.get("entries")
+    if not isinstance(entries, list):
+        logger.info("EXPORT_LIGHTWEIGHT_MANIFEST_LOAD_MISS projectId=%s reason=entries", project_id)
+        return None
+    for entry in entries:
+        if not isinstance(entry, dict):
+            logger.info("EXPORT_LIGHTWEIGHT_MANIFEST_LOAD_MISS projectId=%s reason=entry_type", project_id)
+            return None
+        if entry.get("exists") is False:
+            try:
+                resolve_temporal_project_artifact_path(
+                    project_id=project_id,
+                    release_identifier=str(entry.get("release_identifier") or ""),
+                    artifact_key=str(entry.get("artifact_key") or ""),
+                    settings=settings,
+                    access_mode="export_artifact_manifest_validate",
+                )
+            except FileNotFoundError:
+                pass
+            else:
+                logger.info(
+                    "EXPORT_CACHE_INVALIDATED projectId=%s reason=artifact_manifest_entry_created release=%s artifact_key=%s",
+                    project_id,
+                    entry.get("release_identifier"),
+                    entry.get("artifact_key"),
+                )
+                return None
+        if entry.get("exists") is True and not _metadata_fingerprint_matches(entry, require_existing_path=True):
+            logger.info(
+                "EXPORT_CACHE_INVALIDATED projectId=%s reason=artifact_manifest_entry_changed release=%s artifact_key=%s",
+                project_id,
+                entry.get("release_identifier"),
+                entry.get("artifact_key"),
+            )
+            return None
+    logger.info(
+        "EXPORT_LIGHTWEIGHT_MANIFEST_LOAD_DONE projectId=%s path=%s entries=%s fingerprint=%s",
+        project_id,
+        manifest_path,
+        len(entries),
+        manifest.get("manifest_fingerprint"),
+    )
+    return manifest
+
+
 def _export_scope_fingerprint(export_context: dict[str, Any] | None) -> dict[str, Any]:
-    if not export_context:
+    if not export_context or export_context.get("scope_type") == "project_aoi":
         return {"scope_type": "project_aoi", "scope_source": None, "geometry_hash": None}
     geometry = export_context["geometry"]
     return {
         "scope_type": "custom_geometry",
         "scope_source": export_context.get("source"),
-        "geometry_hash": hashlib.sha256(geometry.wkb).hexdigest(),
+        "geometry_hash": export_context.get("geometry_hash") or hashlib.sha256(geometry.wkb).hexdigest(),
+        "clipped_geometry_hash": hashlib.sha256(geometry.wkb).hexdigest(),
         "was_clipped_to_project_aoi": bool(export_context.get("was_clipped_to_project_aoi")),
     }
 
@@ -2798,6 +3130,7 @@ def _export_cache_metadata(
     export_context: dict[str, Any] | None,
 ) -> dict[str, Any]:
     scope = _export_scope_fingerprint(export_context)
+    artifact_manifest = _build_or_refresh_export_artifact_manifest(project, settings)
     payload = {
         "version": EXPORT_FORMAT_VERSIONS[export_format],
         "cache_version": EXPORT_CACHE_VERSION,
@@ -2820,6 +3153,12 @@ def _export_cache_metadata(
         },
         "project_fingerprint": _project_fingerprint(project.project_id, settings),
         "artifact_fingerprints": _temporal_result_artifact_fingerprints(project, settings),
+        "artifact_manifest": {
+            "version": artifact_manifest.get("version"),
+            "path": str(_export_artifact_manifest_path(settings, project.project_id)),
+            "fingerprint": artifact_manifest.get("manifest_fingerprint"),
+            "entry_count": artifact_manifest.get("entry_count"),
+        },
     }
     cache_key = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
     return {
@@ -2923,8 +3262,8 @@ def _is_project_aoi_export_scope(perimeter: dict[str, Any] | None) -> bool:
     return perimeter.get("mode") == "project_aoi" and perimeter.get("geometry") is None and perimeter.get("source") is None
 
 
-def _cached_export_path(settings: Settings, project_id: str, export_format: str) -> Path:
-    return settings.temporal_projects_dir / project_id / "exports" / TEMPORAL_RESULTS_EXPORT_FILENAMES[export_format]
+def _cached_export_path(settings: Settings, project_id: str, export_format: str, suffix: str = "") -> Path:
+    return settings.temporal_projects_dir / project_id / "exports" / (TEMPORAL_RESULTS_EXPORT_FILENAMES[export_format] + suffix)
 
 
 def _fast_cached_temporal_results_export_file(
@@ -2933,21 +3272,33 @@ def _fast_cached_temporal_results_export_file(
     settings: Settings,
     perimeter: dict[str, Any] | None,
 ) -> Path | None:
+    is_project_aoi_scope = _is_project_aoi_export_scope(perimeter)
+    geometry_hash: str | None = None
+    custom_suffix = ""
+    if not is_project_aoi_scope:
+        try:
+            geometry_hash = _stable_custom_geometry_hash(perimeter)
+        except Exception as exc:
+            logger.info(
+                "EXPORT_FAST_CACHE_MISS projectId=%s format=%s reason=invalid_custom_geometry error=%s",
+                project_id,
+                export_format,
+                exc.__class__.__name__,
+            )
+            return None
+        if not geometry_hash:
+            logger.info("EXPORT_FAST_CACHE_MISS projectId=%s format=%s reason=missing_custom_geometry", project_id, export_format)
+            return None
+        custom_suffix = f".custom-{geometry_hash[:12]}"
     logger.info(
-        "EXPORT_FAST_CACHE_CHECK_START projectId=%s format=%s scopeType=%s",
+        "EXPORT_FAST_CACHE_CHECK_START projectId=%s format=%s scopeType=%s geometryHash=%s",
         project_id,
         export_format,
-        "project_aoi" if _is_project_aoi_export_scope(perimeter) else "custom_geometry",
+        "project_aoi" if is_project_aoi_scope else "custom_geometry",
+        geometry_hash,
     )
-    if not _is_project_aoi_export_scope(perimeter):
-        logger.info(
-            "EXPORT_FAST_CACHE_MISS projectId=%s format=%s reason=custom_geometry_requires_project_load",
-            project_id,
-            export_format,
-        )
-        return None
 
-    cache_path = _cached_export_path(settings, project_id, export_format)
+    cache_path = _cached_export_path(settings, project_id, export_format, custom_suffix)
     if cache_path.name.endswith(".partial"):
         _export_cache_file_invalid(project_id, export_format, cache_path, "partial_file")
         return None
@@ -2979,8 +3330,12 @@ def _fast_cached_temporal_results_export_file(
         logger.info("EXPORT_FAST_CACHE_MISS projectId=%s format=%s reason=metadata_version_or_format", project_id, export_format)
         return None
     scope = metadata.get("scope")
-    if not isinstance(scope, dict) or scope.get("scope_type") != "project_aoi":
+    expected_scope_type = "project_aoi" if is_project_aoi_scope else "custom_geometry"
+    if not isinstance(scope, dict) or scope.get("scope_type") != expected_scope_type:
         logger.info("EXPORT_FAST_CACHE_MISS projectId=%s format=%s reason=metadata_scope", project_id, export_format)
+        return None
+    if not is_project_aoi_scope and scope.get("geometry_hash") != geometry_hash:
+        logger.info("EXPORT_FAST_CACHE_MISS projectId=%s format=%s reason=metadata_geometry_hash", project_id, export_format)
         return None
     project_fingerprint = metadata.get("project_fingerprint")
     if not isinstance(project_fingerprint, dict) or not _metadata_fingerprint_matches(project_fingerprint, require_existing_path=True):
@@ -2989,11 +3344,26 @@ def _fast_cached_temporal_results_export_file(
     if not _artifact_fingerprints_match(metadata.get("artifact_fingerprints")):
         logger.info("EXPORT_FAST_CACHE_MISS projectId=%s format=%s reason=artifact_fingerprint_changed", project_id, export_format)
         return None
+    manifest_info = metadata.get("artifact_manifest")
+    manifest = _load_export_artifact_manifest(settings, project_id)
+    if not isinstance(manifest_info, dict) or manifest is None:
+        logger.info("EXPORT_FAST_CACHE_MISS projectId=%s format=%s reason=artifact_manifest_missing", project_id, export_format)
+        return None
+    if manifest_info.get("fingerprint") != manifest.get("manifest_fingerprint"):
+        logger.info("EXPORT_CACHE_INVALIDATED projectId=%s format=%s reason=artifact_manifest_fingerprint_changed", project_id, export_format)
+        return None
 
+    logger.info("EXPORT_CACHE_FILE_VALIDATED projectId=%s format=%s path=%s bytes=%s", project_id, export_format, cache_path, cache_stat.st_size)
     logger.info(
-        "EXPORT_FAST_CACHE_HIT projectId=%s format=%s scopeType=project_aoi path=%s cacheKey=%s bytes=%s",
+        "EXPORT_FULL_PROJECT_LOAD_SKIPPED projectId=%s scopeType=%s reason=validated_export_cache",
+        project_id,
+        expected_scope_type,
+    )
+    logger.info(
+        "EXPORT_FAST_CACHE_HIT projectId=%s format=%s scopeType=%s path=%s cacheKey=%s bytes=%s",
         project_id,
         export_format,
+        expected_scope_type,
         cache_path,
         metadata.get("cache_key"),
         cache_stat.st_size,
@@ -3062,28 +3432,25 @@ def build_temporal_results_export_file(
     fast_cache_path = _fast_cached_temporal_results_export_file(project_id, normalized_format, resolved_settings, perimeter)
     if fast_cache_path is not None:
         duration_ms = round((datetime.now(UTC) - started_at).total_seconds() * 1000, 2)
+        fast_scope_type = "project_aoi" if _is_project_aoi_export_scope(perimeter) else "custom_geometry"
         logger.info(
-            "EXPORT_DOWNLOAD_TOTAL_MS projectId=%s format=%s scopeType=project_aoi source=fast_cache durationMs=%s",
+            "EXPORT_DOWNLOAD_TOTAL_MS projectId=%s format=%s scopeType=%s source=fast_cache durationMs=%s",
             project_id,
             normalized_format,
+            fast_scope_type,
             duration_ms,
         )
         return fast_cache_path
 
     project = _load_project(project_id, resolved_settings)
     export_context = resolve_export_perimeter(project, perimeter)
-    context_token = _EXPORT_CONTEXT.set(export_context)
     is_custom_export = export_context is not None
     custom_suffix = ""
     if is_custom_export:
-        geometry_hash = hashlib.sha256(export_context["geometry"].wkb).hexdigest()[:12]
-        custom_suffix = f".custom-{geometry_hash}"
-    cache_path = (
-        resolved_settings.temporal_projects_dir
-        / project_id
-        / "exports"
-        / (TEMPORAL_RESULTS_EXPORT_FILENAMES[normalized_format] + custom_suffix)
-    )
+        geometry_hash = export_context.get("geometry_hash") or hashlib.sha256(export_context["geometry"].wkb).hexdigest()
+        export_context["geometry_hash"] = geometry_hash
+        custom_suffix = f".custom-{geometry_hash[:12]}"
+    cache_path = _cached_export_path(resolved_settings, project_id, normalized_format, custom_suffix)
     cache_metadata = _export_cache_metadata(
         project=project,
         settings=resolved_settings,
@@ -3114,7 +3481,6 @@ def build_temporal_results_export_file(
             cache_metadata["scope"]["scope_type"],
             duration_ms,
         )
-        _EXPORT_CONTEXT.reset(context_token)
         return cache_path
 
     logger.info(
@@ -3134,6 +3500,12 @@ def build_temporal_results_export_file(
             "tsv": build_temporal_results_tsv,
             "shapefile": build_temporal_results_shapefile_zip,
         }
+        generation_context = (
+            {**export_context, "loaded_project": project}
+            if export_context is not None
+            else {"scope_type": "project_aoi", "loaded_project": project}
+        )
+        context_token = _EXPORT_CONTEXT.set(generation_context)
         write_started_at = time.perf_counter()
         logger.info(
             "EXPORT_FORMAT_WRITE_START projectId=%s format=%s path=%s",
@@ -3156,7 +3528,8 @@ def build_temporal_results_export_file(
         logger.exception("EXPORT_GENERATE_FAILED projectId=%s format=%s error=%s", project_id, normalized_format, exc)
         raise
     finally:
-        _EXPORT_CONTEXT.reset(context_token)
+        if "context_token" in locals():
+            _EXPORT_CONTEXT.reset(context_token)
     duration_ms = round((datetime.now(UTC) - started_at).total_seconds() * 1000, 2)
     logger.info(
         "EXPORT_GENERATE_DONE projectId=%s format=%s bytes=%s durationMs=%s",

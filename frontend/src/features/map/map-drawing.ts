@@ -3,7 +3,16 @@ import type { FeatureCollection, LineString, Polygon } from "geojson";
 export type DrawingVertex = [number, number];
 export type DrawingToolMode = "polygon" | "rectangle";
 export type DrawingToolPurpose = "aoi" | "export";
+export type ProjectAoiOverlayMode =
+  | "hidden"
+  | "project_aoi_draw"
+  | "project_aoi_edit"
+  | "project_aoi_import"
+  | "export_custom_zone_draw"
+  | "export_custom_zone_preview";
 export type ProjectAoiOverlayContext = {
+  aoiOverlayMode: ProjectAoiOverlayMode;
+  hasExportGeometry: boolean;
   drawingMode: "idle" | "drawing" | "editing";
   isRunning: boolean;
   workflowMode: "pairwise" | "temporal";
@@ -152,6 +161,12 @@ export function drawingGeometryCommit(purpose: DrawingToolPurpose, polygon: Poly
 }
 
 export function shouldShowProjectAoiOverlay(context: ProjectAoiOverlayContext): boolean {
-  void context;
-  return true;
+  return context.aoiOverlayMode !== "hidden";
+}
+
+export function shouldShowExportAoiOverlay(context: ProjectAoiOverlayContext): boolean {
+  return (
+    context.hasExportGeometry &&
+    (context.aoiOverlayMode === "export_custom_zone_draw" || context.aoiOverlayMode === "export_custom_zone_preview")
+  );
 }

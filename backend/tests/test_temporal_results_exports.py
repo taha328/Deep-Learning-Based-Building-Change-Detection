@@ -1092,3 +1092,55 @@ def test_temporal_results_cached_export_fast_path_skips_project_hydration(monkey
     assert second_path == first_path
     assert "EXPORT_FAST_CACHE_HIT" in caplog.text
     assert "EXPORT_DOWNLOAD_TOTAL_MS" in caplog.text
+
+
+def test_temporal_results_custom_export_fast_path_uses_manifest_without_project_hydration(
+    monkeypatch,
+    tmp_path: Path,
+    caplog,
+) -> None:
+    caplog.set_level(logging.INFO, logger="src.services.temporal_exports")
+    settings = _save_project(tmp_path)
+    perimeter = {
+        "mode": "custom_geometry",
+        "source": "imported",
+        "geometry": {
+            "type": "Polygon",
+            "coordinates": [[
+                [-7.0005, 32.9995],
+                [-6.9995, 32.9995],
+                [-6.9995, 33.0005],
+                [-7.0005, 33.0005],
+                [-7.0005, 32.9995],
+            ]],
+        },
+    }
+    first_path = build_temporal_results_export_file(
+        "temporal-export-formats-test",
+        "geojson",
+        settings=settings,
+        perimeter=perimeter,
+    )
+    manifest_path = settings.temporal_projects_dir / "temporal-export-formats-test" / "exports" / "export_artifact_manifest.json"
+    assert first_path.name.startswith("results.geojson.custom-")
+    assert manifest_path.is_file()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["version"] == "temporal-results-export-artifact-manifest-v1"
+    assert manifest["entry_count"] > 0
+
+    caplog.clear()
+    monkeypatch.setattr(
+        "src.services.temporal_exports._load_project",
+        lambda *args, **kwargs: pytest.fail("valid cached custom export should not hydrate project"),
+    )
+    second_path = build_temporal_results_export_file(
+        "temporal-export-formats-test",
+        "geojson",
+        settings=settings,
+        perimeter=perimeter,
+    )
+
+    assert second_path == first_path
+    assert "EXPORT_LIGHTWEIGHT_MANIFEST_LOAD_DONE" in caplog.text
+    assert "EXPORT_FAST_CACHE_HIT" in caplog.text
+    assert "EXPORT_FULL_PROJECT_LOAD_SKIPPED" in caplog.text

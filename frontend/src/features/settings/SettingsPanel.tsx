@@ -473,6 +473,7 @@ export function SettingsPanel({
   const finishDrawing = useAppStore((store) => store.finishDrawing);
   const setAoiFromImport = useAppStore((store) => store.setAoiFromImport);
   const clearAoi = useAppStore((store) => store.clearAoi);
+  const hideAoiOverlay = useAppStore((store) => store.hideAoiOverlay);
   const requestMapFocusToAoi = useAppStore((store) => store.requestMapFocusToAoi);
   const setTemporalProject = useAppStore((store) => store.setTemporalProject);
   const setTemporalProjectBootstrap = useAppStore((store) => store.setTemporalProjectBootstrap);
@@ -501,6 +502,12 @@ export function SettingsPanel({
   const currentRequestKey = requestKey(currentRequest);
   const validation = state.validation;
   const result = state.result;
+
+  useEffect(() => {
+    if (activePanel !== "aoi" && !importModalOpen) {
+      hideAoiOverlay();
+    }
+  }, [activePanel, hideAoiOverlay, importModalOpen]);
 
   const projectsQuery = useQuery({
     queryKey: ["temporal-projects", "saved-only"],

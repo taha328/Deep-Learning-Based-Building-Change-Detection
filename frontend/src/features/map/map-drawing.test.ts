@@ -8,6 +8,7 @@ import {
   drawingPreviewFeatureCollection,
   isNearFirstVertex,
   resolveDrawingClick,
+  shouldShowExportAoiOverlay,
   shouldShowProjectAoiOverlay,
   toGeoJsonPolygon,
   type DrawingVertex,
@@ -116,38 +117,73 @@ test("drawing commits keep project AOI and export area separate", () => {
   assert.deepEqual(Object.keys(drawingGeometryCommit("export", polygon)), ["exportGeometry", "exportDrawnGeometry"]);
 });
 
-test("project AOI overlay remains visible while drawing, editing, or running", () => {
-  for (const drawingMode of ["drawing", "editing"] as const) {
+function overlayContext(overrides: Partial<Parameters<typeof shouldShowProjectAoiOverlay>[0]> = {}) {
+  return {
+    aoiOverlayMode: "hidden" as const,
+    hasExportGeometry: false,
+    drawingMode: "idle" as const,
+    isRunning: false,
+    workflowMode: "temporal" as const,
+    pairwiseResultComplete: false,
+    temporalOverlayVisible: false,
+    ...overrides,
+  };
+}
+
+test("project AOI overlay is visible only for AOI or custom export workflows", () => {
+  for (const aoiOverlayMode of ["project_aoi_draw", "project_aoi_edit", "project_aoi_import", "export_custom_zone_draw", "export_custom_zone_preview"] as const) {
     assert.equal(shouldShowProjectAoiOverlay({
-      drawingMode,
-      isRunning: false,
-      workflowMode: "temporal",
-      pairwiseResultComplete: false,
-      temporalOverlayVisible: false,
+      ...overlayContext({ aoiOverlayMode }),
     }), true);
   }
   assert.equal(shouldShowProjectAoiOverlay({
-    drawingMode: "idle",
-    isRunning: true,
-    workflowMode: "temporal",
-    pairwiseResultComplete: false,
-    temporalOverlayVisible: false,
-  }), true);
+    ...overlayContext({
+      aoiOverlayMode: "hidden",
+      drawingMode: "drawing",
+    }),
+  }), false);
+  assert.equal(shouldShowProjectAoiOverlay({
+    ...overlayContext({
+      aoiOverlayMode: "hidden",
+      isRunning: true,
+    }),
+  }), false);
 });
 
-test("project AOI overlay remains visible after completed results and temporal panel changes", () => {
+test("project AOI overlay stays hidden after completed results and temporal panel changes", () => {
   assert.equal(shouldShowProjectAoiOverlay({
-    drawingMode: "idle",
-    isRunning: false,
-    workflowMode: "pairwise",
-    pairwiseResultComplete: true,
-    temporalOverlayVisible: true,
-  }), true);
+    ...overlayContext({
+      aoiOverlayMode: "hidden",
+      workflowMode: "pairwise",
+      pairwiseResultComplete: true,
+      temporalOverlayVisible: true,
+    }),
+  }), false);
   assert.equal(shouldShowProjectAoiOverlay({
-    drawingMode: "idle",
-    isRunning: false,
-    workflowMode: "temporal",
-    pairwiseResultComplete: false,
-    temporalOverlayVisible: false,
+    ...overlayContext({
+      aoiOverlayMode: "hidden",
+      workflowMode: "temporal",
+    }),
+  }), false);
+});
+
+test("custom export overlay requires export workflow and geometry", () => {
+  assert.equal(shouldShowExportAoiOverlay({
+    ...overlayContext({
+      aoiOverlayMode: "export_custom_zone_preview",
+      hasExportGeometry: true,
+    }),
   }), true);
+  assert.equal(shouldShowExportAoiOverlay({
+    ...overlayContext({
+      aoiOverlayMode: "export_custom_zone_preview",
+      hasExportGeometry: false,
+    }),
+  }), false);
+  assert.equal(shouldShowExportAoiOverlay({
+    ...overlayContext({
+      aoiOverlayMode: "project_aoi_import",
+      hasExportGeometry: true,
+    }),
+  }), false);
 });

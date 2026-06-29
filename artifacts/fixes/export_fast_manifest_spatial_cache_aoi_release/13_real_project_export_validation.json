@@ -1,0 +1,108 @@
+{
+  "project_id": "temporal-medium-bouznika-fix-9318797a",
+  "project_path": "/Users/tahaelouali/Developer/Building_change_app/backend/runtime_cache/temporal_projects/temporal-medium-bouznika-fix-9318797a/project.json",
+  "aoi_bounds": [
+    -7.76184082,
+    33.51735431,
+    -7.69592285,
+    33.55970665
+  ],
+  "custom_geometry": {
+    "type": "Polygon",
+    "coordinates": [
+      [
+        [
+          -7.74397705013,
+          33.528831794140004
+        ],
+        [
+          -7.74397705013,
+          33.54822916586
+        ],
+        [
+          -7.71378661987,
+          33.54822916586
+        ],
+        [
+          -7.71378661987,
+          33.528831794140004
+        ],
+        [
+          -7.74397705013,
+          33.528831794140004
+        ]
+      ]
+    ]
+  },
+  "records": [
+    {
+      "iteration": "first",
+      "format": "geojson",
+      "path": "/Users/tahaelouali/Developer/Building_change_app/backend/runtime_cache/temporal_projects/temporal-medium-bouznika-fix-9318797a/exports/results.geojson.custom-884a673367c7",
+      "name": "results.geojson.custom-884a673367c7",
+      "size_bytes": 9462288,
+      "duration_ms": 12222.6,
+      "metadata_exists": true
+    },
+    {
+      "iteration": "second",
+      "format": "geojson",
+      "path": "/Users/tahaelouali/Developer/Building_change_app/backend/runtime_cache/temporal_projects/temporal-medium-bouznika-fix-9318797a/exports/results.geojson.custom-884a673367c7",
+      "name": "results.geojson.custom-884a673367c7",
+      "size_bytes": 9462288,
+      "duration_ms": 2.25,
+      "metadata_exists": true
+    },
+    {
+      "iteration": "first",
+      "format": "shapefile",
+      "path": "/Users/tahaelouali/Developer/Building_change_app/backend/runtime_cache/temporal_projects/temporal-medium-bouznika-fix-9318797a/exports/results_shapefile.zip.custom-884a673367c7",
+      "name": "results_shapefile.zip.custom-884a673367c7",
+      "size_bytes": 195542028,
+      "duration_ms": 29557.13,
+      "metadata_exists": true,
+      "zip_entry_count": 89,
+      "qix_entry_count": 13,
+      "qgz_count": 1
+    },
+    {
+      "iteration": "second",
+      "format": "shapefile",
+      "path": "/Users/tahaelouali/Developer/Building_change_app/backend/runtime_cache/temporal_projects/temporal-medium-bouznika-fix-9318797a/exports/results_shapefile.zip.custom-884a673367c7",
+      "name": "results_shapefile.zip.custom-884a673367c7",
+      "size_bytes": 195542028,
+      "duration_ms": 7.53,
+      "metadata_exists": true,
+      "zip_entry_count": 89,
+      "qix_entry_count": 13,
+      "qgz_count": 1
+    }
+  ],
+  "manifest_path": "/Users/tahaelouali/Developer/Building_change_app/backend/runtime_cache/temporal_projects/temporal-medium-bouznika-fix-9318797a/exports/export_artifact_manifest.json",
+  "manifest_version": "temporal-results-export-artifact-manifest-v1",
+  "manifest_entry_count": 12,
+  "manifest_fingerprint": "0ec41e05145fcee034d091374c3026ad79a9a7ff961c74126e1cae9e9eeda948",
+  "log_path": "../artifacts/fixes/export_fast_manifest_spatial_cache_aoi_release/13_real_project_export_validation.log",
+  "fast_cache_hit_count": 2,
+  "full_project_load_skipped_count": 4,
+  "manifest_load_done_count": 2,
+  "spatial_prefilter_count": 60,
+  "shapefile_spatial_index_created_count": 13,
+  "shapefile_spatial_index_skipped_count": 0,
+  "post_fix_cache_hit_log_path": "../artifacts/fixes/export_fast_manifest_spatial_cache_aoi_release/13_real_project_export_validation_cache_hit_after_scope_log_fix.log",
+  "post_fix_cache_hit_records": [
+    {
+      "format": "geojson",
+      "path": "/Users/tahaelouali/Developer/Building_change_app/backend/runtime_cache/temporal_projects/temporal-medium-bouznika-fix-9318797a/exports/results.geojson.custom-884a673367c7",
+      "duration_ms": 3.17,
+      "size_bytes": 9462288
+    },
+    {
+      "format": "shapefile",
+      "path": "/Users/tahaelouali/Developer/Building_change_app/backend/runtime_cache/temporal_projects/temporal-medium-bouznika-fix-9318797a/exports/results_shapefile.zip.custom-884a673367c7",
+      "duration_ms": 1.54,
+      "size_bytes": 195542028
+    }
+  ],
+  "post_fix_custom_scope_download_log_count": 2
+}

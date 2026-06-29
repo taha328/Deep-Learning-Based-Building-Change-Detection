@@ -54,7 +54,6 @@ export interface TemporalMapPresentation {
   projectId: string | null;
   projectUpdatedAt: string | null;
   isHydratingProject: boolean;
-  projectAoiOverlayVisible: boolean;
   availableMilestoneIds: string[];
   availableMilestones: Array<{
     releaseIdentifier: string;

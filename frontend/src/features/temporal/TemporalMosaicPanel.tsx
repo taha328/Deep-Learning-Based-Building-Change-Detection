@@ -766,6 +766,7 @@ export function TemporalMosaicPanel({
   const selectExportGeometry = useAppStore((state) => state.selectExportGeometry);
   const acknowledgeExportDrawing = useAppStore((state) => state.acknowledgeExportDrawing);
   const clearExportGeometry = useAppStore((state) => state.clearExportGeometry);
+  const hideAoiOverlay = useAppStore((state) => state.hideAoiOverlay);
   const stopDrawing = useAppStore((state) => state.stopDrawing);
   const project = useAppStore((state) => state.temporalProject);
   const setProject = useAppStore((state) => state.setTemporalProject);
@@ -792,6 +793,13 @@ export function TemporalMosaicPanel({
     setResultsExportModalOpen(true);
     acknowledgeExportDrawing();
   }, [acknowledgeExportDrawing, exportDrawingPhase]);
+
+  useEffect(() => {
+    if (activePanel === "aoi" || resultsExportModalOpen || resultsExportImportOpen || exportDrawingPhase !== "idle") {
+      return;
+    }
+    hideAoiOverlay();
+  }, [activePanel, exportDrawingPhase, hideAoiOverlay, resultsExportImportOpen, resultsExportModalOpen]);
 
   const { t, language } = useI18n();
   const locale = language === "fr" ? "fr-FR" : "en-GB";
@@ -1575,10 +1583,6 @@ export function TemporalMosaicPanel({
       projectId: project.project_id,
       projectUpdatedAt: project.updated_at,
       isHydratingProject: Boolean(temporalProjectBootstrap || loadProjectMutation.isPending || hydratingAoiRef.current),
-      projectAoiOverlayVisible:
-        activePanel === "aoi" ||
-        runProjectMutation.isPending ||
-        !project.milestones.some((milestone) => milestone.status === "complete" && milestone.metrics),
       availableMilestoneIds: project.milestones.map((milestone) => milestone.release_identifier),
       availableMilestones: project.milestones.map((milestone) => ({
         releaseIdentifier: milestone.release_identifier,

@@ -10,7 +10,7 @@ import type {
 } from "@/api/contracts";
 import { getFrontendRuntimeConfig } from "@/lib/env";
 import { createIdleRunProgress, type RunProgressState } from "@/lib/run-progress";
-import { drawingGeometryCommit, toGeoJsonPolygon } from "@/features/map/map-drawing";
+import { drawingGeometryCommit, toGeoJsonPolygon, type ProjectAoiOverlayMode } from "@/features/map/map-drawing";
 
 export type LngLatTuple = [number, number];
 export type DrawingMode = "idle" | "drawing" | "editing";
@@ -40,6 +40,7 @@ interface AppState {
   drawingMode: DrawingMode;
   drawingSubMode: DrawingSubMode;
   drawingPurpose: DrawingPurpose;
+  aoiOverlayMode: ProjectAoiOverlayMode;
   exportGeometry: GeoJSON.Polygon | null;
   exportDrawnGeometry: GeoJSON.Polygon | null;
   exportImportedGeometry: GeoJSON.Polygon | null;
@@ -64,6 +65,7 @@ interface AppState {
   selectExportGeometry: (source: ExportGeometrySource | null) => void;
   acknowledgeExportDrawing: () => void;
   clearExportGeometry: () => void;
+  hideAoiOverlay: () => void;
   startEditing: () => void;
   stopDrawing: () => void;
   setDrawingSubMode: (mode: DrawingSubMode) => void;
@@ -113,6 +115,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   drawingMode: "idle",
   drawingSubMode: "polygon",
   drawingPurpose: "aoi",
+  aoiOverlayMode: "hidden",
   exportGeometry: null,
   exportDrawnGeometry: null,
   exportImportedGeometry: null,
@@ -139,6 +142,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({
       drawingMode: "drawing",
       drawingPurpose: "aoi",
+      aoiOverlayMode: "project_aoi_draw",
       draftVertices: [],
       validation: null,
       validationRequestKey: null,
@@ -151,6 +155,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       drawingMode: "drawing",
       drawingSubMode: "rectangle",
       drawingPurpose: "aoi",
+      aoiOverlayMode: "project_aoi_draw",
       draftVertices: [],
       validation: null,
       validationRequestKey: null,
@@ -163,6 +168,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       drawingMode: "drawing",
       drawingSubMode: mode,
       drawingPurpose: "export",
+      aoiOverlayMode: "export_custom_zone_draw",
       draftVertices: [],
       exportGeometry: state.exportDrawnGeometry,
       exportDrawingPhase: mode === "rectangle" ? "drawing_rectangle" : "drawing_polygon",
@@ -172,22 +178,34 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({
       exportImportedGeometry: geometry,
       exportGeometry: geometry,
+      aoiOverlayMode: "export_custom_zone_preview",
     }),
   selectExportGeometry: (source) =>
+    set((state) => {
+      const exportGeometry = source === "drawn" ? state.exportDrawnGeometry : source === "imported" ? state.exportImportedGeometry : null;
+      return {
+        exportGeometry,
+        aoiOverlayMode: exportGeometry ? "export_custom_zone_preview" : "hidden",
+      };
+    }),
+  acknowledgeExportDrawing: () =>
     set((state) => ({
-      exportGeometry: source === "drawn" ? state.exportDrawnGeometry : source === "imported" ? state.exportImportedGeometry : null,
+      exportDrawingPhase: "idle",
+      aoiOverlayMode: state.exportGeometry ? "export_custom_zone_preview" : state.aoiOverlayMode,
     })),
-  acknowledgeExportDrawing: () => set({ exportDrawingPhase: "idle" }),
   clearExportGeometry: () =>
     set({
       exportGeometry: null,
       exportDrawnGeometry: null,
       exportImportedGeometry: null,
       exportDrawingPhase: "idle",
+      aoiOverlayMode: "hidden",
     }),
+  hideAoiOverlay: () => set({ aoiOverlayMode: "hidden" }),
   startEditing: () =>
     set((state) => ({
       drawingMode: state.aoi ? "editing" : "idle",
+      aoiOverlayMode: state.aoi ? "project_aoi_edit" : "hidden",
       draftVertices: state.aoi ? toVertices(state.aoi.coordinates[0].slice(0, -1)) : [],
       validation: null,
       validationRequestKey: null,
@@ -199,6 +217,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       drawingPurpose: "aoi",
       exportDrawingPhase: state.drawingPurpose === "export" ? "cancelled" : state.exportDrawingPhase,
       exportGeometry: state.drawingPurpose === "export" ? null : state.exportGeometry,
+      aoiOverlayMode: "hidden",
       draftVertices: state.drawingPurpose === "export" ? [] : state.aoi ? toVertices(state.aoi.coordinates[0].slice(0, -1)) : [],
     })),
   setDrawingSubMode: (mode) => set({ drawingSubMode: mode }),
@@ -220,6 +239,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       return {
         ...drawingGeometryCommit(state.drawingPurpose, polygon),
         ...(state.drawingPurpose === "export" ? { exportDrawingPhase: "completed" as const } : {}),
+        aoiOverlayMode: state.drawingPurpose === "export" ? "export_custom_zone_preview" : "project_aoi_import",
         drawingMode: "idle",
         drawingSubMode: "polygon",
         drawingPurpose: "aoi",
@@ -234,6 +254,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({
       aoi: polygon,
       drawingMode: "idle",
+      aoiOverlayMode: "project_aoi_import",
       draftVertices: [],
       validation: null,
       validationRequestKey: null,
@@ -254,6 +275,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       aoi: null,
       draftVertices: [],
       drawingMode: "idle",
+      aoiOverlayMode: "hidden",
       validation: null,
       validationRequestKey: null,
       result: null,

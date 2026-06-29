@@ -48,6 +48,9 @@ import {
   drawingPreviewFeatureCollection,
   isNearFirstVertex,
   resolveDrawingClick,
+  shouldShowExportAoiOverlay,
+  shouldShowProjectAoiOverlay,
+  type ProjectAoiOverlayMode,
 } from "@/features/map/map-drawing";
 import type {
   TemporalAddedOverlayPresentation,
@@ -3016,6 +3019,26 @@ function setLayerVisibility(map: MapLibreMap, layerId: string, visible: boolean)
   return setLayerLayoutPropertyIfChanged(map, layerId, "visibility", visible ? "visible" : "none");
 }
 
+function applyAoiOverlayVisibility(
+  map: MapLibreMap,
+  context: {
+    aoiOverlayMode: ProjectAoiOverlayMode;
+    hasExportGeometry: boolean;
+    drawingMode: "idle" | "drawing" | "editing";
+    isRunning: boolean;
+    workflowMode: WorkflowMode;
+    pairwiseResultComplete: boolean;
+    temporalOverlayVisible: boolean;
+  },
+) {
+  const showProjectAoi = shouldShowProjectAoiOverlay(context);
+  const showExportAoi = shouldShowExportAoiOverlay(context);
+  setLayerVisibility(map, "aoi-fill", showProjectAoi);
+  setLayerVisibility(map, "aoi-line", showProjectAoi);
+  setLayerVisibility(map, "export-perimeter-fill", showExportAoi);
+  setLayerVisibility(map, "export-perimeter-line", showExportAoi);
+}
+
 function getTemporalLayerPaintDiagnostics(map: MapLibreMap, layerId: string): Record<string, unknown> {
   const layer = map.getLayer(layerId) as { type?: string } | undefined;
   if (!layer) {
@@ -3416,8 +3439,11 @@ function syncMapPresentation(
   map: MapLibreMap,
   params: {
     aoi: Polygon | null;
+    aoiOverlayMode: ProjectAoiOverlayMode;
     exportGeometry: Polygon | null;
     draftVertices: [number, number][];
+    drawingMode: "idle" | "drawing" | "editing";
+    isRunning: boolean;
     detectedPolygons: FeatureCollection;
     buildingBlocks: FeatureCollection;
     bufferLayers: FeatureCollection;
@@ -3435,8 +3461,17 @@ function syncMapPresentation(
     return;
   }
 
-  syncAoiMapSource(map, useAppStore.getState().aoi);
+  syncAoiMapSource(map, params.aoi);
   sourceData(map, "export-perimeter", polygonFeatureCollection(params.exportGeometry));
+  applyAoiOverlayVisibility(map, {
+    aoiOverlayMode: params.aoiOverlayMode,
+    hasExportGeometry: Boolean(params.exportGeometry),
+    drawingMode: params.drawingMode,
+    isRunning: params.isRunning,
+    workflowMode: params.workflowMode,
+    pairwiseResultComplete: false,
+    temporalOverlayVisible: false,
+  });
   sourceData(map, "detected-polygons", params.detectedPolygons);
   sourceData(map, "building-blocks", params.buildingBlocks);
   sourceData(map, "buffer-layers", params.bufferLayers);
@@ -3818,8 +3853,11 @@ export function MapView({
   });
   const latestPresentationRef = useRef<{
     aoi: Polygon | null;
+    aoiOverlayMode: ProjectAoiOverlayMode;
     exportGeometry: Polygon | null;
     draftVertices: [number, number][];
+    drawingMode: "idle" | "drawing" | "editing";
+    isRunning: boolean;
     detectedPolygons: FeatureCollection;
     buildingBlocks: FeatureCollection;
     bufferLayers: FeatureCollection;
@@ -3834,6 +3872,7 @@ export function MapView({
   } | null>(null);
 
   const aoi = useAppStore((state) => state.aoi);
+  const aoiOverlayMode = useAppStore((state) => state.aoiOverlayMode);
   const exportGeometry = useAppStore((state) => state.exportGeometry);
   const draftVertices = useAppStore((state) => state.draftVertices);
   const mapFocusRequestId = useAppStore((state) => state.mapFocusRequestId);
@@ -6184,8 +6223,11 @@ export function MapView({
 
     latestPresentationRef.current = {
       aoi,
+      aoiOverlayMode,
       exportGeometry,
       draftVertices,
+      drawingMode,
+      isRunning,
       detectedPolygons,
       buildingBlocks,
       bufferLayers,
@@ -6202,6 +6244,7 @@ export function MapView({
     syncMapPresentation(map, latestPresentationRef.current);
   }, [
     aoi,
+    aoiOverlayMode,
     exportGeometry,
     draftVertices,
     detectedPolygons,
@@ -6217,6 +6260,7 @@ export function MapView({
     layerState,
     workflowMode,
     drawingMode,
+    isRunning,
     selectedTemporalMilestoneReady,
   ]);
 
@@ -6226,24 +6270,43 @@ export function MapView({
       return;
     }
     syncAoiMapSource(map, aoi);
+    applyAoiOverlayVisibility(map, {
+      aoiOverlayMode,
+      hasExportGeometry: Boolean(exportGeometry),
+      drawingMode,
+      isRunning,
+      workflowMode,
+      pairwiseResultComplete: false,
+      temporalOverlayVisible: false,
+    });
     moveDrawingLayersToTop(map);
-  }, [aoi, mapError, mapStyleRevision]);
+  }, [aoi, aoiOverlayMode, drawingMode, exportGeometry, isRunning, mapError, mapStyleRevision, workflowMode]);
 
   useEffect(() => {
     const map = mapRef.current;
     if (!map || mapError) {
       return;
     }
-    const syncCurrentAoi = (polygon: Polygon | null) => {
+    const syncCurrentAoi = () => {
       if (!map.isStyleLoaded()) {
         return;
       }
-      syncAoiMapSource(map, polygon);
+      const state = useAppStore.getState();
+      syncAoiMapSource(map, state.aoi);
+      applyAoiOverlayVisibility(map, {
+        aoiOverlayMode: state.aoiOverlayMode,
+        hasExportGeometry: Boolean(state.exportGeometry),
+        drawingMode: state.drawingMode,
+        isRunning: state.isRunning,
+        workflowMode,
+        pairwiseResultComplete: false,
+        temporalOverlayVisible: false,
+      });
       moveDrawingLayersToTop(map);
     };
-    syncCurrentAoi(useAppStore.getState().aoi);
-    return useAppStore.subscribe((state) => syncCurrentAoi(state.aoi));
-  }, [mapError, mapStyleRevision]);
+    syncCurrentAoi();
+    return useAppStore.subscribe(syncCurrentAoi);
+  }, [mapError, mapStyleRevision, workflowMode]);
 
   useEffect(() => {
     const map = mapRef.current;
