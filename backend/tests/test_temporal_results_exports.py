@@ -507,6 +507,23 @@ def test_temporal_results_export_reuses_valid_cache(tmp_path: Path) -> None:
     assert second.stat().st_mtime_ns == first_mtime
 
 
+def test_temporal_results_xlsx_invalidates_stale_fast_cache_metadata(tmp_path: Path) -> None:
+    settings = _save_project(tmp_path)
+    first = build_temporal_results_export_file("temporal-export-formats-test", "xlsx", settings=settings)
+    metadata_path = first.with_name(f"{first.name}.metadata.json")
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["version"] = "xlsx-v2"
+    metadata["exporter_version"] = "xlsx-v2"
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    second = build_temporal_results_export_file("temporal-export-formats-test", "xlsx", settings=settings)
+
+    assert second == first
+    refreshed_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert refreshed_metadata["version"] == "xlsx-v3-details-from-additions"
+    assert refreshed_metadata["exporter_version"] == "xlsx-v3-details-from-additions"
+
+
 def test_temporal_results_exports_resolve_file_backed_artifacts_for_all_formats_and_custom_scope(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
@@ -579,6 +596,19 @@ def test_temporal_results_exports_resolve_file_backed_artifacts_for_all_formats_
         "buffer_20m": 1,
     }
     assert len(paths["tsv"].read_text().splitlines()) == 9
+    workbook = load_workbook(paths["xlsx"], data_only=True)
+    details = workbook["Détails blocs"]
+    detail_rows = list(details.iter_rows(min_row=2, values_only=True))
+    assert len(detail_rows) == 2
+    detail_dates = {
+        value.isoformat().split("T", maxsplit=1)[0] if hasattr(value, "isoformat") else value
+        for value, *_ in detail_rows
+    }
+    assert detail_dates == {"2020-01-15", "2022-01-15"}
+    assert {row[1] for row in detail_rows} == {"WB_2020_R01-1", "WB_2022_R01-1"}
+    assert all(float(row[2]) >= 100.0 for row in detail_rows)
+    assert all(row[3] == "Polygon" for row in detail_rows)
+    assert all(isinstance(row[4], float) and isinstance(row[5], float) for row in detail_rows)
 
     shapefile_path = build_temporal_results_export_file(project.project_id, "shapefile", settings=settings)
     log_text = "\n".join(record.getMessage() for record in caplog.records)

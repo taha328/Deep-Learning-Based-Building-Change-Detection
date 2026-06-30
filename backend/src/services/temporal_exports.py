@@ -132,7 +132,7 @@ EXPORT_CACHE_VERSION = "temporal-results-file-backed-v2"
 EXPORT_ARTIFACT_MANIFEST_VERSION = "temporal-results-export-artifact-manifest-v1"
 EXPORT_GEOMETRY_HASH_PRECISION = 7
 EXPORT_FORMAT_VERSIONS = {
-    "xlsx": "xlsx-v2",
+    "xlsx": "xlsx-v3-details-from-additions",
     "kml": "kml-v2",
     "geojson": "geojson-v2",
     "topojson": TOPOJSON_EXPORT_VERSION,
@@ -753,21 +753,28 @@ def _block_rows(project: TemporalProject, settings: Settings, export_now: dateti
         if milestone.status != "complete":
             continue
         archive_date, _note = _archive_date(project, milestone, settings, export_now)
-        for index, feature in enumerate(_features(milestone.effective_building_blocks_geojson), start=1):
+        block_features = _features(milestone.additions_geojson)
+        if not block_features:
+            block_features = _features(milestone.effective_building_blocks_geojson)
+        for index, feature in enumerate(block_features, start=1):
             geometry_payload = feature.get("geometry") if isinstance(feature, dict) else None
             properties = feature.get("properties") if isinstance(feature, dict) else None
             try:
                 geometry = shape(geometry_payload).buffer(0) if isinstance(geometry_payload, dict) else GeometryCollection()
             except Exception:
                 geometry = GeometryCollection()
-            metric_area = _float(properties.get("area_m2")) if isinstance(properties, dict) else None
+            metric_area = _feature_area_m2(feature, crs) if isinstance(feature, dict) else None
             if metric_area is None and not geometry.is_empty:
                 try:
                     metric_area = float(reproject_geometry(geometry, "EPSG:4326", crs).area)
                 except Exception:
                     metric_area = None
             centroid = geometry.centroid if not geometry.is_empty else None
-            block_id = properties.get("block_id") if isinstance(properties, dict) else None
+            block_id = None
+            if isinstance(properties, dict):
+                block_id = properties.get("block_id") or properties.get("id")
+            if block_id is None and isinstance(feature, dict):
+                block_id = feature.get("id")
             rows.append(
                 {
                     "Date d'archive": _date_cell(archive_date),
@@ -3326,7 +3333,13 @@ def _fast_cached_temporal_results_export_file(
     if metadata is None:
         logger.info("EXPORT_FAST_CACHE_MISS projectId=%s format=%s reason=missing_metadata", project_id, export_format)
         return None
-    if metadata.get("cache_version") != EXPORT_CACHE_VERSION or metadata.get("format") != export_format:
+    expected_format_version = EXPORT_FORMAT_VERSIONS.get(export_format)
+    if (
+        metadata.get("cache_version") != EXPORT_CACHE_VERSION
+        or metadata.get("format") != export_format
+        or metadata.get("version") != expected_format_version
+        or metadata.get("exporter_version") != expected_format_version
+    ):
         logger.info("EXPORT_FAST_CACHE_MISS projectId=%s format=%s reason=metadata_version_or_format", project_id, export_format)
         return None
     scope = metadata.get("scope")
@@ -3388,6 +3401,14 @@ def _export_cache_is_valid(
         metadata = _read_export_cache_metadata(path)
         if metadata is None:
             logger.info("EXPORT_CACHE_STALE projectId=%s format=%s reason=missing_metadata path=%s", project_id, export_format, path)
+            return False
+        if (
+            metadata.get("cache_version") != expected_metadata.get("cache_version")
+            or metadata.get("format") != expected_metadata.get("format")
+            or metadata.get("version") != expected_metadata.get("version")
+            or metadata.get("exporter_version") != expected_metadata.get("exporter_version")
+        ):
+            logger.info("EXPORT_CACHE_STALE projectId=%s format=%s reason=metadata_version_or_format path=%s", project_id, export_format, path)
             return False
         if metadata.get("cache_key") != expected_metadata.get("cache_key"):
             logger.info(
