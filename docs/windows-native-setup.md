@@ -22,6 +22,9 @@ powershell -ExecutionPolicy Bypass -File scripts\setup-windows-native.ps1
 
 The setup script is idempotent and non-destructive:
 
+- `backend\.env` is created from `backend\.env.windows.example` when it does not exist.
+- `frontend\.env.local` is created from `frontend\.env.local.windows.example` when it does not exist.
+- Every `__REPO_ROOT__` placeholder in those templates is replaced with the local repository path.
 - Existing `backend\.env` and `frontend\.env.local` are preserved by default.
 - Pass `-ForceEnv` to back up and regenerate those env files from the Windows templates.
 - Existing model artifacts are reused by default.
@@ -34,6 +37,7 @@ Examples:
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\setup-windows-native.ps1 -NoStart
 powershell -ExecutionPolicy Bypass -File scripts\setup-windows-native.ps1 -ForceEnv -ForceModelDownload
+powershell -ExecutionPolicy Bypass -File scripts\setup-windows-native.ps1 -EnvTemplateSelfTest
 ```
 
 Logs are written to:
@@ -123,11 +127,19 @@ Generated runtime files:
 - `backend\.env`
 - `frontend\.env.local`
 
+For normal setup, do not create the generated runtime env files by hand. `setup-windows-native.ps1` copies the templates on first run, replaces all `__REPO_ROOT__` placeholders with the actual clone path, and verifies required backend/frontend keys. Existing env files are left intact unless `-ForceEnv` is passed. With `-ForceEnv`, setup writes timestamped `.bak` copies beside the existing env files, then regenerates from the templates.
+
 The backend template points BANDON to the native virtualenv:
 
 ```text
 APP_BANDON_ENV_PREFIX=<repo>\backend\.venv
 APP_BANDON_CHECKPOINT_PATH=<repo>\models\bandon\mtgcdnet_iter_40000.pth
+```
+
+To validate only env template generation without installing tools, touching real env files, or starting services, run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\setup-windows-native.ps1 -EnvTemplateSelfTest
 ```
 
 ## Troubleshooting

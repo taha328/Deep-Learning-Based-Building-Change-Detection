@@ -182,6 +182,18 @@ function Assert-EnvKeys {
     return "$($Keys.Count) required keys present"
 }
 
+function Assert-NoUnreplacedRepoRootPlaceholder {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw "Missing env file: $Path"
+    }
+    $content = [IO.File]::ReadAllText($Path)
+    if ($content.Contains("__REPO_ROOT__")) {
+        throw "Unreplaced __REPO_ROOT__ placeholder remains in $Path"
+    }
+}
+
 function Resolve-RepoPath {
     param([Parameter(Mandatory = $true)][string]$Value)
     $expanded = $Value.Replace("__REPO_ROOT__", $RepoRoot)
@@ -260,6 +272,7 @@ Invoke-Check "PostgreSQL TCP port" {
 }
 
 Invoke-Check "Backend env file" {
+    Assert-NoUnreplacedRepoRootPlaceholder -Path $BackendEnvPath
     $script:BackendEnv = Read-EnvFile -Path $BackendEnvPath
     Assert-EnvKeys -Values $script:BackendEnv -Keys @(
         "PERSISTENCE_BACKEND",
@@ -271,11 +284,15 @@ Invoke-Check "Backend env file" {
         "APP_BANDON_REPO_DIR",
         "APP_BANDON_ENV_PREFIX",
         "APP_BANDON_CONFIG_PATH",
-        "APP_BANDON_CHECKPOINT_PATH"
+        "APP_BANDON_CHECKPOINT_PATH",
+        "MAPBOX_ACCESS_TOKEN",
+        "APP_WAYBACK_DEFAULT_ZOOM",
+        "APP_TILE_ZOOM"
     )
 }
 
 Invoke-Check "Frontend env file" {
+    Assert-NoUnreplacedRepoRootPlaceholder -Path $FrontendEnvPath
     $script:FrontendEnv = Read-EnvFile -Path $FrontendEnvPath
     Assert-EnvKeys -Values $script:FrontendEnv -Keys @(
         "VITE_FRONTEND_MODE",

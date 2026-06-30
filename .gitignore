@@ -3,8 +3,12 @@
 .env.*
 !.env.example
 !**/.env.example
+!backend/.env.windows.example
+!frontend/.env.local.windows.example
+!*.example
 backend/.env
 frontend/.env
+frontend/.env.local
 
 # Python environments and caches
 .venv/

@@ -2,6 +2,7 @@
 param(
     [string]$RepoDir = (Split-Path -Parent $PSScriptRoot),
     [switch]$ForceEnv,
+    [switch]$EnvTemplateSelfTest,
     [switch]$ForceModelDownload,
     [switch]$SkipFrontendBuild,
     [switch]$NoStart
@@ -531,10 +532,15 @@ function Ensure-Memurai {
 function Write-EnvFromTemplate {
     param(
         [Parameter(Mandatory = $true)][string]$TemplatePath,
-        [Parameter(Mandatory = $true)][string]$TargetPath
+        [Parameter(Mandatory = $true)][string]$TargetPath,
+        [switch]$Regenerate
     )
 
-    if ((Test-Path -LiteralPath $TargetPath) -and -not $ForceEnv) {
+    if (-not (Test-Path -LiteralPath $TemplatePath)) {
+        throw "Missing env template: $TemplatePath"
+    }
+
+    if ((Test-Path -LiteralPath $TargetPath) -and -not $Regenerate) {
         Write-Log "Preserving existing env file: $TargetPath"
         return
     }
@@ -547,8 +553,185 @@ function Write-EnvFromTemplate {
 
     $content = [IO.File]::ReadAllText($TemplatePath)
     $content = $content.Replace("__REPO_ROOT__", $RepoRoot)
+    $targetDir = Split-Path -Parent $TargetPath
+    if ($targetDir -and -not (Test-Path -LiteralPath $targetDir)) {
+        New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
+    }
     [IO.File]::WriteAllText($TargetPath, $content, [System.Text.UTF8Encoding]::new($false))
     Write-Log "Wrote env file: $TargetPath"
+}
+
+function Read-GeneratedEnvFile {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw "Missing generated env file: $Path"
+    }
+
+    $values = @{}
+    foreach ($rawLine in Get-Content -LiteralPath $Path) {
+        $line = $rawLine.Trim()
+        if (-not $line -or $line.StartsWith("#") -or $line -notmatch "=") {
+            continue
+        }
+        $parts = $line.Split("=", 2)
+        $values[$parts[0].Trim()] = $parts[1].Trim().Trim('"').Trim("'")
+    }
+    return ,$values
+}
+
+function Assert-GeneratedEnvKeys {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$Values,
+        [Parameter(Mandatory = $true)][string[]]$Keys,
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    $missing = @()
+    foreach ($key in $Keys) {
+        if (-not $Values.ContainsKey($key) -or -not $Values[$key]) {
+            $missing += $key
+        }
+    }
+    if ($missing.Count -gt 0) {
+        throw "Missing required env keys in $Path`: $($missing -join ', ')"
+    }
+}
+
+function Assert-NoUnreplacedRepoRootPlaceholder {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw "Missing env file: $Path"
+    }
+    $content = [IO.File]::ReadAllText($Path)
+    if ($content.Contains("__REPO_ROOT__")) {
+        throw "Unreplaced __REPO_ROOT__ placeholder remains in $Path"
+    }
+}
+
+function Assert-GeneratedEnvFiles {
+    param(
+        [Parameter(Mandatory = $true)][string]$BackendEnvPath,
+        [Parameter(Mandatory = $true)][string]$FrontendEnvPath
+    )
+
+    Assert-NoUnreplacedRepoRootPlaceholder -Path $BackendEnvPath
+    Assert-NoUnreplacedRepoRootPlaceholder -Path $FrontendEnvPath
+
+    $backendEnv = Read-GeneratedEnvFile -Path $BackendEnvPath
+    Assert-GeneratedEnvKeys -Path $BackendEnvPath -Values $backendEnv -Keys @(
+        "APP_ENV",
+        "APP_PACKAGED_DEPLOYMENT",
+        "PYTHONNOUSERSITE",
+        "PERSISTENCE_BACKEND",
+        "DATABASE_URL",
+        "REDIS_URL",
+        "CELERY_BROKER_URL",
+        "CELERY_RESULT_BACKEND",
+        "CELERY_WORKER_POOL",
+        "APP_RUNTIME_CACHE_DIR",
+        "APP_INFERENCE_BACKEND",
+        "APP_BANDON_INFERENCE_MODE",
+        "APP_BANDON_REPO_DIR",
+        "APP_BANDON_ENV_PREFIX",
+        "APP_BANDON_CONFIG_PATH",
+        "APP_BANDON_CHECKPOINT_PATH",
+        "MODEL_DEVICE",
+        "APP_CHANGE_THRESHOLD",
+        "APP_SEMANTIC_THRESHOLD",
+        "APP_BUFFER_DISTANCES_M",
+        "APP_WAYBACK_HTTP_MAX_RETRIES",
+        "APP_WAYBACK_TILE_MAX_CONCURRENCY",
+        "APP_WAYBACK_MAX_MISSING_TILE_RATIO",
+        "APP_WAYBACK_DEFAULT_ZOOM",
+        "APP_TILE_ZOOM",
+        "MAPBOX_ACCESS_TOKEN",
+        "MAPBOX_CURRENT_IMAGERY_ENABLED",
+        "MAPBOX_CURRENT_IMAGERY_CACHE_DIR",
+        "APP_MAPBOX_MAX_TILES_PER_REQUEST",
+        "MAPBOX_CURRENT_IMAGERY_MAX_TILES",
+        "APP_POST_COMPLETION_REQUEST_CLEANUP_ENABLED",
+        "CORS_ALLOWED_ORIGINS"
+    )
+
+    $frontendEnv = Read-GeneratedEnvFile -Path $FrontendEnvPath
+    Assert-GeneratedEnvKeys -Path $FrontendEnvPath -Values $frontendEnv -Keys @(
+        "VITE_FRONTEND_MODE",
+        "VITE_FASTAPI_BACKEND_URL",
+        "VITE_MAPBOX_API_KEY"
+    )
+
+    Write-Log "Verified generated env files contain required keys and no unreplaced __REPO_ROOT__ placeholders."
+}
+
+function Invoke-EnvTemplateSelfTest {
+    $sourceRepoRoot = $RepoRoot
+    $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("building-change-env-selftest-" + [guid]::NewGuid().ToString("N"))
+    $savedRepoRoot = $RepoRoot
+    $savedBackendDir = $BackendDir
+    $savedFrontendDir = $FrontendDir
+
+    try {
+        New-Item -ItemType Directory -Force -Path (Join-Path $tempRoot "backend") | Out-Null
+        New-Item -ItemType Directory -Force -Path (Join-Path $tempRoot "frontend") | Out-Null
+        Copy-Item -LiteralPath (Join-Path $sourceRepoRoot "backend\.env.windows.example") -Destination (Join-Path $tempRoot "backend\.env.windows.example")
+        Copy-Item -LiteralPath (Join-Path $sourceRepoRoot "frontend\.env.local.windows.example") -Destination (Join-Path $tempRoot "frontend\.env.local.windows.example")
+
+        Set-Variable -Name RepoRoot -Scope Script -Value $tempRoot
+        Set-Variable -Name BackendDir -Scope Script -Value (Join-Path $tempRoot "backend")
+        Set-Variable -Name FrontendDir -Scope Script -Value (Join-Path $tempRoot "frontend")
+
+        $backendTemplate = Join-Path $BackendDir ".env.windows.example"
+        $frontendTemplate = Join-Path $FrontendDir ".env.local.windows.example"
+        $backendTarget = Join-Path $BackendDir ".env"
+        $frontendTarget = Join-Path $FrontendDir ".env.local"
+
+        Write-EnvFromTemplate -TemplatePath $backendTemplate -TargetPath $backendTarget
+        Write-EnvFromTemplate -TemplatePath $frontendTemplate -TargetPath $frontendTarget
+        Assert-GeneratedEnvFiles -BackendEnvPath $backendTarget -FrontendEnvPath $frontendTarget
+
+        $sentinel = "# preserve-sentinel"
+        Add-Content -LiteralPath $backendTarget -Value $sentinel
+        Add-Content -LiteralPath $frontendTarget -Value $sentinel
+        $backendBefore = [IO.File]::ReadAllText($backendTarget)
+        $frontendBefore = [IO.File]::ReadAllText($frontendTarget)
+
+        Write-EnvFromTemplate -TemplatePath $backendTemplate -TargetPath $backendTarget
+        Write-EnvFromTemplate -TemplatePath $frontendTemplate -TargetPath $frontendTarget
+        if ([IO.File]::ReadAllText($backendTarget) -ne $backendBefore) {
+            throw "backend/.env was not preserved by default."
+        }
+        if ([IO.File]::ReadAllText($frontendTarget) -ne $frontendBefore) {
+            throw "frontend/.env.local was not preserved by default."
+        }
+
+        Write-EnvFromTemplate -TemplatePath $backendTemplate -TargetPath $backendTarget -Regenerate
+        Write-EnvFromTemplate -TemplatePath $frontendTemplate -TargetPath $frontendTarget -Regenerate
+        if (-not (Get-ChildItem -LiteralPath $BackendDir -Filter ".env.*.bak" -ErrorAction SilentlyContinue | Select-Object -First 1)) {
+            throw "No backend env backup was created during regeneration."
+        }
+        if (-not (Get-ChildItem -LiteralPath $FrontendDir -Filter ".env.local.*.bak" -ErrorAction SilentlyContinue | Select-Object -First 1)) {
+            throw "No frontend env backup was created during regeneration."
+        }
+        if ([IO.File]::ReadAllText($backendTarget).Contains($sentinel)) {
+            throw "backend/.env was not regenerated from the template."
+        }
+        if ([IO.File]::ReadAllText($frontendTarget).Contains($sentinel)) {
+            throw "frontend/.env.local was not regenerated from the template."
+        }
+        Assert-GeneratedEnvFiles -BackendEnvPath $backendTarget -FrontendEnvPath $frontendTarget
+
+        Write-Log "Env template self-test passed using temporary repo root: $tempRoot"
+    }
+    finally {
+        Set-Variable -Name RepoRoot -Scope Script -Value $savedRepoRoot
+        Set-Variable -Name BackendDir -Scope Script -Value $savedBackendDir
+        Set-Variable -Name FrontendDir -Scope Script -Value $savedFrontendDir
+        if (Test-Path -LiteralPath $tempRoot) {
+            Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 function Test-ModelFile {
@@ -688,6 +871,14 @@ function Ensure-FrontendDependencies {
     }
 }
 
+if ($EnvTemplateSelfTest) {
+    Invoke-Step "Validate native env template generation" {
+        Invoke-EnvTemplateSelfTest
+    }
+    Write-Log "Native Windows env template self-test complete."
+    return
+}
+
 if (-not (Test-IsAdministrator)) {
     throw "Run this script from an elevated PowerShell session: right-click PowerShell and choose 'Run as administrator'."
 }
@@ -728,8 +919,11 @@ Invoke-Step "Provision PostgreSQL database and PostGIS" {
 }
 
 Invoke-Step "Write native env files" {
-    Write-EnvFromTemplate -TemplatePath (Join-Path $BackendDir ".env.windows.example") -TargetPath (Join-Path $BackendDir ".env")
-    Write-EnvFromTemplate -TemplatePath (Join-Path $FrontendDir ".env.local.windows.example") -TargetPath (Join-Path $FrontendDir ".env.local")
+    $backendEnvPath = Join-Path $BackendDir ".env"
+    $frontendEnvPath = Join-Path $FrontendDir ".env.local"
+    Write-EnvFromTemplate -TemplatePath (Join-Path $BackendDir ".env.windows.example") -TargetPath $backendEnvPath -Regenerate:$ForceEnv
+    Write-EnvFromTemplate -TemplatePath (Join-Path $FrontendDir ".env.local.windows.example") -TargetPath $frontendEnvPath -Regenerate:$ForceEnv
+    Assert-GeneratedEnvFiles -BackendEnvPath $backendEnvPath -FrontendEnvPath $frontendEnvPath
 }
 
 Invoke-Step "Create backend virtualenv and install backend dependencies" {

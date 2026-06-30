@@ -40,6 +40,13 @@ cd Deep-Learning-Based-Building-Change-Detection
 powershell -ExecutionPolicy Bypass -File .\scripts\setup-windows-native.ps1
 ```
 
+Normal native setup creates the runtime env files automatically from tracked templates:
+
+- `backend\.env` is generated from `backend\.env.windows.example`.
+- `frontend\.env.local` is generated from `frontend\.env.local.windows.example`.
+
+Users do not manually create those files for normal setup. The setup script replaces every `__REPO_ROOT__` placeholder with the local clone path, preserves existing env files by default, and supports `-ForceEnv` to make timestamped backups before regenerating them from the templates.
+
 After setup:
 
 ```powershell
