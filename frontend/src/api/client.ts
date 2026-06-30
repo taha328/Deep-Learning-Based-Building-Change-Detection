@@ -22,3 +22,5 @@ export const importReferenceLayer = api.importReferenceLayer;
 export const updateReferenceLayer = api.updateReferenceLayer;
 export const deleteReferenceLayer = api.deleteReferenceLayer;
 export const createTemporalProjectExportBundle = api.createTemporalProjectExportBundle;
+export const createTemporalResultsExportJob = api.createTemporalResultsExportJob;
+export const getTemporalResultsExportJob = api.getTemporalResultsExportJob;

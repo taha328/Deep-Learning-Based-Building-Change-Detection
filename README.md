@@ -84,6 +84,8 @@ Project artifacts persist in the Docker runtime cache under:
 
 Typical outputs include milestone `reference_imagery_cog.tif` files, building-addition GeoJSON, buffer and growth layers, project metadata, and downloadable GIS export bundles. Use the application download workflow to retrieve results from the packaged runtime.
 
+Large temporal result exports are prepared through an export job and downloaded with a direct browser download link so multi-GB files are not loaded into frontend memory. ESRI Shapefile exports are vector-only by default; the QGIS/raster package is an advanced option and is cached separately from the default Shapefile ZIP.
+
 ## Why MTGCD-Net
 
 MTGCD-Net is a multi-task guided network designed for building change detection in off-nadir aerial imagery. Viewing-angle and alignment differences can shift roofs, facades, and footprints between dates, creating apparent changes that are not real construction.

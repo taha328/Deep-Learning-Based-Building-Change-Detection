@@ -6,6 +6,7 @@ import math
 from io import BytesIO
 from pathlib import Path
 import re
+import time
 import xml.etree.ElementTree as ET
 import zipfile
 
@@ -285,9 +286,10 @@ def test_temporal_results_export_formats_are_generated_under_project_exports(tmp
             "buffer_10m",
             "buffer_15m",
             "buffer_20m",
-            "rasters",
         }
-        assert len([name for name in names if name.endswith(".qgz") and "/" not in name]) == 1
+        assert not any(name.endswith(".qgz") for name in names)
+        assert not any(name.startswith("rasters/") for name in names)
+        assert not any(name.lower().endswith((".tif", ".tiff", ".vrt", ".mbtiles", ".pmtiles")) for name in names)
         assert "batiments_ajoutes_par_date/batiments_ajoutes_2024_Q1.shp" in names
         assert "buffer_10m/buffer_10m_2024_Q1.shp" in names
         assert "buffer_10m/buffer_10m_2022_Q1_2024_Q1.shp" in names
@@ -296,21 +298,6 @@ def test_temporal_results_export_formats_are_generated_under_project_exports(tmp
             stem = shp_name.removesuffix(".shp")
             for suffix in (".shx", ".dbf", ".prj", ".cpg"):
                 assert f"{stem}{suffix}" in names
-        qgz_name = next(name for name in names if name.endswith(".qgz"))
-        qgz_path = tmp_path / "results.qgz"
-        qgz_path.write_bytes(archive.read(qgz_name))
-        with zipfile.ZipFile(qgz_path) as qgz:
-            qgs_name = next(name for name in qgz.namelist() if name.endswith(".qgs"))
-            qgs = qgz.read(qgs_name).decode("utf-8")
-        assert "./batiments_ajoutes_par_date/batiments_ajoutes_2024_Q1.shp" in qgs
-        assert "./buffer_10m/buffer_10m_2022_Q1_2024_Q1.shp" in qgs
-        assert "./rasters/WB_2022_R03/reference_imagery_cog.tif" in qgs
-        assert "./rasters/WB_2024_R03/reference_imagery_cog.tif" in qgs
-        assert 'name="Bâtiments ajoutés par date"' in qgs
-        assert 'mutually-exclusive="1"' in qgs
-        assert "OpenStreetMap" not in qgs
-        assert "Fond de carte en ligne" not in qgs
-        assert 'name="Synthèse"' in qgs
 
 
 def test_temporal_results_xlsx_schema_excludes_internal_fields_and_uses_150_zoom(tmp_path: Path) -> None:
@@ -656,12 +643,18 @@ def test_temporal_results_shapefile_invalidates_legacy_cache_without_version_met
 
     assert regenerated.read_bytes().startswith(b"PK")
     metadata = json.loads((export_dir / "results_shapefile.zip.metadata.json").read_text())
-    assert metadata["version"] == "zone-clipped-mutually-exclusive-qgz-v14-startup-extent"
+    assert metadata["version"] == "vector-only-default-v15-async-options"
 
 
 def test_temporal_results_qgz_has_valid_ids_extents_paths_groups_and_visibility(tmp_path: Path) -> None:
     settings = _save_project(tmp_path)
-    path = build_temporal_results_export_file("temporal-export-formats-test", "shapefile", settings=settings)
+    path = build_temporal_results_export_file(
+        "temporal-export-formats-test",
+        "shapefile",
+        settings=settings,
+        include_rasters=True,
+        include_offline_package=True,
+    )
     extract_root = tmp_path / "extracted"
     with zipfile.ZipFile(path) as archive:
         assert "README.txt" in archive.namelist()
@@ -790,7 +783,13 @@ def test_temporal_results_qgz_synthesis_visibility_imagery_order_colors_and_diss
         "Buffer 10m 2018 Q1 → 2022 Q1": 2,
     }
 
-    path = build_temporal_results_export_file(project.project_id, "shapefile", settings=settings)
+    path = build_temporal_results_export_file(
+        project.project_id,
+        "shapefile",
+        settings=settings,
+        include_rasters=True,
+        include_offline_package=True,
+    )
     extract_root = tmp_path / "three-extracted"
     with zipfile.ZipFile(path) as archive:
         archive.extractall(extract_root)
@@ -873,6 +872,8 @@ def test_custom_perimeter_clips_geojson_and_adds_styled_qgis_export_zone(tmp_pat
         "shapefile",
         settings=settings,
         perimeter=perimeter,
+        include_rasters=True,
+        include_offline_package=True,
     )
     with zipfile.ZipFile(shapefile_path) as archive:
         assert "zone_export/zone_export.shp" in archive.namelist()
@@ -1098,6 +1099,110 @@ def test_temporal_results_export_route_headers_and_unsupported_format(tmp_path: 
         assert outside.json()["detail"]["code"] == "invalid_export_perimeter"
     finally:
         app.dependency_overrides.clear()
+
+
+def _wait_for_temporal_export_job(client: TestClient, project_id: str, job_id: str) -> dict:
+    for _ in range(80):
+        response = client.get(f"/api/temporal-projects/{project_id}/exports/jobs/{job_id}")
+        assert response.status_code == 200
+        payload = response.json()
+        if payload["status"] in {"succeeded", "failed"}:
+            return payload
+        time.sleep(0.05)
+    pytest.fail("export job did not finish")
+
+
+def test_temporal_results_export_job_cached_file_returns_json_and_direct_download(tmp_path: Path) -> None:
+    settings = _save_project(tmp_path)
+    cached_path = build_temporal_results_export_file("temporal-export-formats-test", "shapefile", settings=settings)
+    app.dependency_overrides[get_app_settings] = lambda: settings
+    try:
+        client = TestClient(app)
+        response = client.post(
+            "/api/temporal-projects/temporal-export-formats-test/exports/jobs",
+            json={"format": "shapefile", "perimeter": {"mode": "project_aoi"}},
+        )
+
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("application/json")
+        payload = response.json()
+        assert payload["status"] == "succeeded"
+        assert payload["download_url"]
+        assert payload["file_size_bytes"] == cached_path.stat().st_size
+        assert payload["filename"] == "resultats_temporal-export-formats-test_results_shapefile.zip"
+        assert payload["include_rasters"] is False
+        assert payload["include_offline_package"] is False
+
+        invalid = client.get(payload["download_url"].replace("token=", "token=invalid-"))
+        assert invalid.status_code == 403
+
+        download = client.get(payload["download_url"])
+        assert download.status_code == 200
+        assert download.headers["content-type"].startswith("application/zip")
+        assert "attachment" in download.headers["content-disposition"]
+        assert int(download.headers["content-length"]) == cached_path.stat().st_size
+        assert download.content.startswith(b"PK")
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_temporal_results_export_job_missing_cache_queues_then_succeeds(tmp_path: Path) -> None:
+    settings = _save_project(tmp_path)
+    app.dependency_overrides[get_app_settings] = lambda: settings
+    try:
+        client = TestClient(app)
+        response = client.post(
+            "/api/temporal-projects/temporal-export-formats-test/exports/jobs",
+            json={"format": "geojson", "perimeter": {"mode": "project_aoi"}},
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["status"] == "queued"
+        finished = _wait_for_temporal_export_job(client, "temporal-export-formats-test", payload["job_id"])
+        assert finished["status"] == "succeeded"
+        assert finished["download_url"]
+        assert finished["file_size_bytes"] > 0
+
+        download = client.get(finished["download_url"])
+        assert download.status_code == 200
+        assert download.headers["content-type"].startswith("application/geo+json")
+        assert int(download.headers["content-length"]) == len(download.content)
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_temporal_results_shapefile_default_vector_only_and_advanced_package_cache_keys(tmp_path: Path) -> None:
+    settings = _save_project(tmp_path)
+
+    default_path = build_temporal_results_export_file("temporal-export-formats-test", "shapefile", settings=settings)
+    advanced_path = build_temporal_results_export_file(
+        "temporal-export-formats-test",
+        "shapefile",
+        settings=settings,
+        include_rasters=True,
+        include_offline_package=True,
+    )
+
+    assert default_path != advanced_path
+    default_metadata = json.loads(default_path.with_name(f"{default_path.name}.metadata.json").read_text(encoding="utf-8"))
+    advanced_metadata = json.loads(advanced_path.with_name(f"{advanced_path.name}.metadata.json").read_text(encoding="utf-8"))
+    assert default_metadata["cache_key"] != advanced_metadata["cache_key"]
+    assert default_metadata["options"]["include_rasters"] is False
+    assert default_metadata["options"]["include_offline_package"] is False
+    assert default_metadata["options"]["shapefile_package"] == "vector_only"
+    assert advanced_metadata["options"]["include_rasters"] is True
+    assert advanced_metadata["options"]["include_offline_package"] is True
+    assert advanced_metadata["options"]["shapefile_package"] == "qgis_raster_package"
+
+    with zipfile.ZipFile(default_path) as archive:
+        default_names = archive.namelist()
+        assert not any(name.endswith(".qgz") for name in default_names)
+        assert not any(name.startswith("rasters/") for name in default_names)
+    with zipfile.ZipFile(advanced_path) as archive:
+        advanced_names = archive.namelist()
+        assert any(name.endswith(".qgz") for name in advanced_names)
+        assert any(name.startswith("rasters/") and name.endswith(".tif") for name in advanced_names)
 
 
 def test_temporal_results_cached_export_fast_path_skips_project_hydration(monkeypatch, tmp_path: Path, caplog) -> None:

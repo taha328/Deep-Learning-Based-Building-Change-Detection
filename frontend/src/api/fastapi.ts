@@ -9,6 +9,7 @@ import {
   referenceLayerSchema,
   runResponseSchema,
   temporalProjectRunResponseSchema,
+  temporalResultsExportJobSchema,
   temporalCompactProjectSchema,
   temporalProjectExportBundleSchema,
   temporalProjectSaveResponseSchema,
@@ -28,6 +29,7 @@ import {
   type TemporalCompactProject,
   type TemporalProjectRunResponse,
   type TemporalProjectRunRequest,
+  type TemporalResultsExportJob,
   type TemporalProjectExportBundle,
   type TemporalProjectSaveResponse,
   type TemporalProjectSummary,
@@ -802,4 +804,32 @@ export async function createTemporalProjectExportBundle(projectId: string): Prom
     method: "POST",
   });
   return temporalProjectExportBundleSchema.parse(result);
+}
+
+export type TemporalResultsExportJobRequest = {
+  format: string;
+  perimeter: unknown;
+  includeRasters?: boolean;
+  includeOfflinePackage?: boolean;
+};
+
+export async function createTemporalResultsExportJob(
+  projectId: string,
+  request: TemporalResultsExportJobRequest,
+): Promise<TemporalResultsExportJob> {
+  const result = await apiFetch<unknown>(`/api/temporal-projects/${encodeURIComponent(projectId)}/exports/jobs`, {
+    method: "POST",
+    body: JSON.stringify(request),
+  });
+  return temporalResultsExportJobSchema.parse(result);
+}
+
+export async function getTemporalResultsExportJob(
+  projectId: string,
+  jobId: string,
+): Promise<TemporalResultsExportJob> {
+  const result = await apiFetch<unknown>(
+    `/api/temporal-projects/${encodeURIComponent(projectId)}/exports/jobs/${encodeURIComponent(jobId)}`,
+  );
+  return temporalResultsExportJobSchema.parse(result);
 }

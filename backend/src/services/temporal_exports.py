@@ -80,7 +80,7 @@ TEMPORAL_RESULTS_EXPORT_LABELS = {
 
 TOPOJSON_DEFAULT_QUANTIZATION = 1_000_000
 TOPOJSON_EXPORT_VERSION = "clean-quantized-v3"
-SHAPEFILE_EXPORT_VERSION = "zone-clipped-mutually-exclusive-qgz-v14-startup-extent"
+SHAPEFILE_EXPORT_VERSION = "vector-only-default-v15-async-options"
 QGIS_PROJECT_CRS = "EPSG:3857"
 QGIS_VECTOR_CRS = "EPSG:4326"
 QGIS_PROJECT_EXTENT_PADDING_RATIO = 0.075
@@ -2577,11 +2577,25 @@ def _write_temporal_shapefile_qgz(
     return "styled_xml"
 
 
-def build_temporal_results_shapefile_zip(project_id: str, settings: Settings | None = None) -> bytes:
+def build_temporal_results_shapefile_zip(
+    project_id: str,
+    settings: Settings | None = None,
+    *,
+    include_rasters: bool = False,
+    include_offline_package: bool = False,
+) -> bytes:
     resolved_settings = _settings(settings)
     project = _load_project(project_id, resolved_settings)
     started_at = time.perf_counter()
+    include_qgis_package = bool(include_rasters or include_offline_package)
     completed = [milestone for milestone in project.milestones if milestone.status == "complete"]
+    logger.info(
+        "EXPORT_SHAPEFILE_OPTIONS projectId=%s includeRasters=%s includeOfflinePackage=%s package=%s",
+        project_id,
+        include_rasters,
+        include_offline_package,
+        "qgis_raster_package" if include_qgis_package else "vector_only",
+    )
     if completed:
         logger.info(
             "EXPORT_LAYER_SKIPPED_BASELINE projectId=%s release=%s",
@@ -2686,111 +2700,121 @@ def build_temporal_results_shapefile_zip(project_id: str, settings: Settings | N
                 )
         if not written_layers:
             raise ValueError(f"No valid temporal result geometries are available for project {project_id}.")
-        rasters = _copy_qgis_reference_rasters(project, resolved_settings, tmp_dir)
-        if not rasters:
-            logger.warning("EXPORT_RESULTS_QGIS_RASTER_ALL_MISSING projectId=%s", project_id)
+        rasters: list[TemporalQgisRaster] = []
+        qgz_path: Path | None = None
+        if include_qgis_package:
+            rasters = _copy_qgis_reference_rasters(project, resolved_settings, tmp_dir)
+            if not rasters:
+                logger.warning("EXPORT_RESULTS_QGIS_RASTER_ALL_MISSING projectId=%s", project_id)
+        else:
+            logger.info(
+                "EXPORT_RESULTS_QGIS_RASTER_SKIPPED projectId=%s reason=vector_only_default",
+                project_id,
+            )
         validation_by_name = {validation.display_name: validation for validation in validated_layers}
-        for group_key in group_keys:
-            group_layers = [layer for layer in written_layers if layer.group_key == group_key]
-            if not group_layers:
-                continue
-            group_extent = _union_bounds(
-                [
-                    (
-                        validation_by_name[layer.display_name].xmin,
-                        validation_by_name[layer.display_name].ymin,
-                        validation_by_name[layer.display_name].xmax,
-                        validation_by_name[layer.display_name].ymax,
-                    )
-                    for layer in group_layers
-                ]
+        if include_qgis_package:
+            for group_key in group_keys:
+                group_layers = [layer for layer in written_layers if layer.group_key == group_key]
+                if not group_layers:
+                    continue
+                group_extent = _union_bounds(
+                    [
+                        (
+                            validation_by_name[layer.display_name].xmin,
+                            validation_by_name[layer.display_name].ymin,
+                            validation_by_name[layer.display_name].xmax,
+                            validation_by_name[layer.display_name].ymax,
+                        )
+                        for layer in group_layers
+                    ]
+                )
+                logger.info(
+                    "EXPORT_QGZ_GROUP_EXTENT projectId=%s group=%s xmin=%s ymin=%s xmax=%s ymax=%s layer_count=%s",
+                    project_id,
+                    group_key,
+                    *group_extent,
+                    len(group_layers),
+                )
+            vector_extent = _union_bounds(
+                [(item.xmin, item.ymin, item.xmax, item.ymax) for item in validated_layers]
+            )
+            initial_extent = compute_qgis_project_initial_extent(
+                project_id,
+                validated_layers,
+                rasters,
+                fallback_extent_wgs84=tuple(shape(project.aoi_geojson).bounds) if project.aoi_geojson else None,
             )
             logger.info(
-                "EXPORT_QGZ_GROUP_EXTENT projectId=%s group=%s xmin=%s ymin=%s xmax=%s ymax=%s layer_count=%s",
+                "EXPORT_QGZ_SOURCE_VECTOR_EXTENT projectId=%s crs=%s xmin=%s ymin=%s xmax=%s ymax=%s",
                 project_id,
-                group_key,
-                *group_extent,
-                len(group_layers),
+                QGIS_VECTOR_CRS,
+                *vector_extent,
             )
-        vector_extent = _union_bounds(
-            [(item.xmin, item.ymin, item.xmax, item.ymax) for item in validated_layers]
-        )
-        initial_extent = compute_qgis_project_initial_extent(
-            project_id,
-            validated_layers,
-            rasters,
-            fallback_extent_wgs84=tuple(shape(project.aoi_geojson).bounds) if project.aoi_geojson else None,
-        )
-        logger.info(
-            "EXPORT_QGZ_SOURCE_VECTOR_EXTENT projectId=%s crs=%s xmin=%s ymin=%s xmax=%s ymax=%s",
-            project_id,
-            QGIS_VECTOR_CRS,
-            *vector_extent,
-        )
-        logger.info(
-            "EXPORT_QGZ_PROJECT_EXTENT projectId=%s crs=%s paddingRatio=%s xmin=%s ymin=%s xmax=%s ymax=%s",
-            project_id,
-            QGIS_PROJECT_CRS,
-            QGIS_PROJECT_EXTENT_PADDING_RATIO,
-            *initial_extent.bounds_3857,
-        )
-        logger.info(
-            "EXPORT_QGZ_LAYER_ORDER projectId=%s order=%s",
-            project_id,
-            ",".join([*[layer.display_name for layer in written_layers], *[raster.display_name for raster in rasters]]),
-        )
-        logger.info(
-            'EXPORT_RESULTS_QGIS_LAYER_TREE projectId=%s rootGroup="Bâtiments ajoutés par date" mutuallyExclusive=true groups=Synthèse',
-            project_id,
-        )
-        logger.info(
-            "EXPORT_RESULTS_QGIS_DEFAULT_VISIBILITY projectId=%s activeDate=%s raster=true additions=true buffer10=true buffer15=false buffer20=false",
-            project_id,
-            _milestone_quarter_label(completed[-1]) if completed else "",
-        )
-        logger.info("EXPORT_RESULTS_QGIS_ONLINE_BASEMAP_REMOVED projectId=%s", project_id)
-        qgz_path = tmp_dir / f"resultats_{_filesystem_safe_label(project.project_id)}.qgz"
-        qgz_backend = _write_temporal_shapefile_qgz(
-            qgz_path,
-            project,
-            written_layers,
-            validated_layers,
-            initial_extent.bounds_3857,
-            rasters,
-        )
-        if not qgz_path.is_file() or qgz_path.stat().st_size <= 1024:
-            logger.error(
-                "EXPORT_QGZ_VALIDATION_FAILED projectId=%s path=%s reason=missing_or_unrealistically_small",
+            logger.info(
+                "EXPORT_QGZ_PROJECT_EXTENT projectId=%s crs=%s paddingRatio=%s xmin=%s ymin=%s xmax=%s ymax=%s",
+                project_id,
+                QGIS_PROJECT_CRS,
+                QGIS_PROJECT_EXTENT_PADDING_RATIO,
+                *initial_extent.bounds_3857,
+            )
+            logger.info(
+                "EXPORT_QGZ_LAYER_ORDER projectId=%s order=%s",
+                project_id,
+                ",".join([*[layer.display_name for layer in written_layers], *[raster.display_name for raster in rasters]]),
+            )
+            logger.info(
+                'EXPORT_RESULTS_QGIS_LAYER_TREE projectId=%s rootGroup="Bâtiments ajoutés par date" mutuallyExclusive=true groups=Synthèse',
+                project_id,
+            )
+            logger.info(
+                "EXPORT_RESULTS_QGIS_DEFAULT_VISIBILITY projectId=%s activeDate=%s raster=true additions=true buffer10=true buffer15=false buffer20=false",
+                project_id,
+                _milestone_quarter_label(completed[-1]) if completed else "",
+            )
+            logger.info("EXPORT_RESULTS_QGIS_ONLINE_BASEMAP_REMOVED projectId=%s", project_id)
+            qgz_path = tmp_dir / f"resultats_{_filesystem_safe_label(project.project_id)}.qgz"
+            qgz_backend = _write_temporal_shapefile_qgz(
+                qgz_path,
+                project,
+                written_layers,
+                validated_layers,
+                initial_extent.bounds_3857,
+                rasters,
+            )
+            if not qgz_path.is_file() or qgz_path.stat().st_size <= 1024:
+                logger.error(
+                    "EXPORT_QGZ_VALIDATION_FAILED projectId=%s path=%s reason=missing_or_unrealistically_small",
+                    project_id,
+                    qgz_path,
+                )
+                raise ValueError(f"Generated QGZ is missing or unrealistically small: {qgz_path}")
+            logger.info(
+                "EXPORT_RESULTS_QGIS_WRITTEN projectId=%s qgz=%s vectorLayers=%s rasterLayers=%s backend=%s projectCrs=%s bytes=%s",
                 project_id,
                 qgz_path,
+                len(written_layers),
+                len(rasters),
+                qgz_backend,
+                QGIS_PROJECT_CRS,
+                qgz_path.stat().st_size,
             )
-            raise ValueError(f"Generated QGZ is missing or unrealistically small: {qgz_path}")
-        logger.info(
-            "EXPORT_RESULTS_QGIS_WRITTEN projectId=%s qgz=%s vectorLayers=%s rasterLayers=%s backend=%s projectCrs=%s bytes=%s",
-            project_id,
-            qgz_path,
-            len(written_layers),
-            len(rasters),
-            qgz_backend,
-            QGIS_PROJECT_CRS,
-            qgz_path.stat().st_size,
-        )
         with zipfile.ZipFile(zip_stream, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
             for group_key in group_keys:
                 archive.writestr(f"{group_key}/", b"")
-            archive.writestr(
-                "README.txt",
-                "\n".join(
-                    [
-                        "Ouvrez le fichier .qgz dans QGIS pour utiliser le projet style.",
-                        "Le projet s'ouvre directement sur l'etendue des resultats exportes.",
-                        "Les dossiers contiennent les composants Shapefile bruts et les rasters de reference.",
-                        "Si QGIS demande de reparer les chemins, conservez la structure des dossiers extraite du ZIP.",
-                        "",
-                    ]
-                ),
-            )
-            archive.write(qgz_path, arcname=qgz_path.name)
+            if include_qgis_package and qgz_path is not None:
+                archive.writestr(
+                    "README.txt",
+                    "\n".join(
+                        [
+                            "Ouvrez le fichier .qgz dans QGIS pour utiliser le projet style.",
+                            "Le projet s'ouvre directement sur l'etendue des resultats exportes.",
+                            "Les dossiers contiennent les composants Shapefile bruts et les rasters de reference.",
+                            "Si QGIS demande de reparer les chemins, conservez la structure des dossiers extraite du ZIP.",
+                            "",
+                        ]
+                    ),
+                )
+                archive.write(qgz_path, arcname=qgz_path.name)
             for path in sorted(tmp_dir.rglob("*")):
                 if path.is_file() and path != qgz_path:
                     archive.write(path, arcname=str(path.relative_to(tmp_dir)))
@@ -2799,7 +2823,7 @@ def build_temporal_results_shapefile_zip(project_id: str, settings: Settings | N
             project_id,
             len(written_layers),
             len(rasters),
-            qgz_path.stat().st_size,
+            qgz_path.stat().st_size if qgz_path is not None and qgz_path.is_file() else 0,
         )
     payload = zip_stream.getvalue()
     logger.info(
@@ -3073,6 +3097,45 @@ def _export_scope_fingerprint(export_context: dict[str, Any] | None) -> dict[str
     }
 
 
+def _export_options_metadata(
+    export_format: str,
+    *,
+    include_rasters: bool = False,
+    include_offline_package: bool = False,
+) -> dict[str, Any]:
+    include_rasters = bool(include_rasters)
+    include_offline_package = bool(include_offline_package)
+    return {
+        "include_rasters": include_rasters,
+        "include_offline_package": include_offline_package,
+        "topojson_quantization": TOPOJSON_DEFAULT_QUANTIZATION if export_format == "topojson" else None,
+        "qgis_project_crs": QGIS_PROJECT_CRS if export_format == "shapefile" and (include_rasters or include_offline_package) else None,
+        "shapefile_package": (
+            "qgis_raster_package"
+            if export_format == "shapefile" and (include_rasters or include_offline_package)
+            else "vector_only"
+            if export_format == "shapefile"
+            else None
+        ),
+    }
+
+
+def _export_options_cache_suffix(
+    export_format: str,
+    *,
+    include_rasters: bool = False,
+    include_offline_package: bool = False,
+) -> str:
+    if not include_rasters and not include_offline_package:
+        return ""
+    parts: list[str] = []
+    if include_rasters:
+        parts.append("rasters")
+    if include_offline_package:
+        parts.append("offline")
+    return f".options-{'-'.join(parts)}"
+
+
 def _temporal_result_artifact_fingerprints(
     project: TemporalProject,
     settings: Settings,
@@ -3135,6 +3198,8 @@ def _export_cache_metadata(
     settings: Settings,
     export_format: str,
     export_context: dict[str, Any] | None,
+    include_rasters: bool = False,
+    include_offline_package: bool = False,
 ) -> dict[str, Any]:
     scope = _export_scope_fingerprint(export_context)
     artifact_manifest = _build_or_refresh_export_artifact_manifest(project, settings)
@@ -3154,10 +3219,11 @@ def _export_cache_metadata(
             "buffer_20m",
             *([] if scope["scope_type"] == "project_aoi" else ["zone_export"]),
         ],
-        "options": {
-            "topojson_quantization": TOPOJSON_DEFAULT_QUANTIZATION if export_format == "topojson" else None,
-            "qgis_project_crs": QGIS_PROJECT_CRS if export_format == "shapefile" else None,
-        },
+        "options": _export_options_metadata(
+            export_format,
+            include_rasters=include_rasters,
+            include_offline_package=include_offline_package,
+        ),
         "project_fingerprint": _project_fingerprint(project.project_id, settings),
         "artifact_fingerprints": _temporal_result_artifact_fingerprints(project, settings),
         "artifact_manifest": {
@@ -3278,6 +3344,8 @@ def _fast_cached_temporal_results_export_file(
     export_format: str,
     settings: Settings,
     perimeter: dict[str, Any] | None,
+    include_rasters: bool = False,
+    include_offline_package: bool = False,
 ) -> Path | None:
     is_project_aoi_scope = _is_project_aoi_export_scope(perimeter)
     geometry_hash: str | None = None
@@ -3297,15 +3365,22 @@ def _fast_cached_temporal_results_export_file(
             logger.info("EXPORT_FAST_CACHE_MISS projectId=%s format=%s reason=missing_custom_geometry", project_id, export_format)
             return None
         custom_suffix = f".custom-{geometry_hash[:12]}"
+    options_suffix = _export_options_cache_suffix(
+        export_format,
+        include_rasters=include_rasters,
+        include_offline_package=include_offline_package,
+    )
     logger.info(
-        "EXPORT_FAST_CACHE_CHECK_START projectId=%s format=%s scopeType=%s geometryHash=%s",
+        "EXPORT_FAST_CACHE_CHECK_START projectId=%s format=%s scopeType=%s geometryHash=%s includeRasters=%s includeOfflinePackage=%s",
         project_id,
         export_format,
         "project_aoi" if is_project_aoi_scope else "custom_geometry",
         geometry_hash,
+        include_rasters,
+        include_offline_package,
     )
 
-    cache_path = _cached_export_path(settings, project_id, export_format, custom_suffix)
+    cache_path = _cached_export_path(settings, project_id, export_format, f"{custom_suffix}{options_suffix}")
     if cache_path.name.endswith(".partial"):
         _export_cache_file_invalid(project_id, export_format, cache_path, "partial_file")
         return None
@@ -3349,6 +3424,20 @@ def _fast_cached_temporal_results_export_file(
         return None
     if not is_project_aoi_scope and scope.get("geometry_hash") != geometry_hash:
         logger.info("EXPORT_FAST_CACHE_MISS projectId=%s format=%s reason=metadata_geometry_hash", project_id, export_format)
+        return None
+    expected_options = _export_options_metadata(
+        export_format,
+        include_rasters=include_rasters,
+        include_offline_package=include_offline_package,
+    )
+    options = metadata.get("options")
+    if (
+        not isinstance(options, dict)
+        or options.get("include_rasters") != expected_options["include_rasters"]
+        or options.get("include_offline_package") != expected_options["include_offline_package"]
+        or options.get("shapefile_package") != expected_options["shapefile_package"]
+    ):
+        logger.info("EXPORT_FAST_CACHE_MISS projectId=%s format=%s reason=metadata_options", project_id, export_format)
         return None
     project_fingerprint = metadata.get("project_fingerprint")
     if not isinstance(project_fingerprint, dict) or not _metadata_fingerprint_matches(project_fingerprint, require_existing_path=True):
@@ -3425,6 +3514,30 @@ def _export_cache_is_valid(
     return path.stat().st_mtime_ns >= project_path.stat().st_mtime_ns
 
 
+def resolve_cached_temporal_results_export_file(
+    project_id: str,
+    export_format: str,
+    settings: Settings | None = None,
+    perimeter: dict[str, Any] | None = None,
+    include_rasters: bool = False,
+    include_offline_package: bool = False,
+) -> Path | None:
+    resolved_settings = _settings(settings)
+    normalized_format = export_format.lower()
+    if normalized_format == "zip":
+        normalized_format = "shapefile"
+    if normalized_format not in TEMPORAL_RESULTS_EXPORT_FILENAMES:
+        raise ValueError(f"Unsupported temporal results export format: {export_format}")
+    return _fast_cached_temporal_results_export_file(
+        project_id,
+        normalized_format,
+        resolved_settings,
+        perimeter,
+        include_rasters=include_rasters,
+        include_offline_package=include_offline_package,
+    )
+
+
 def _atomic_write_bytes(path: Path, payload: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(f".{path.name}.{datetime.now(UTC).timestamp():.6f}.tmp")
@@ -3441,6 +3554,8 @@ def build_temporal_results_export_file(
     export_format: str,
     settings: Settings | None = None,
     perimeter: dict[str, Any] | None = None,
+    include_rasters: bool = False,
+    include_offline_package: bool = False,
 ) -> Path:
     resolved_settings = _settings(settings)
     normalized_format = export_format.lower()
@@ -3450,7 +3565,14 @@ def build_temporal_results_export_file(
         raise ValueError(f"Unsupported temporal results export format: {export_format}")
 
     started_at = datetime.now(UTC)
-    fast_cache_path = _fast_cached_temporal_results_export_file(project_id, normalized_format, resolved_settings, perimeter)
+    fast_cache_path = _fast_cached_temporal_results_export_file(
+        project_id,
+        normalized_format,
+        resolved_settings,
+        perimeter,
+        include_rasters=include_rasters,
+        include_offline_package=include_offline_package,
+    )
     if fast_cache_path is not None:
         duration_ms = round((datetime.now(UTC) - started_at).total_seconds() * 1000, 2)
         fast_scope_type = "project_aoi" if _is_project_aoi_export_scope(perimeter) else "custom_geometry"
@@ -3471,19 +3593,28 @@ def build_temporal_results_export_file(
         geometry_hash = export_context.get("geometry_hash") or hashlib.sha256(export_context["geometry"].wkb).hexdigest()
         export_context["geometry_hash"] = geometry_hash
         custom_suffix = f".custom-{geometry_hash[:12]}"
-    cache_path = _cached_export_path(resolved_settings, project_id, normalized_format, custom_suffix)
+    options_suffix = _export_options_cache_suffix(
+        normalized_format,
+        include_rasters=include_rasters,
+        include_offline_package=include_offline_package,
+    )
+    cache_path = _cached_export_path(resolved_settings, project_id, normalized_format, f"{custom_suffix}{options_suffix}")
     cache_metadata = _export_cache_metadata(
         project=project,
         settings=resolved_settings,
         export_format=normalized_format,
         export_context=export_context,
+        include_rasters=include_rasters,
+        include_offline_package=include_offline_package,
     )
     logger.info(
-        "EXPORT_REQUEST projectId=%s format=%s scopeType=%s cacheKey=%s",
+        "EXPORT_REQUEST projectId=%s format=%s scopeType=%s cacheKey=%s includeRasters=%s includeOfflinePackage=%s",
         project_id,
         normalized_format,
         cache_metadata["scope"]["scope_type"],
         cache_metadata["cache_key"],
+        include_rasters,
+        include_offline_package,
     )
     if _export_cache_is_valid(cache_path, project_id, resolved_settings, normalized_format, cache_metadata):
         logger.info(
@@ -3519,7 +3650,12 @@ def build_temporal_results_export_file(
             "topojson": build_temporal_results_topojson,
             "json": build_temporal_results_json,
             "tsv": build_temporal_results_tsv,
-            "shapefile": build_temporal_results_shapefile_zip,
+            "shapefile": lambda selected_project_id, settings=None: build_temporal_results_shapefile_zip(
+                selected_project_id,
+                settings=settings,
+                include_rasters=include_rasters,
+                include_offline_package=include_offline_package,
+            ),
         }
         generation_context = (
             {**export_context, "loaded_project": project}

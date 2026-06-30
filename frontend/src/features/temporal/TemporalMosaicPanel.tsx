@@ -27,8 +27,10 @@ import type {
   TemporalProjectSummary,
 } from "@/api/contracts";
 import {
+  createTemporalResultsExportJob,
   createTemporalProjectExportBundle,
   deleteReferenceLayer,
+  getTemporalResultsExportJob,
   getCachedRunResponse,
   getTemporalMilestoneArtifact,
   getTemporalProjectCompact,
@@ -59,7 +61,7 @@ import { Select } from "@/components/ui/select";
 import type { FrontendRuntimeConfig } from "@/lib/env";
 import { buildBackendFileUrl, resolveBackendUrl } from "@/lib/backend-files";
 import { cn, formatNumber } from "@/lib/utils";
-import { downloadFileFromRequest, downloadFileFromUrl } from "@/lib/download";
+import { downloadFileFromUrl, triggerBrowserDownload } from "@/lib/download";
 import { useI18n } from "@/lib/i18n";
 import { getProjectDisplayName } from "@/lib/project-summary";
 import { createActiveRunProgress, createCompletedRunProgress, createErrorRunProgress, shouldShowExecutionProgressPanel } from "@/lib/run-progress";
@@ -74,10 +76,15 @@ import {
   formatReferenceLayerKindLabel,
 } from "@/features/temporal/display-labels";
 import {
+  buildResultsExportJobRequest,
   buildResultsExportPerimeter,
   canDownloadExport,
+  formatExportJobStatus,
+  runResultsExportJobDownload,
   shouldRestoreExportModal,
   type ExportPerimeterMode,
+  type ResultsExportFormat,
+  type ResultsExportJob,
 } from "@/features/temporal/export-workflow";
 import {
   buildTemporalRunRequest,
@@ -121,7 +128,6 @@ const EMPTY_FEATURE_COLLECTION: FeatureCollection = {
   features: [],
 };
 
-type ResultsExportFormat = "xlsx" | "kml" | "geojson" | "topojson" | "shapefile" | "tsv" | "json";
 type ResultsExportPerimeterMode = ExportPerimeterMode;
 
 const RESULTS_EXPORT_OPTIONS: Array<{ format: ResultsExportFormat; label: string; pathSuffix: string; filenameSuffix: string }> = [
@@ -741,6 +747,8 @@ export function TemporalMosaicPanel({
   const [resultsExportImportOpen, setResultsExportImportOpen] = useState(false);
   const [resultsExportBusy, setResultsExportBusy] = useState<ResultsExportFormat | null>(null);
   const [resultsExportError, setResultsExportError] = useState<string | null>(null);
+  const [resultsExportJob, setResultsExportJob] = useState<ResultsExportJob | null>(null);
+  const [resultsExportIncludeOfflinePackage, setResultsExportIncludeOfflinePackage] = useState(false);
   const [runChangeThreshold, setRunChangeThreshold] = useState(String(DEFAULT_CHANGE_THRESHOLD));
   const [runChangeThresholdError, setRunChangeThresholdError] = useState<string | null>(null);
   const [staleReferenceLayerProjectIds, setStaleReferenceLayerProjectIds] = useState<Set<string>>(new Set());
@@ -785,6 +793,7 @@ export function TemporalMosaicPanel({
     Boolean(exportDrawnGeometry),
     Boolean(exportImportedGeometry),
   );
+  const resultsExportJobStatusLabel = formatExportJobStatus(resultsExportJob);
 
   useEffect(() => {
     if (!shouldRestoreExportModal(exportDrawingPhase)) {
@@ -1803,18 +1812,25 @@ export function TemporalMosaicPanel({
       return;
     }
     setResultsExportError(null);
+    setResultsExportJob(null);
     setResultsExportBusy(resultsExportFormat);
     try {
-      const path = `/api/temporal-projects/${encodeURIComponent(project.project_id)}/exports/results`;
       const filename = `resultats_${project.project_id}.${option.filenameSuffix}`;
       const perimeter = buildResultsExportPerimeter(
         resultsExportPerimeterMode,
         exportDrawnGeometry,
         exportImportedGeometry,
       );
-      await downloadFileFromRequest(resolveBackendUrl(backendUrl, path) ?? path, filename, {
-        format: resultsExportFormat,
-        perimeter,
+      const includeOfflinePackage = resultsExportFormat === "shapefile" && resultsExportIncludeOfflinePackage;
+      await runResultsExportJobDownload({
+        projectId: project.project_id,
+        backendUrl,
+        fallbackFilename: filename,
+        request: buildResultsExportJobRequest(resultsExportFormat, perimeter, includeOfflinePackage),
+        createJob: createTemporalResultsExportJob,
+        getJob: getTemporalResultsExportJob,
+        triggerDownload: triggerBrowserDownload,
+        onJob: setResultsExportJob,
       });
       clearExportGeometry();
       setResultsExportModalOpen(false);
@@ -2242,6 +2258,7 @@ export function TemporalMosaicPanel({
                               className="h-10 w-full justify-between border-sidebar-border bg-card px-3"
                               onClick={() => {
                                 setResultsExportError(null);
+                                setResultsExportJob(null);
                                 setResultsExportModalOpen(true);
                               }}
                               disabled={!hasCompletedTemporalResult || Boolean(resultsExportBusy)}
@@ -2448,6 +2465,7 @@ export function TemporalMosaicPanel({
           setResultsExportModalOpen(open);
           if (!open) {
             clearExportGeometry();
+            setResultsExportJob(null);
           }
         }}
       >
@@ -2480,10 +2498,35 @@ export function TemporalMosaicPanel({
               ))}
             </fieldset>
             <label className="block space-y-2 text-sm font-medium">Format
-              <Select value={resultsExportFormat} onChange={(event) => setResultsExportFormat(event.target.value as ResultsExportFormat)}>
+              <Select
+                value={resultsExportFormat}
+                onChange={(event) => {
+                  const nextFormat = event.target.value as ResultsExportFormat;
+                  setResultsExportFormat(nextFormat);
+                  setResultsExportJob(null);
+                  if (nextFormat !== "shapefile") {
+                    setResultsExportIncludeOfflinePackage(false);
+                  }
+                }}
+              >
                 {RESULTS_EXPORT_OPTIONS.map((option) => <option key={option.format} value={option.format}>{option.label}</option>)}
               </Select>
             </label>
+            {resultsExportFormat === "shapefile" ? (
+              <label className="flex gap-3 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-950 dark:border-amber-500/40 dark:bg-amber-950/20 dark:text-amber-100">
+                <input
+                  type="checkbox"
+                  checked={resultsExportIncludeOfflinePackage}
+                  onChange={(event) => setResultsExportIncludeOfflinePackage(event.target.checked)}
+                  disabled={Boolean(resultsExportBusy)}
+                  className="mt-0.5 h-5 w-5 accent-amber-600"
+                />
+                <span>
+                  <span className="block font-medium">Inclure le paquet QGIS et les rasters de référence</span>
+                  <span className="block text-xs">Désactivé par défaut. Cette option peut produire un ZIP très volumineux.</span>
+                </span>
+              </label>
+            ) : null}
             {resultsExportPerimeterMode === "drawn" ? (
               <div className="space-y-2">
                 <p className="text-sm font-medium text-foreground">Zone spécifique</p>
@@ -2499,6 +2542,12 @@ export function TemporalMosaicPanel({
             {resultsExportPerimeterMode === "drawn" && !exportDrawnGeometry ? <p className="text-sm text-muted-foreground">Aucune zone dessinée.</p> : null}
             {resultsExportPerimeterMode === "imported" && !exportImportedGeometry ? <p className="text-sm text-muted-foreground">Aucune zone importée.</p> : null}
             {resultsExportPerimeterMode !== "project_aoi" && exportGeometry ? <p className="text-sm text-green-600">Zone d’export valide.</p> : null}
+            {resultsExportJobStatusLabel ? (
+              <div role="status" className="rounded border border-sidebar-border bg-muted/60 px-3 py-2 text-sm text-foreground">
+                {resultsExportBusy ? <Loader2 className="mr-2 inline h-4 w-4 animate-spin" /> : null}
+                {resultsExportJobStatusLabel}
+              </div>
+            ) : null}
             {resultsExportError ? (
               <div role="alert" className="rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-950 dark:border-red-500/40 dark:bg-red-950/30 dark:text-red-100">
                 {resultsExportError}

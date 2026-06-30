@@ -443,6 +443,29 @@ export const temporalProjectExportBundleSchema = z.object({
   label: z.string(),
 });
 
+export const temporalResultsExportJobSchema = z.object({
+  job_id: z.string(),
+  project_id: z.string(),
+  status: z.enum(["queued", "running", "succeeded", "failed"]),
+  progress: z.number().nullable().optional(),
+  format: z.string(),
+  scope: z.string(),
+  perimeter: z.record(z.any()).optional(),
+  include_rasters: z.boolean().default(false),
+  include_offline_package: z.boolean().default(false),
+  file_size_bytes: z.number().nullable().optional(),
+  filename: z.string().nullable().optional(),
+  content_type: z.string().nullable().optional(),
+  download_url: z.string().nullable().optional(),
+  generated_at: z.string().nullable().optional(),
+  expires_at: z.string().nullable().optional(),
+  created_at: z.string(),
+  updated_at: z.string(),
+  cache_key: z.string().nullable().optional(),
+  estimated_large_export: z.boolean().default(false),
+  error_message: z.string().nullable().optional(),
+});
+
 export type ModeName = z.infer<typeof modeSchema>;
 export type ModelBackendName = z.infer<typeof modelBackendSchema>;
 export type ReleaseMetadata = z.infer<typeof releaseSchema>;
@@ -470,3 +493,4 @@ export type TemporalProjectValidationResponse = z.infer<typeof temporalProjectVa
 export type TemporalProjectRunResponse = z.infer<typeof temporalProjectRunResponseSchema>;
 export type TemporalProjectRunRequest = z.infer<typeof temporalProjectRunRequestSchema>;
 export type TemporalProjectExportBundle = z.infer<typeof temporalProjectExportBundleSchema>;
+export type TemporalResultsExportJob = z.infer<typeof temporalResultsExportJobSchema>;

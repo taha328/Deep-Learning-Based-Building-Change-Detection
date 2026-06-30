@@ -63,6 +63,16 @@ class TemporalResultsExportRequest(BaseModel):
 
     format: TemporalExportFormat
     perimeter: TemporalExportPerimeter = Field(default_factory=TemporalExportPerimeter)
+    include_rasters: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("includeRasters", "include_rasters"),
+        serialization_alias="includeRasters",
+    )
+    include_offline_package: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("includeOfflinePackage", "include_offline_package"),
+        serialization_alias="includeOfflinePackage",
+    )
 
     @field_validator("perimeter")
     @classmethod

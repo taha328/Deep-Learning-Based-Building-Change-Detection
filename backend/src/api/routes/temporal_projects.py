@@ -1,10 +1,20 @@
 from __future__ import annotations
 
+import base64
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+import hashlib
+import hmac
+import json
 import logging
 from pathlib import Path
+import secrets
+import threading
 import time
 from typing import Any
 from urllib.parse import quote
+import uuid
 
 from fastapi import APIRouter, Depends, Query, Request, Response, status
 from fastapi import File, Form, UploadFile
@@ -33,6 +43,7 @@ from src.services.temporal_exports import (
     TEMPORAL_RESULTS_EXPORT_FILENAMES,
     TEMPORAL_RESULTS_EXPORT_MEDIA_TYPES,
     build_temporal_results_export_file,
+    resolve_cached_temporal_results_export_file,
 )
 from src.services.temporal_reference_imagery import (
     build_reference_tilejson_payload_cached,
@@ -70,6 +81,38 @@ logger = logging.getLogger(__name__)
 
 
 _EXPORT_EXPOSE_HEADERS = "Content-Disposition, Content-Length, Content-Type"
+_EXPORT_JOB_DOWNLOAD_TOKEN_TTL = timedelta(hours=6)
+_EXPORT_JOB_LARGE_THRESHOLD_BYTES = 100 * 1024 * 1024
+_EXPORT_JOB_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="temporal-export")
+_EXPORT_JOB_LOCK = threading.Lock()
+_EXPORT_JOB_SECRET = secrets.token_bytes(32)
+
+
+@dataclass
+class TemporalResultsExportJobState:
+    job_id: str
+    project_id: str
+    format: str
+    perimeter: dict[str, Any]
+    include_rasters: bool
+    include_offline_package: bool
+    status: str
+    created_at: datetime
+    updated_at: datetime
+    progress: float | None = None
+    path: Path | None = None
+    file_size_bytes: int | None = None
+    filename: str | None = None
+    content_type: str | None = None
+    download_url: str | None = None
+    generated_at: datetime | None = None
+    expires_at: datetime | None = None
+    error_message: str | None = None
+    cache_key: str | None = None
+    estimated_large_export: bool = False
+
+
+_EXPORT_JOBS: dict[str, TemporalResultsExportJobState] = {}
 
 
 def _results_export_filename(project_id: str, normalized_format: str) -> str:
@@ -144,6 +187,196 @@ def _results_export_file_response(project_id: str, normalized_format: str, path:
         stat_result.st_size,
     )
     return response
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC).replace(microsecond=0)
+
+
+def _normalize_export_format_or_raise(export_format: str) -> str:
+    normalized_format = export_format.lower()
+    if normalized_format == "zip":
+        normalized_format = "shapefile"
+    if normalized_format not in TEMPORAL_RESULTS_EXPORT_FILENAMES:
+        raise_api_error(
+            status.HTTP_400_BAD_REQUEST,
+            "unsupported_export_format",
+            f"Unsupported temporal results export format: {export_format}",
+        )
+    return normalized_format
+
+
+def _json_timestamp(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    return value.isoformat().replace("+00:00", "Z")
+
+
+def _results_export_metadata(path: Path) -> dict[str, Any]:
+    metadata_path = path.with_name(f"{path.name}.metadata.json")
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _path_digest(path: Path) -> str:
+    return hashlib.sha256(str(path.resolve()).encode("utf-8")).hexdigest()
+
+
+def _base64url_encode(payload: bytes) -> str:
+    return base64.urlsafe_b64encode(payload).rstrip(b"=").decode("ascii")
+
+
+def _base64url_decode(value: str) -> bytes:
+    padding = "=" * (-len(value) % 4)
+    return base64.urlsafe_b64decode(f"{value}{padding}".encode("ascii"))
+
+
+def _sign_export_download_token(payload: dict[str, Any]) -> str:
+    encoded_payload = _base64url_encode(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    signature = hmac.new(_EXPORT_JOB_SECRET, encoded_payload.encode("ascii"), hashlib.sha256).digest()
+    return f"{encoded_payload}.{_base64url_encode(signature)}"
+
+
+def _decode_export_download_token(token: str) -> dict[str, Any]:
+    try:
+        encoded_payload, encoded_signature = token.split(".", maxsplit=1)
+        expected = hmac.new(_EXPORT_JOB_SECRET, encoded_payload.encode("ascii"), hashlib.sha256).digest()
+        supplied = _base64url_decode(encoded_signature)
+        if not hmac.compare_digest(expected, supplied):
+            raise ValueError("invalid signature")
+        payload = json.loads(_base64url_decode(encoded_payload).decode("utf-8"))
+    except Exception as exc:
+        raise_api_error(status.HTTP_403_FORBIDDEN, "invalid_export_token", f"Invalid export download token: {exc}")
+    if not isinstance(payload, dict):
+        raise_api_error(status.HTTP_403_FORBIDDEN, "invalid_export_token", "Invalid export download token.")
+    expires_at = payload.get("exp")
+    if not isinstance(expires_at, int) or expires_at < int(_utc_now().timestamp()):
+        raise_api_error(status.HTTP_403_FORBIDDEN, "expired_export_token", "Export download token has expired.")
+    return payload
+
+
+def _export_job_response(job: TemporalResultsExportJobState) -> dict[str, Any]:
+    return {
+        "job_id": job.job_id,
+        "project_id": job.project_id,
+        "status": job.status,
+        "progress": job.progress,
+        "format": job.format,
+        "scope": job.perimeter.get("mode", "project_aoi"),
+        "perimeter": job.perimeter,
+        "include_rasters": job.include_rasters,
+        "include_offline_package": job.include_offline_package,
+        "file_size_bytes": job.file_size_bytes,
+        "filename": job.filename,
+        "content_type": job.content_type,
+        "download_url": job.download_url,
+        "generated_at": _json_timestamp(job.generated_at),
+        "expires_at": _json_timestamp(job.expires_at),
+        "created_at": _json_timestamp(job.created_at),
+        "updated_at": _json_timestamp(job.updated_at),
+        "cache_key": job.cache_key,
+        "estimated_large_export": job.estimated_large_export,
+        "error_message": job.error_message,
+    }
+
+
+def _make_export_download_url(job: TemporalResultsExportJobState, path: Path) -> str:
+    expires_at = _utc_now() + _EXPORT_JOB_DOWNLOAD_TOKEN_TTL
+    payload = {
+        "project_id": job.project_id,
+        "job_id": job.job_id,
+        "format": job.format,
+        "cache_key": job.cache_key,
+        "path_sha256": _path_digest(path),
+        "exp": int(expires_at.timestamp()),
+    }
+    token = _sign_export_download_token(payload)
+    job.expires_at = expires_at
+    return (
+        f"/api/temporal-projects/{quote(job.project_id)}/exports/jobs/{quote(job.job_id)}/download"
+        f"?token={quote(token)}"
+    )
+
+
+def _mark_export_job_ready(job: TemporalResultsExportJobState, path: Path) -> None:
+    stat_result = path.stat()
+    metadata = _results_export_metadata(path)
+    job.status = "succeeded"
+    job.progress = 1.0
+    job.path = path
+    job.file_size_bytes = stat_result.st_size
+    job.filename = _results_export_filename(job.project_id, job.format)
+    job.content_type = TEMPORAL_RESULTS_EXPORT_MEDIA_TYPES[job.format]
+    job.cache_key = str(metadata.get("cache_key") or "")
+    job.estimated_large_export = stat_result.st_size >= _EXPORT_JOB_LARGE_THRESHOLD_BYTES or job.format == "shapefile"
+    job.generated_at = _utc_now()
+    job.updated_at = job.generated_at
+    job.download_url = _make_export_download_url(job, path)
+    logger.info(
+        "EXPORT_JOB_READY projectId=%s jobId=%s format=%s path=%s bytes=%s cacheKey=%s",
+        job.project_id,
+        job.job_id,
+        job.format,
+        path,
+        stat_result.st_size,
+        job.cache_key,
+    )
+
+
+def _get_export_job_or_404(project_id: str, job_id: str) -> TemporalResultsExportJobState:
+    with _EXPORT_JOB_LOCK:
+        job = _EXPORT_JOBS.get(job_id)
+    if job is None or job.project_id != project_id:
+        raise_api_error(status.HTTP_404_NOT_FOUND, "export_job_not_found", "Export job was not found.")
+    return job
+
+
+def _run_export_job(job_id: str, settings) -> None:
+    with _EXPORT_JOB_LOCK:
+        job = _EXPORT_JOBS.get(job_id)
+        if job is None:
+            return
+        job.status = "running"
+        job.progress = 0.1
+        job.updated_at = _utc_now()
+        logger.info(
+            "EXPORT_JOB_STATUS projectId=%s jobId=%s status=%s format=%s",
+            job.project_id,
+            job.job_id,
+            job.status,
+            job.format,
+        )
+    try:
+        path = build_temporal_results_export_file(
+            job.project_id,
+            job.format,
+            settings=settings,
+            perimeter=job.perimeter,
+            include_rasters=job.include_rasters,
+            include_offline_package=job.include_offline_package,
+        )
+        with _EXPORT_JOB_LOCK:
+            job = _EXPORT_JOBS.get(job_id)
+            if job is not None:
+                _mark_export_job_ready(job, path)
+    except Exception as exc:  # noqa: BLE001
+        with _EXPORT_JOB_LOCK:
+            job = _EXPORT_JOBS.get(job_id)
+            if job is not None:
+                job.status = "failed"
+                job.progress = 1.0
+                job.error_message = f"{type(exc).__name__}: {exc}"
+                job.updated_at = _utc_now()
+                logger.exception(
+                    "EXPORT_JOB_FAILED projectId=%s jobId=%s format=%s error=%s",
+                    job.project_id,
+                    job.job_id,
+                    job.format,
+                    exc,
+                )
 
 
 class TemporalProjectOverrideBody(BaseModel):
@@ -383,6 +616,8 @@ def export_project_results_for_perimeter(
             body.format,
             settings=settings,
             perimeter=perimeter,
+            include_rasters=body.include_rasters,
+            include_offline_package=body.include_offline_package,
         )
     except FileNotFoundError as exc:
         raise_api_error(status.HTTP_404_NOT_FOUND, "not_found", str(exc))
@@ -391,6 +626,123 @@ def export_project_results_for_perimeter(
     except Exception as exc:  # noqa: BLE001
         raise_api_error(status.HTTP_500_INTERNAL_SERVER_ERROR, "export_failed", f"{type(exc).__name__}: {exc}")
     return _results_export_file_response(project_id, body.format, path)
+
+
+@router.post("/{project_id}/exports/jobs")
+def create_temporal_results_export_job(
+    project_id: str,
+    body: TemporalResultsExportRequest,
+    settings=Depends(get_app_settings),
+) -> dict[str, Any]:
+    normalized_format = _normalize_export_format_or_raise(body.format)
+    perimeter = body.perimeter.model_dump(mode="json")
+    now = _utc_now()
+    job = TemporalResultsExportJobState(
+        job_id=uuid.uuid4().hex,
+        project_id=project_id,
+        format=normalized_format,
+        perimeter=perimeter,
+        include_rasters=body.include_rasters,
+        include_offline_package=body.include_offline_package,
+        status="queued",
+        progress=0.0,
+        created_at=now,
+        updated_at=now,
+    )
+    logger.info(
+        "EXPORT_JOB_CREATED projectId=%s jobId=%s format=%s scope=%s includeRasters=%s includeOfflinePackage=%s",
+        project_id,
+        job.job_id,
+        normalized_format,
+        perimeter.get("mode", "project_aoi"),
+        body.include_rasters,
+        body.include_offline_package,
+    )
+    try:
+        cached_path = resolve_cached_temporal_results_export_file(
+            project_id,
+            normalized_format,
+            settings=settings,
+            perimeter=perimeter,
+            include_rasters=body.include_rasters,
+            include_offline_package=body.include_offline_package,
+        )
+    except ValueError as exc:
+        raise_api_error(status.HTTP_400_BAD_REQUEST, "unsupported_export_format", str(exc))
+    except Exception as exc:  # noqa: BLE001
+        logger.info(
+            "EXPORT_JOB_CACHE_CHECK_FAILED projectId=%s jobId=%s format=%s error=%s",
+            project_id,
+            job.job_id,
+            normalized_format,
+            exc,
+        )
+        cached_path = None
+
+    with _EXPORT_JOB_LOCK:
+        _EXPORT_JOBS[job.job_id] = job
+        if cached_path is not None:
+            _mark_export_job_ready(job, cached_path)
+            response_payload = _export_job_response(job)
+        else:
+            response_payload = _export_job_response(job)
+            _EXPORT_JOB_EXECUTOR.submit(_run_export_job, job.job_id, settings)
+    logger.info(
+        "EXPORT_JOB_STATUS projectId=%s jobId=%s status=%s format=%s",
+        project_id,
+        job.job_id,
+        job.status,
+        normalized_format,
+    )
+    return response_payload
+
+
+@router.get("/{project_id}/exports/jobs/{job_id}")
+def get_temporal_results_export_job(project_id: str, job_id: str) -> dict[str, Any]:
+    job = _get_export_job_or_404(project_id, job_id)
+    logger.info(
+        "EXPORT_JOB_STATUS projectId=%s jobId=%s status=%s format=%s bytes=%s",
+        project_id,
+        job_id,
+        job.status,
+        job.format,
+        job.file_size_bytes,
+    )
+    return _export_job_response(job)
+
+
+@router.get("/{project_id}/exports/jobs/{job_id}/download")
+def download_temporal_results_export_job(project_id: str, job_id: str, token: str = Query(min_length=1)) -> FileResponse:
+    job = _get_export_job_or_404(project_id, job_id)
+    if job.status != "succeeded" or job.path is None:
+        raise_api_error(status.HTTP_409_CONFLICT, "export_job_not_ready", "Export job is not ready for download.")
+    payload = _decode_export_download_token(token)
+    if (
+        payload.get("project_id") != project_id
+        or payload.get("job_id") != job_id
+        or payload.get("format") != job.format
+        or payload.get("cache_key") != job.cache_key
+        or payload.get("path_sha256") != _path_digest(job.path)
+    ):
+        raise_api_error(status.HTTP_403_FORBIDDEN, "invalid_export_token", "Export download token does not match this job.")
+    logger.info(
+        "EXPORT_DIRECT_DOWNLOAD_READY projectId=%s jobId=%s format=%s path=%s bytes=%s",
+        project_id,
+        job_id,
+        job.format,
+        job.path,
+        job.file_size_bytes,
+    )
+    response = _results_export_file_response(project_id, job.format, job.path)
+    logger.info(
+        "EXPORT_DIRECT_DOWNLOAD_SENT projectId=%s jobId=%s format=%s path=%s bytes=%s",
+        project_id,
+        job_id,
+        job.format,
+        job.path,
+        job.file_size_bytes,
+    )
+    return response
 
 
 @router.post("/{project_id}/milestones/{release_identifier}/override")

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { downloadFileFromRequest, filenameFromContentDisposition } from "./download.ts";
+import { downloadFileFromUrl, filenameFromContentDisposition, triggerBrowserDownload } from "./download.ts";
 
 type AnchorStub = {
   href: string;
@@ -12,6 +12,7 @@ type AnchorStub = {
 
 function installDownloadDom() {
   const clickedDownloads: string[] = [];
+  const clickedHrefs: string[] = [];
   const originalDocument = globalThis.document;
   const originalWindow = globalThis.window;
   const originalCreateObjectURL = URL.createObjectURL;
@@ -27,6 +28,7 @@ function installDownloadDom() {
         download: "",
         click: () => {
           clickedDownloads.push(anchor.download);
+          clickedHrefs.push(anchor.href);
         },
         remove: () => undefined,
       };
@@ -41,6 +43,7 @@ function installDownloadDom() {
 
   return {
     clickedDownloads,
+    clickedHrefs,
     restore: () => {
       (globalThis as typeof globalThis & { document: unknown }).document = originalDocument;
       (globalThis as typeof globalThis & { window: unknown }).window = originalWindow;
@@ -59,77 +62,42 @@ test("filenameFromContentDisposition handles encoded and quoted filenames", () =
   assert.equal(filenameFromContentDisposition(null), null);
 });
 
-test("download request reads successful binary responses as blobs, not JSON", async () => {
+test("triggerBrowserDownload uses direct href without object URL or blob fetch", () => {
   const dom = installDownloadDom();
-  const originalFetch = globalThis.fetch;
-  let blobCalled = false;
-  let jsonCalled = false;
-  const response = new Response(new Blob(["zip-bytes"]), {
-    status: 200,
-    headers: {
-      "Content-Disposition": "attachment; filename*=UTF-8''resultats_temporal.zip",
-      "Content-Type": "application/zip",
-    },
-  });
-  const originalBlob = response.blob.bind(response);
-  response.blob = async () => {
-    blobCalled = true;
-    return originalBlob();
+  const originalCreateObjectURL = URL.createObjectURL;
+  let objectUrlCalled = false;
+  URL.createObjectURL = () => {
+    objectUrlCalled = true;
+    return "blob:unexpected";
   };
-  response.json = async () => {
-    jsonCalled = true;
-    return {};
-  };
-  globalThis.fetch = async () => response;
 
   try {
-    await downloadFileFromRequest("/api/export", "fallback.zip", { format: "shapefile" });
-    assert.equal(blobCalled, true);
-    assert.equal(jsonCalled, false);
-    assert.deepEqual(dom.clickedDownloads, ["resultats_temporal.zip"]);
+    triggerBrowserDownload("/api/temporal-projects/demo/exports/jobs/job/download?token=signed", "resultats.zip");
+    assert.equal(objectUrlCalled, false);
+    assert.deepEqual(dom.clickedDownloads, ["resultats.zip"]);
+    assert.deepEqual(dom.clickedHrefs, ["/api/temporal-projects/demo/exports/jobs/job/download?token=signed"]);
   } finally {
-    globalThis.fetch = originalFetch;
+    URL.createObjectURL = originalCreateObjectURL;
     dom.restore();
   }
 });
 
-test("download request preserves backend JSON errors for non-2xx responses", async () => {
+test("downloadFileFromUrl triggers direct browser download without fetch", async () => {
+  const dom = installDownloadDom();
   const originalFetch = globalThis.fetch;
-  let jsonCalled = false;
-  const response = new Response(JSON.stringify({ detail: { message: "Zone export vide." } }), {
-    status: 400,
-    headers: { "Content-Type": "application/json" },
-  });
-  const originalJson = response.json.bind(response);
-  response.json = async () => {
-    jsonCalled = true;
-    return originalJson();
-  };
-  globalThis.fetch = async () => response;
-
-  try {
-    await assert.rejects(
-      () => downloadFileFromRequest("/api/export", "fallback.zip", { format: "shapefile" }),
-      /Zone export vide/,
-    );
-    assert.equal(jsonCalled, true);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
-test("download request distinguishes network failure from backend validation failure", async () => {
-  const originalFetch = globalThis.fetch;
+  let fetchCalled = false;
   globalThis.fetch = async () => {
-    throw new TypeError("Failed to fetch");
+    fetchCalled = true;
+    return new Response();
   };
 
   try {
-    await assert.rejects(
-      () => downloadFileFromRequest("/api/export", "fallback.zip", { format: "shapefile" }),
-      /connexion au backend, proxy ou autorisations CORS/,
-    );
+    await downloadFileFromUrl("/api/files?path=resultats.zip", "resultats.zip");
+    assert.equal(fetchCalled, false);
+    assert.deepEqual(dom.clickedDownloads, ["resultats.zip"]);
+    assert.deepEqual(dom.clickedHrefs, ["/api/files?path=resultats.zip"]);
   } finally {
     globalThis.fetch = originalFetch;
+    dom.restore();
   }
 });
