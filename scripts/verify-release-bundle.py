@@ -17,6 +17,7 @@ REQUIRED = {
 }
 FORBIDDEN_PARTS = {
     ".git",
+    ".DS_Store",
     ".venv",
     "__pycache__",
     "node_modules",

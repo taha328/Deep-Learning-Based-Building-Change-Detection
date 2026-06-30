@@ -58,6 +58,8 @@ cp "$DEPLOY_DIR/.env.example" "$APP_ROOT/.env.example"
 cp -R "$DEPLOY_DIR/scripts" "$APP_ROOT/scripts"
 cp "$CHECKPOINT_PATH" "$APP_ROOT/models/bandon/$CHECKPOINT_NAME"
 
+find "$APP_ROOT" -name '.DS_Store' -type f -delete
+
 if [ -n "$MAPBOX_API_KEY" ]; then
   python3 - "$APP_ROOT/.env" "$MAPBOX_API_KEY" <<'PY'
 from pathlib import Path
