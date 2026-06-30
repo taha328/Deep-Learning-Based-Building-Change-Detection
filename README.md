@@ -12,7 +12,7 @@ The packaged Docker release is the recommended install path. It avoids native GI
 irm https://raw.githubusercontent.com/taha328/Deep-Learning-Based-Building-Change-Detection/main/install.ps1 | iex
 ```
 
-Requires Windows 10/11 64-bit, internet access, and Docker Desktop installed and running with Docker Compose.
+Requires Windows 10/11 64-bit, and Docker Desktop installed and running with Docker Compose.
 
 ### macOS / Linux - Recommended Docker Install
 
@@ -34,9 +34,10 @@ The release package includes the application services and authorized model artif
 Native Windows mode is intended for development, debugging, and machines where Docker Desktop is not available. Open PowerShell as Administrator, then run:
 
 ```powershell
+cd $env:USERPROFILE\Desktop
 git clone https://github.com/taha328/Deep-Learning-Based-Building-Change-Detection.git
 cd Deep-Learning-Based-Building-Change-Detection
-powershell -ExecutionPolicy Bypass -File scripts\setup-windows-native.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\setup-windows-native.ps1
 ```
 
 After setup:
